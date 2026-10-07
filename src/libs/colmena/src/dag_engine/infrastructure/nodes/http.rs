@@ -2326,6 +2326,23 @@ mod session_attachment_tests {
             };
             reg.upsert(row).await.unwrap();
         }
+        // `doc-3` of `s1` references an object the HOST owns (same bytes as k1).
+        reg.upsert(UpsertAttachmentInput {
+            agent_session_id: "s1".into(),
+            document_id: "doc-3".into(),
+            provider: ProviderKind::OpenAi,
+            provider_file_id: String::new(),
+            mime_type: "image/jpeg".into(),
+            filename: "a.jpg".into(),
+            size_bytes: Some(2),
+            label: None,
+            description: None,
+            source: AttachmentSource::Path("k1".into()),
+            storage_key: Some("k1".into()),
+            origin: Some(crate::llm::domain::attachments::origin::HOST_STORAGE_REF.into()),
+        })
+        .await
+        .unwrap();
         let mut storage = MockOutputStorageRepository::new();
         storage.expect_read_stream().returning(|k| {
             served(k)?;
@@ -2419,6 +2436,35 @@ mod session_attachment_tests {
         let body = json!({ "file": "$attachment:k1" });
         let out = run(body, Some("s1"), multipart, &untouched_server().await).await;
         assert!(out.contains("attachment not found"), "{out}");
+    }
+
+    /// A JSON body inlines the attachment as a base64 `data:` URI: the whole
+    /// object in memory. For an object the HOST owns that is refused before the
+    /// request is made; the streamed multipart upload of the same row stays allowed.
+    #[tokio::test]
+    async fn a_json_body_never_inlines_a_host_reference_but_multipart_may_stream_it() {
+        let body = json!({ "image_url": "$attachment:doc-3" });
+        let out = run(body, Some("s1"), json!({}), &untouched_server().await).await;
+        assert!(
+            out.contains(crate::llm::domain::large_tabular::refusal_text()),
+            "{out}"
+        );
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let multipart = json!({ "headers": { "Content-Type": "multipart/form-data" } });
+        let out = run(
+            json!({ "file": "$attachment:doc-3" }),
+            Some("s1"),
+            multipart,
+            &server,
+        )
+        .await;
+        assert_eq!(out, "status 200");
     }
 
     /// Graph mode, as when a `trigger_webhook` (or a model's JSON) feeds

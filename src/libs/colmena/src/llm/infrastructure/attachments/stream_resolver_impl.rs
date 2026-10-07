@@ -12,6 +12,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use futures::StreamExt;
 
 use crate::llm::domain::attachments::{
     AttachmentRegistry, AttachmentResolveError, AttachmentStreamResolver,
@@ -44,12 +45,43 @@ impl AttachmentStreamResolverImpl {
     }
 }
 
-#[async_trait]
-impl AttachmentStreamResolver for AttachmentStreamResolverImpl {
-    async fn resolve(
+/// The error for a read of a host-owned object: the document and the file only,
+/// as inert text (adapters put the key, or a local path, in their own text).
+fn host_read_error(document_id: &str, filename: &str) -> crate::storage::domain::StorageError {
+    use crate::llm::domain::large_tabular::inert_text;
+    crate::storage::domain::StorageError::BackendUnavailable(format!(
+        "the stored file could not be read: document_id={}, file={}",
+        inert_text(document_id, 80),
+        inert_text(filename, 80)
+    ))
+}
+
+/// A storage error for a row the HOST owns, without the key: adapters put the key
+/// (and a local one a filesystem path) in their text, and that text reaches the
+/// model. The error names the document and the file only. Other rows keep their
+/// error as it was.
+fn hide_host_key(
+    origin: &Option<String>,
+    error: crate::storage::domain::StorageError,
+    document_id: &str,
+    filename: &str,
+) -> AttachmentResolveError {
+    if origin.as_deref() == Some(crate::llm::domain::attachments::origin::HOST_STORAGE_REF) {
+        AttachmentResolveError::StorageError(host_read_error(document_id, filename))
+    } else {
+        AttachmentResolveError::StorageError(error)
+    }
+}
+
+impl AttachmentStreamResolverImpl {
+    /// The one lookup behind `resolve` and `resolve_for_buffering`. With
+    /// `buffering`, a row the HOST owns is refused before storage is asked: the
+    /// caller would hold the whole object in memory.
+    async fn resolve_row(
         &self,
         agent_session_id: &str,
         document_id: &str,
+        buffering: bool,
     ) -> Result<StoredStream, AttachmentResolveError> {
         // Path 1: document_id lookup in registry.
         if let Some(row) = self
@@ -57,13 +89,29 @@ impl AttachmentStreamResolver for AttachmentStreamResolverImpl {
             .lookup_by_document_id(agent_session_id, document_id)
             .await?
         {
-            let key = row
-                .storage_key
-                .ok_or_else(|| AttachmentResolveError::StorageKeyMissing {
+            if buffering && row.is_host_storage_ref() {
+                return Err(AttachmentResolveError::HostObject);
+            }
+            let key = row.storage_key.clone().ok_or_else(|| {
+                AttachmentResolveError::StorageKeyMissing {
                     document_id: document_id.to_string(),
-                })?;
+                }
+            })?;
 
-            let stream = self.storage.read_stream(&key).await?;
+            let mut stream = self
+                .storage
+                .read_stream(&key)
+                .await
+                .map_err(|e| hide_host_key(&row.origin, e, document_id, &row.filename))?;
+            if row.is_host_storage_ref() {
+                // An error in the middle of the stream carries storage's text too.
+                let (doc, name) = (document_id.to_string(), row.filename.clone());
+                stream.stream = Box::pin(
+                    stream
+                        .stream
+                        .map(move |chunk| chunk.map_err(|_| host_read_error(&doc, &name))),
+                );
+            }
             // Best-effort: touch_last_used failure is non-fatal.
             if let Err(e) = self
                 .registry
@@ -86,6 +134,25 @@ impl AttachmentStreamResolver for AttachmentStreamResolverImpl {
             document_id: document_id.to_string(),
         })
     }
+}
+
+#[async_trait]
+impl AttachmentStreamResolver for AttachmentStreamResolverImpl {
+    async fn resolve(
+        &self,
+        agent_session_id: &str,
+        document_id: &str,
+    ) -> Result<StoredStream, AttachmentResolveError> {
+        self.resolve_row(agent_session_id, document_id, false).await
+    }
+
+    async fn resolve_for_buffering(
+        &self,
+        agent_session_id: &str,
+        document_id: &str,
+    ) -> Result<StoredStream, AttachmentResolveError> {
+        self.resolve_row(agent_session_id, document_id, true).await
+    }
 
     async fn resolve_url(
         &self,
@@ -107,7 +174,11 @@ impl AttachmentStreamResolver for AttachmentStreamResolverImpl {
             .ok_or_else(|| AttachmentResolveError::StorageKeyMissing {
                 document_id: document_id.to_string(),
             })?;
-        let url = self.storage.read_url(&key, ttl_seconds).await?;
+        let url = self
+            .storage
+            .read_url(&key, ttl_seconds)
+            .await
+            .map_err(|e| hide_host_key(&row.origin, e, document_id, &row.filename))?;
         // A URL handed out is a use: the GC (days since the last use) keeps
         // the object well past the URL's life. Best-effort, like `resolve`.
         if url.is_some() {
@@ -301,5 +372,152 @@ mod tests {
                 "{session}/{id}: {err:?}"
             );
         }
+    }
+
+    /// Storage errors put the key (and, for a local adapter, a filesystem path)
+    /// in their text. For a row the HOST owns that text must not reach the model:
+    /// the error names the document and the file only.
+    #[tokio::test]
+    async fn a_host_reference_storage_error_never_carries_the_key() {
+        let reg = SqliteAttachmentRegistry::new("sqlite::memory:")
+            .await
+            .unwrap();
+        let mut input = base_upsert("agent_x", "doc-1", Some("hosts/secret/key.csv".to_string()));
+        input.origin = Some(crate::llm::domain::attachments::origin::HOST_STORAGE_REF.to_string());
+        input.filename = "sales.csv".to_string();
+        reg.upsert(input).await.unwrap();
+
+        let mut storage = MockOutputStorageRepository::new();
+        storage.expect_read_stream().returning(|k| {
+            Err(StorageError::InvalidInput(format!(
+                "storage_key '{k}' not found at /var/data/{k}"
+            )))
+        });
+        storage
+            .expect_read_url()
+            .returning(|k, _| Err(StorageError::BackendUnavailable(format!("cannot sign {k}"))));
+        let resolver = AttachmentStreamResolverImpl::new(Arc::new(reg), Arc::new(storage));
+
+        let stream_err = resolver.resolve("agent_x", "doc-1").await.unwrap_err();
+        let url_err = resolver
+            .resolve_url("agent_x", "doc-1", 60)
+            .await
+            .unwrap_err();
+        for err in [stream_err.to_string(), url_err.to_string()] {
+            assert!(err.contains("doc-1") && err.contains("sales.csv"), "{err}");
+            assert!(
+                !err.contains("secret") && !err.contains("/var/data"),
+                "no key: {err}"
+            );
+        }
+    }
+
+    /// Rows the engine stored keep their error text as before.
+    #[tokio::test]
+    async fn an_engine_stored_row_keeps_its_storage_error() {
+        let reg = SqliteAttachmentRegistry::new("sqlite::memory:")
+            .await
+            .unwrap();
+        reg.upsert(base_upsert("agent_x", "doc-1", Some("sk-1".to_string())))
+            .await
+            .unwrap();
+        let mut storage = MockOutputStorageRepository::new();
+        storage
+            .expect_read_stream()
+            .returning(|k| Err(StorageError::InvalidInput(format!("missing {k}"))));
+        let resolver = AttachmentStreamResolverImpl::new(Arc::new(reg), Arc::new(storage));
+        let err = resolver.resolve("agent_x", "doc-1").await.unwrap_err();
+        assert!(err.to_string().contains("missing sk-1"), "{err}");
+    }
+
+    fn host_row() -> UpsertAttachmentInput {
+        let mut input = base_upsert("agent_x", "doc-1", Some("hosts/secret/key.csv".to_string()));
+        input.origin = Some(crate::llm::domain::attachments::origin::HOST_STORAGE_REF.to_string());
+        input.filename = "sales.csv".to_string();
+        input
+    }
+
+    async fn registry_with(input: UpsertAttachmentInput) -> Arc<dyn AttachmentRegistry> {
+        let reg = SqliteAttachmentRegistry::new("sqlite::memory:")
+            .await
+            .unwrap();
+        reg.upsert(input).await.unwrap();
+        Arc::new(reg)
+    }
+
+    /// A host row is never held whole in memory: refused before storage is asked.
+    #[tokio::test]
+    async fn buffering_a_host_reference_is_refused_without_touching_storage() {
+        // No expectations: any storage call fails the test.
+        let resolver = AttachmentStreamResolverImpl::new(
+            registry_with(host_row()).await,
+            Arc::new(MockOutputStorageRepository::new()),
+        );
+        let err = resolver
+            .resolve_for_buffering("agent_x", "doc-1")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, AttachmentResolveError::HostObject), "{err:?}");
+        assert_eq!(
+            err.to_string(),
+            crate::llm::domain::large_tabular::refusal_text()
+        );
+    }
+
+    /// Every other row, and every streamed use of a host row, behaves as before.
+    #[tokio::test]
+    async fn buffering_any_other_row_and_streaming_a_host_row_are_unchanged() {
+        for (input, via_buffering) in [
+            (base_upsert("agent_x", "doc-1", Some("sk-1".into())), true),
+            (host_row(), false),
+        ] {
+            let mut storage = MockOutputStorageRepository::new();
+            storage
+                .expect_read_stream()
+                .times(1)
+                .returning(|_| Ok(make_stream(b"hello", "text/csv", "a.csv")));
+            let resolver =
+                AttachmentStreamResolverImpl::new(registry_with(input).await, Arc::new(storage));
+            let got = if via_buffering {
+                resolver.resolve_for_buffering("agent_x", "doc-1").await
+            } else {
+                resolver.resolve("agent_x", "doc-1").await
+            };
+            assert_eq!(got.unwrap().size_bytes, 5);
+        }
+    }
+
+    /// An error in the middle of the stream also carries storage's text; for a
+    /// host row it names the document and the file only.
+    #[tokio::test]
+    async fn a_mid_stream_error_of_a_host_reference_hides_the_key() {
+        use futures::StreamExt;
+        let mut storage = MockOutputStorageRepository::new();
+        storage.expect_read_stream().returning(|k| {
+            let k = k.to_string();
+            let s: Pin<Box<dyn Stream<Item = Result<Bytes, StorageError>> + Send>> =
+                Box::pin(stream::iter(vec![
+                    Ok(Bytes::from_static(b"ok")),
+                    Err(StorageError::InvalidInput(format!(
+                        "lost {k} at /var/data/{k}"
+                    ))),
+                ]));
+            Ok(StoredStream {
+                stream: s,
+                size_bytes: 10,
+                mime_type: "text/csv".into(),
+                filename: "x".into(),
+            })
+        });
+        let resolver =
+            AttachmentStreamResolverImpl::new(registry_with(host_row()).await, Arc::new(storage));
+        let mut got = resolver.resolve("agent_x", "doc-1").await.unwrap().stream;
+        assert!(got.next().await.unwrap().is_ok());
+        let err = got.next().await.unwrap().unwrap_err().to_string();
+        assert!(err.contains("doc-1") && err.contains("sales.csv"), "{err}");
+        assert!(
+            !err.contains("secret") && !err.contains("/var/data"),
+            "{err}"
+        );
     }
 }
