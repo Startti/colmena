@@ -308,6 +308,12 @@ result or a refusal. Nothing above the trait knows how the tables get there.
   be measured here, so `RemoteExecutor` implements the trait by refusing with `Unavailable(Unsupported)` rather than guessing
   at a wire. The in-process executor has no run mounts and does not implement the trait.
 
+`python_exec::mounted_executor()` gives the process executor as a `MountedExecutor` (an additive accessor: `run`, the
+dispatcher's routing and every existing signature are unchanged). The subprocess executor answers with itself, the remote one
+with the refusing implementation above, the in-process one with `None`; a misconfigured process also gives `None`, and `run`
+keeps reporting the misconfiguration. It reads the dispatcher the process already built: no executor, template or setting is
+added, and with `COLMENA_LARGE_TABULAR` off nothing calls it.
+
 The proofs are in `tests/tabular_run_mounts.rs` (Linux, root and `CAP_SYS_ADMIN`, enabled with
 `COLMENA_PYEXEC_JAIL_TESTS=1` like the other jail suites; each test prints a skip line otherwise): the code lists and reads
 the staged parts at `/data` and cannot write there; pandas reads a staged Parquet part in `restricted` mode with pyarrow

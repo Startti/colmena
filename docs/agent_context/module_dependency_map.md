@@ -961,7 +961,7 @@
 #### `src/libs/colmena/src/dag_engine/infrastructure/python_exec/mod.rs`
 - Module: `dag_engine::infrastructure::python_exec`
 - **Used by (1)**: `src/libs/colmena/src/dag_engine/infrastructure/nodes/python_node.rs`
-- Depends on (2): `dag_engine::domain::python_executor`, `dag_engine::log_policy`
+- Depends on (3): `dag_engine::domain::python_executor`, `dag_engine::log_policy`, `tabular_run::mounted`
 
 #### `src/libs/colmena/src/dag_engine/infrastructure/python_exec/protocol.rs`
 - Module: `dag_engine::infrastructure::python_exec::protocol`
@@ -2333,7 +2333,7 @@
 
 #### `src/libs/colmena/src/tabular_run/mounted.rs`
 - Module: `tabular_run::mounted`
-- **Used by (1)**: `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm_synthetic_tools/attachment_run_python/large.rs`
+- **Used by (2)**: `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm_synthetic_tools/attachment_run_python/large.rs`, `src/libs/colmena/src/dag_engine/infrastructure/python_exec/mod.rs`
 - Depends on (2): `dag_engine::domain::python_executor`, `storage::domain`
 
 #### `src/libs/colmena/src/tabular_run/prelude.rs`

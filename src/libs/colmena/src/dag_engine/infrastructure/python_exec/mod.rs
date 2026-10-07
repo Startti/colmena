@@ -42,6 +42,7 @@ use crate::dag_engine::domain::python_executor::{
     ExecutorKind, PythonExecutor, PythonRunError, PythonRunRequest, PythonRunResult,
 };
 use crate::dag_engine::log_policy::T_PYTHON_EXEC;
+use crate::tabular_run::mounted::MountedExecutor;
 use config::{ExecutorConfig, ExecutorConfigError, ModesPolicy};
 use once_cell::sync::OnceCell;
 use std::sync::Arc;
@@ -111,6 +112,15 @@ pub async fn wait_until_ready() -> Result<(), String> {
     }
 }
 
+/// The process executor as a [`MountedExecutor`], for a call over prepared large
+/// tables (dark behind `COLMENA_LARGE_TABULAR`): the subprocess executor runs
+/// it, the remote one refuses with a typed reason (its transport is not built),
+/// the in-process one has no run mounts and gives `None`. A misconfigured
+/// process gives `None` too: [`run`] reports the misconfiguration.
+pub fn mounted_executor() -> Option<Arc<dyn MountedExecutor>> {
+    global().as_ref().ok().and_then(|d| d.mounted.clone())
+}
+
 fn misconfigured(e: &ExecutorConfigError) -> String {
     format!("PythonExecutorError: the Python executor is misconfigured: {e}")
 }
@@ -153,6 +163,8 @@ pub(crate) struct Dispatcher {
     max_timeout: Duration,
     isolated: Arc<dyn PythonExecutor>,
     inprocess: Arc<dyn PythonExecutor>,
+    /// The isolated executor, when its kind can run a call over prepared tables.
+    mounted: Option<Arc<dyn MountedExecutor>>,
 }
 
 impl Dispatcher {
@@ -167,11 +179,18 @@ impl Dispatcher {
             max_timeout,
             isolated,
             inprocess,
+            mounted: None,
         }
+    }
+
+    pub(crate) fn with_mounted(mut self, mounted: Option<Arc<dyn MountedExecutor>>) -> Self {
+        self.mounted = mounted;
+        self
     }
 
     pub(crate) fn build(cfg: &ExecutorConfig) -> Result<Self, ExecutorConfigError> {
         let inprocess: Arc<dyn PythonExecutor> = Arc::new(inprocess::InProcessExecutor);
+        let mut mounted: Option<Arc<dyn MountedExecutor>> = None;
         let isolated: Arc<dyn PythonExecutor> = match cfg.kind {
             ExecutorKind::InProcess => inprocess.clone(),
             #[cfg(target_os = "linux")]
@@ -189,6 +208,7 @@ impl Dispatcher {
                         let _ = warm.warm().await;
                     });
                 }
+                mounted = Some(exec.clone());
                 exec
             }
             #[cfg(not(target_os = "linux"))]
@@ -203,10 +223,12 @@ impl Dispatcher {
                     let (kind, url) = (config::ENV_EXECUTOR, config::ENV_URL);
                     ExecutorConfigError(format!("{kind}=remote needs {url}"))
                 })?;
-                Arc::new(remote::RemoteExecutor::new(remote, cfg.max_timeout)?)
+                let remote = Arc::new(remote::RemoteExecutor::new(remote, cfg.max_timeout)?);
+                mounted = Some(remote.clone());
+                remote
             }
         };
-        Ok(Self::new(cfg.modes, cfg.max_timeout, isolated, inprocess))
+        Ok(Self::new(cfg.modes, cfg.max_timeout, isolated, inprocess).with_mounted(mounted))
     }
 
     /// See [`wait_until_ready`].
@@ -428,6 +450,27 @@ mod tests {
             let err = built.err().expect("must refuse");
             assert!(err.0.contains("subprocess requires Linux"), "{err}");
         }
+    }
+
+    /// Which executor kinds can run a call over prepared tables: the remote one
+    /// answers (by refusing, typed), the in-process one has no run mounts.
+    #[test]
+    fn only_the_isolated_kinds_offer_run_mounts() {
+        let build = |kind: &str| {
+            let cfg = config::ExecutorConfig::from_lookup(|k| match k {
+                config::ENV_EXECUTOR => Some(kind.to_string()),
+                config::ENV_URL => Some("http://127.0.0.1:9".to_string()),
+                config::ENV_AUTH => Some("none".to_string()),
+                _ => None,
+            });
+            Dispatcher::build(&cfg.unwrap()).unwrap()
+        };
+        assert!(build("inprocess").mounted.is_none());
+        assert!(build("remote").mounted.is_some());
+        // `Dispatcher::new` (every test above) has none until given one.
+        let (iso, local) = pair();
+        let d = Dispatcher::new(ModesPolicy::All, Duration::from_secs(1), iso, local);
+        assert!(d.mounted.is_none());
     }
 
     #[tokio::test]
