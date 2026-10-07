@@ -1345,6 +1345,22 @@ sheets (the peak is one sheet's), a sheet read again after a late conflict, and 
 columns, refused after its sample (its table list cannot fit the registry row) at 4 MiB. Tests
 that measure share global counters, so they take one lock and run one at a time.
 
+**Last review fixes to the readers.**
+
+- The manifest size is checked after every sheet, **skipped ones too** (a run of skipped sheets
+  after the last table used to overflow the 128 KiB file only at the manifest put, as `internal`).
+  The names of all the sheets with a value, tables and skipped, are made unique together (ignoring
+  case), so a skipped sheet never shares a name with a table or with another skipped sheet;
+  `Converted::table_names` carries the tables' final names and the driver uses them.
+- The job's cancel token is given to the package **before its first read**, so the relationships,
+  the workbook, the shared strings (up to 128 MiB) and the styles (up to 64 MiB) are inside the
+  budget too.
+- In the shared strings, an empty `si` inside a `si` (it would shift every later index), a `t`
+  inside a `t` and a phonetic run inside a phonetic run (it would leak the rest of its text into
+  the string) are refused.
+- A sheet whose XML ends inside `row`, `c`, `sheetData` or `worksheet` is truncated and refused
+  (`BadCell`), not accepted as complete.
+
 **No empty list to the adapter, anywhere.** A host adapter may read an empty key list in
 `delete_derived` as "delete everything under the prefix", so no path sends one: `fail` (nothing
 written), `source_gone`, `settle_lost` and `delete_best_effort` skip the call when they hold no key,

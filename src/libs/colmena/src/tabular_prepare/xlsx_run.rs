@@ -43,8 +43,15 @@ pub struct Book {
     pub cells: AtomicU64,
 }
 
-pub fn open_book(spooled: Spooled, limits: &XlsxLimits) -> Result<Book, XlsxError> {
+pub fn open_book(
+    spooled: Spooled,
+    limits: &XlsxLimits,
+    cancel: &CancellationToken,
+) -> Result<Book, XlsxError> {
     let mut pkg = Package::open_with(spooled, limits)?;
+    // Before the first read: the relationships, the workbook, the shared strings (up to
+    // 128 MiB) and the styles (up to 64 MiB) are part of the job's budget too.
+    pkg.set_cancel(cancel.clone());
     let workbook = read_workbook(&mut pkg)?;
     let strings = match &workbook.shared_strings {
         Some(part) => read_shared_strings(&mut pkg, part)?,
@@ -343,7 +350,7 @@ mod tests {
             .await
             .unwrap();
         Arc::new(Mutex::new(
-            open_book(spooled, &XlsxLimits::default()).unwrap(),
+            open_book(spooled, &XlsxLimits::default(), &CancellationToken::new()).unwrap(),
         ))
     }
 
@@ -614,5 +621,23 @@ mod tests {
         use crate::tabular_prepare::xlsx_sheet::Cell;
         let out_of_order = vec![(5, Cell::Number(1.0)), (0, Cell::Number(2.0))];
         assert_eq!(header_of(&out_of_order).len(), 6);
+    }
+
+    #[tokio::test]
+    async fn the_reads_made_while_opening_the_book_see_the_jobs_cancel() {
+        // 5,000 shared strings are tens of thousands of events: the cancel token, set
+        // before the first read, is looked at inside the shared-strings read.
+        let strings = vec!["x"; 5000];
+        let bytes = Wb::new().sheet("A", "").shared(&strings).build();
+        let dir = tempfile::tempdir().unwrap();
+        let stream = Box::pin(futures::stream::iter(vec![Ok(Bytes::from(bytes))]));
+        let read = AtomicU64::new(0);
+        let cancel = CancellationToken::new();
+        let spooled = spool_stream(dir.path(), stream, None, MAX_XLSX_BYTES, &cancel, &read)
+            .await
+            .unwrap();
+        cancel.cancel();
+        let r = open_book(spooled, &XlsxLimits::default(), &cancel);
+        assert_eq!(r.err(), Some(XlsxError::Cancelled));
     }
 }

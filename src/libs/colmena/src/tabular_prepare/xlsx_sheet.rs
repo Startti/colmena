@@ -368,6 +368,7 @@ pub(crate) fn read_sheet_with(
     // inside an open one (which would reset the row's counters while its cells are
     // still held).
     let mut at_level = Level::Outside;
+    let mut in_worksheet = false;
     let wrong = || XlsxError::Invalid(Invalid::BadCell);
     let (mut in_v, mut in_is, mut in_t, mut in_phonetic) = (false, false, false, false);
     let mut reader = pkg.xml(part, MAX_SHEET_PART_BYTES)?;
@@ -375,8 +376,20 @@ pub(crate) fn read_sheet_with(
     loop {
         match next_event(&mut reader, &mut buf)? {
             // A part that ends inside a row or a cell is truncated.
-            Event::Eof if at_level == Level::Row || at_level == Level::Cell => return Err(wrong()),
+            // A sheet whose XML is not closed (inside a row, a cell, `sheetData` or
+            // `worksheet`) is truncated, not complete.
+            Event::Eof if at_level != Level::Outside || in_worksheet => return Err(wrong()),
             Event::Eof => break,
+            Event::Start(e) if e.local_name().as_ref() == b"worksheet" => {
+                if in_worksheet {
+                    return Err(wrong());
+                }
+                in_worksheet = true;
+            }
+            Event::Empty(e) if e.local_name().as_ref() == b"worksheet" && in_worksheet => {
+                return Err(wrong());
+            }
+            Event::End(e) if e.local_name().as_ref() == b"worksheet" => in_worksheet = false,
             Event::Start(e) if e.local_name().as_ref() == b"sheetData" => {
                 if at_level != Level::Outside {
                     return Err(wrong());
@@ -1051,5 +1064,23 @@ mod tests {
         // A real fraction is a double, as the file stored it; 16 digits fit a double.
         assert!(matches!(c[3], Cell::Number(_)));
         assert_eq!(c[4], Cell::Number(1_234_567_890_123_456.0));
+    }
+
+    #[tokio::test]
+    async fn a_sheet_whose_xml_is_not_closed_is_truncated_not_complete() {
+        let closed = "<worksheet><sheetData><row r=\"1\"><c r=\"A1\"><v>1</v></c></row></sheetData></worksheet>";
+        assert!(read(Wb::new().sheet("A", closed).build()).await.is_ok());
+        for unclosed in [
+            "<worksheet><sheetData><row r=\"1\"><c r=\"A1\"><v>1</v></c></row>",
+            "<worksheet><sheetData><row r=\"1\"><c r=\"A1\"><v>1</v></c></row></sheetData>",
+            "<worksheet><sheetData/>",
+            "<worksheet><worksheet/></worksheet>",
+        ] {
+            let r = read(Wb::new().sheet("A", unclosed).build()).await;
+            assert!(
+                matches!(r, Err(XlsxError::Invalid(Invalid::BadCell | Invalid::Xml))),
+                "{unclosed}: {r:?}"
+            );
+        }
     }
 }

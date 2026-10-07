@@ -53,8 +53,44 @@ pub trait XlsxSource: Send + Sync {
 #[derive(Debug)]
 pub struct Converted {
     pub tables: Vec<SheetTable>,
-    /// Sheets skipped (see [`SKIPPED_HEADER_ROW`]); their names cleaned.
+    /// The manifest's name of each table: clean, and unique among **all** the sheets
+    /// with a value, skipped ones included, ignoring case.
+    pub table_names: Vec<String>,
+    /// Sheets skipped (see [`SKIPPED_HEADER_ROW`]), under names unique among the tables'.
     pub skipped: Vec<SkippedSheet>,
+}
+
+/// The sheets with a value, in workbook order, each a table or skipped. Their manifest
+/// names are made unique together, so a skipped sheet never shares a name with a table
+/// or with another skipped sheet.
+#[derive(Default)]
+struct Listing {
+    raw: Vec<String>,
+    skipped: Vec<bool>,
+}
+
+impl Listing {
+    fn push(&mut self, raw: &str, skipped: bool) {
+        self.raw.push(raw.to_string());
+        self.skipped.push(skipped);
+    }
+
+    /// The names of the tables, and the skipped sheets under theirs.
+    fn names(&self) -> (Vec<String>, Vec<SkippedSheet>) {
+        let raw: Vec<&str> = self.raw.iter().map(String::as_str).collect();
+        let (mut tables, mut skipped) = (Vec::new(), Vec::new());
+        for (name, is_skipped) in unique_table_names(&raw).into_iter().zip(&self.skipped) {
+            if *is_skipped {
+                skipped.push(SkippedSheet {
+                    sheet: name,
+                    reason: SKIPPED_HEADER_ROW.to_string(),
+                });
+            } else {
+                tables.push(name);
+            }
+        }
+        (tables, skipped)
+    }
 }
 
 impl std::ops::Deref for Converted {
@@ -85,9 +121,8 @@ pub(crate) struct Limits {
 /// row (64 KiB), then the whole manifest file (128 KiB), which also carries a conversion
 /// report per table and the skipped sheets. Names are the unique ones the manifest will
 /// use. Checked after every sheet, so 256 sheets fail at the sheet that overflows.
-fn manifest_fits(tables: &[SheetTable], skipped: &[SkippedSheet]) -> Result<(), Cap> {
-    let raw: Vec<&str> = tables.iter().map(|t| t.sheet.as_str()).collect();
-    let names = unique_table_names(&raw);
+fn manifest_fits(tables: &[SheetTable], listing: &Listing) -> Result<(), Cap> {
+    let (names, skipped) = listing.names();
     let infos: Vec<TableInfo> = tables
         .iter()
         .zip(&names)
@@ -105,7 +140,7 @@ fn manifest_fits(tables: &[SheetTable], skipped: &[SkippedSheet]) -> Result<(), 
         .collect();
     let manifest = Manifest::new(infos)
         .with_conversion(reports)
-        .with_skipped(skipped.to_vec());
+        .with_skipped(skipped);
     if manifest.tables_json().is_err() {
         return Err(Cap::TableList);
     }
@@ -147,16 +182,16 @@ pub(crate) async fn convert_xlsx_limits(
     let panicked = |_| fail(ConvertError::ReaderPanicked.into());
     let spooled = source.spool(&cancel).await.map_err(|e| fail(e.into()))?;
     let xlsx = limits.xlsx;
-    let mut book = tokio::task::spawn_blocking(move || open_book(spooled, &xlsx))
+    let token = cancel.clone();
+    let book = tokio::task::spawn_blocking(move || open_book(spooled, &xlsx, &token))
         .await
         .map_err(panicked)?
         .map_err(|e| fail(e.into()))?;
     let sheets = book.sheets.clone();
-    book.pkg.set_cancel(cancel.clone());
     let book = Arc::new(Mutex::new(book));
 
     let mut tables: Vec<SheetTable> = Vec::new();
-    let mut skipped: Vec<SkippedSheet> = Vec::new();
+    let mut listing = Listing::default();
     for sheet in &sheets {
         // The cell limit is the job's: the book counts every cell any read of it
         // reads, so sampling, runs, restarts and skipped sheets all count.
@@ -175,11 +210,12 @@ pub(crate) async fn convert_xlsx_limits(
             // A header narrower than a row of the sample: this sheet has no names
             // for its columns, but the others still do. Skipped, and said so.
             Err(XlsxError::Invalid(Invalid::BeyondHeader)) => {
-                let name = unique_table_names(&[sheet.name.as_str()]).remove(0);
-                skipped.push(SkippedSheet {
-                    sheet: name,
-                    reason: SKIPPED_HEADER_ROW.to_string(),
-                });
+                listing.push(&sheet.name, true);
+                // Skipped entries count against the manifest too, and a sheet of
+                // skipped ones after the last table must not overflow it late.
+                if let Err(cap) = manifest_fits(&tables, &listing) {
+                    return Err(fail(XlsxError::TooLarge(cap).into()));
+                }
                 continue;
             }
             Err(e) => return Err(fail(e.into())),
@@ -201,6 +237,7 @@ pub(crate) async fn convert_xlsx_limits(
             };
             return Err(fail(ConvertError::from(e).into()));
         }
+        listing.push(&sheet.name, false);
         let table_idx = tables.len();
         let mut text_columns: BTreeSet<usize> = BTreeSet::new();
         let (mut restarts, mut all_strings) = (0usize, false);
@@ -283,20 +320,25 @@ pub(crate) async fn convert_xlsx_limits(
         // The table lists of all the sheets share one registry row, and the manifest
         // (tables, conversion reports, skipped sheets) one file: say so now, with their
         // own sentences, not after the last sheet.
-        if let Err(cap) = manifest_fits(&tables, &skipped) {
+        if let Err(cap) = manifest_fits(&tables, &listing) {
             return Err(fail(XlsxError::TooLarge(cap).into()));
         }
     }
     if tables.is_empty() {
         // Every sheet with a value was skipped: say why the first one was.
-        let why = if skipped.is_empty() {
+        let why = if !listing.skipped.contains(&true) {
             Invalid::NoData
         } else {
             Invalid::BeyondHeader
         };
         return Err(fail(XlsxError::Invalid(why).into()));
     }
-    Ok(Converted { tables, skipped })
+    let (table_names, skipped) = listing.names();
+    Ok(Converted {
+        tables,
+        table_names,
+        skipped,
+    })
 }
 
 #[cfg(test)]
@@ -875,20 +917,37 @@ mod tests {
         };
         let tables: Vec<SheetTable> = (0..40).map(sheet).collect();
         // The table list is tiny: 40 tables do not come near 64 KiB.
-        assert_eq!(manifest_fits(&tables[..20], &[]), Ok(()));
+        let listing = |n: usize, skipped: usize| {
+            let mut l = Listing::default();
+            for t in &tables[..n] {
+                l.push(&t.sheet, false);
+            }
+            for i in 0..skipped {
+                l.push(&format!("{i:0>60}"), true);
+            }
+            l
+        };
+        assert_eq!(manifest_fits(&tables[..20], &listing(20, 0)), Ok(()));
         // The reports are what overflows the 128 KiB file, between 20 and 40 sheets.
-        assert_eq!(manifest_fits(&tables, &[]), Err(Cap::Manifest));
+        assert_eq!(manifest_fits(&tables, &listing(40, 0)), Err(Cap::Manifest));
         let first_bad = (21..=40)
-            .find(|n| manifest_fits(&tables[..*n], &[]).is_err())
+            .find(|n| manifest_fits(&tables[..*n], &listing(*n, 0)).is_err())
             .unwrap();
-        assert!(manifest_fits(&tables[..first_bad - 1], &[]).is_ok());
-        // Skipped sheets count too.
-        let skipped: Vec<SkippedSheet> = (0..256)
-            .map(|i| SkippedSheet {
-                sheet: format!("{i:0>60}"),
-                reason: SKIPPED_HEADER_ROW.into(),
-            })
-            .collect();
-        assert!(manifest_fits(&tables[..first_bad - 1], &skipped).is_err());
+        assert!(manifest_fits(&tables[..first_bad - 1], &listing(first_bad - 1, 0)).is_ok());
+        // Skipped sheets count too, and a sheet that only adds skipped entries can be the
+        // one that overflows.
+        assert!(manifest_fits(&tables[..first_bad - 1], &listing(first_bad - 1, 256)).is_err());
+        let mut names = Listing::default();
+        for raw in ["Data", "data", "DATA", "Notes"] {
+            names.push(raw, raw == "data" || raw == "Notes");
+        }
+        let (tables_named, skipped) = names.names();
+        assert_eq!(tables_named, ["Data", "DATA_3"]);
+        let skipped: Vec<_> = skipped.iter().map(|s| s.sheet.as_str()).collect();
+        assert_eq!(
+            skipped,
+            ["data_2", "Notes"],
+            "unique against the tables and each other"
+        );
     }
 }

@@ -142,10 +142,19 @@ pub(crate) fn read_shared_strings_with(
                 // A `si` inside a `si` would add strings the table never counted.
                 b"si" if in_si => return Err(XlsxError::Invalid(Invalid::Xml)),
                 b"si" => in_si = true,
+                b"t" if in_t => return Err(XlsxError::Invalid(Invalid::Xml)),
                 b"t" if in_si => in_t = true,
+                // A phonetic run inside a phonetic run would end the first early and leak
+                // the rest of its text into the string.
+                b"rPh" if in_phonetic => return Err(XlsxError::Invalid(Invalid::Xml)),
                 b"rPh" => in_phonetic = true,
                 _ => {}
             },
+            // An empty string is a string (it has an index); inside a `si` it would add one
+            // the table did not mean to and shift every later index.
+            Event::Empty(e) if e.local_name().as_ref() == b"si" && in_si => {
+                return Err(XlsxError::Invalid(Invalid::Xml));
+            }
             Event::Empty(e) if e.local_name().as_ref() == b"si" => push_end(&mut table, max_count)?,
             Event::End(e) => match e.local_name().as_ref() {
                 b"si" => {
@@ -335,5 +344,25 @@ mod tests {
         // A `si` inside a `si` is refused.
         let mut pkg = package_with("<sst><si><t>a</t><si><t>b</t></si></si></sst>").await;
         assert!(read_shared_strings(&mut pkg, "xl/sharedStrings.xml").is_err());
+    }
+
+    #[tokio::test]
+    async fn an_empty_si_or_nested_runs_inside_a_string_are_refused_not_shifted_or_leaked() {
+        for xml in [
+            "<sst><si><t>a</t><si/></si><si><t>b</t></si></sst>",
+            "<sst><si><t>kanji</t><rPh><rPh><t>x</t></rPh><t>leak</t></rPh></si></sst>",
+            "<sst><si><t>a<t>b</t>c</t></si></sst>",
+        ] {
+            let mut pkg = package_with(xml).await;
+            let r = read_shared_strings(&mut pkg, "xl/sharedStrings.xml");
+            assert!(
+                matches!(r, Err(XlsxError::Invalid(Invalid::Xml))),
+                "{xml}: {r:?}"
+            );
+        }
+        // A top-level empty `si` is a string like any other.
+        let mut pkg = package_with("<sst><si/><si><t>b</t></si></sst>").await;
+        let t = read_shared_strings(&mut pkg, "xl/sharedStrings.xml").unwrap();
+        assert_eq!((t.get(0), t.get(1)), (Some(""), Some("b")));
     }
 }
