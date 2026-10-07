@@ -260,7 +260,9 @@ in place and logged. It cannot tell a leftover from a call in flight, so the sta
 to ONE executor, and that is enforced: `new_for_serving` first takes an exclusive `flock` on `.executor.lock` inside the root
 (`staging::StagingLock`, opened `O_NOFOLLOW`, held for the executor's life and released by a crash), BEFORE the sweep; a
 second process on the same root gets `PythonExecutorError: the staging root is already owned by another executor` as its
-startup error and sweeps nothing. If the staging volume is persistent, the prepared data of a call that was killed stays on it until the
+startup error and sweeps nothing. A lock that cannot be taken for any OTHER reason (ENOLCK, ENOSYS, EOPNOTSUPP on some
+network or FUSE volumes) does not stop the executor: nothing is swept, mounts are disabled with the reason
+`staging_lock_unavailable` (logged; `stage_call` and calls asking for mounts get a typed error) and plain calls are served. If the staging volume is persistent, the prepared data of a call that was killed stays on it until the
 next start of an executor with that root; a tmpfs staging volume vanishes with the instance.
 
 The seccomp denylist of EVERY jail, staged or not, includes the new mount API, `open_tree`, `move_mount`, `fsopen`,
@@ -274,10 +276,13 @@ the call). On x86_64 the x32 guard refuses every number of 512 or more under the
 512 to 547, includes an `execve` and an `execveat`, as well as the numbers with the x32 bit); the native table ends in
 the 470s, so nothing the template or Python needs is affected.
 
-For a jail with a staging root there is one more layer, so that the read-only guarantee of `/data` does not rest on the
-empty capability sets alone: the capability BOUNDING set is cleared (`PR_CAPBSET_DROP` of every capability, read back,
-while the process is still root and before the uid change; `no_new_privs` was already set and is checked). A jail without
-a staging root keeps today's bounding set.
+A call that asks for mounts gets one more layer, so that the read-only guarantee of `/data` does not rest on the empty
+effective and permitted sets alone: the capability BOUNDING set is cleared (`PR_CAPBSET_DROP` of every capability, read
+back) and the INHERITABLE set is cleared (`capset`, effective and permitted left as they are, read back), while the
+process is still root and before the uid change; `no_new_privs` was already set and is checked. It is tied to the call, not
+to the jail, on purpose: dropping the bounding set needs `CAP_SETPCAP`, and a runtime that lacks it must lose the mounts
+capability (the mount probe fails, reason `capability_drop_failed`, below) rather than the template. A call without mounts
+keeps today's bounding set; a mounts call whose drop fails ends before any code runs.
 
 ### Startup self-test (Linux)
 
@@ -318,7 +323,9 @@ A failure of that second probe does NOT stop the template: it disables the mount
 whose pool is not the system one. The template logs the failing layers and a `mounts_disabled` event, prints
 `MOUNTS_DISABLED <reason>` before `READY`, and keeps serving plain calls. Reasons: `staging_unusable` (the probe's
 staged call could not be made: an unwritable or read-only staging root, a root filesystem that refuses `mkdir /data` or
-`/out`), `mount_layer_failed` (a mount layer did not hold), `arrow_pool_not_system`, `arrow_pool_unreadable`. A call that
+`/out`), `capability_drop_failed` (the probe call could not clear its bounding or inheritable set: a runtime without `CAP_SETPCAP`),
+`mount_layer_failed` (a mount layer did not hold), `arrow_pool_not_system`, `arrow_pool_unreadable`. A staging root that
+cannot be locked for any reason but "held" (see below) disables mounts with `staging_lock_unavailable`. A call that
 asks for mounts then gets `PythonExecutorError: run mounts are disabled on this executor (<reason>)` before any child
 starts; the pool setting is therefore enforced for every mounts call. The `python_executor self-test` exit code covers
 all 30.

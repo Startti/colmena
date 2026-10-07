@@ -274,10 +274,18 @@ fn executor(root: Option<&Root>) -> SubprocessExecutor {
 }
 
 /// A range of slot uids no other executor or self-test of this process uses: one
-/// counter for all of them, a hundred uids apiece.
+/// counter for all of them, a hundred uids apiece. The child processes of this
+/// suite that re-run a test (see `rerun`) take another range: they must not share
+/// slot users with their parent, or stopping a slot's processes would kill the
+/// other's calls.
 fn next_uid_base() -> u32 {
     static NEXT: AtomicU32 = AtomicU32::new(0);
-    30000 + 100 * NEXT.fetch_add(1, Ordering::Relaxed)
+    let first = if std::env::var("COLMENA_PYEXEC_INNER_TEST").is_ok() {
+        45000
+    } else {
+        30000
+    };
+    first + 100 * NEXT.fetch_add(1, Ordering::Relaxed)
 }
 
 fn build_executor(staging_root: Option<PathBuf>) -> SubprocessExecutor {
@@ -490,11 +498,10 @@ output = res
     }
 }
 
-/// With a staging root the bounding set is empty inside the jail, for a call
-/// with mounts and a call without; without one the jail is today's, with the
-/// bounding set untouched.
+/// A call that asks for mounts has an empty bounding set; a plain call, on a staged
+/// executor or not, keeps today's.
 #[tokio::test]
-async fn the_bounding_set_is_empty_inside_a_staged_jail_and_untouched_otherwise() {
+async fn the_bounding_set_is_empty_for_a_mounts_call_and_untouched_otherwise() {
     let Some(root) = Root::exclusive() else {
         return;
     };
@@ -507,7 +514,11 @@ async fn the_bounding_set_is_empty_inside_a_staged_jail_and_untouched_otherwise(
         run_staged(&staged_ex, staged.mounts(), code).await.unwrap(),
         empty
     );
-    assert_eq!(run_plain(&staged_ex, code).await.unwrap(), empty);
+    // A plain call on the same staged executor is today's: the hardening belongs
+    // to calls that ask for mounts, so a runtime that cannot grant it breaks no
+    // plain call.
+    let plain = run_plain(&staged_ex, code).await.unwrap();
+    assert_ne!(plain["bnd"], json!("0000000000000000"));
     let today = run_plain(&executor_without_root(&root), code)
         .await
         .unwrap();
@@ -531,7 +542,7 @@ async fn a_call_with_mounts_is_otherwise_the_same_sandbox() {
     let code = r#"
 import os, resource, socket, errno
 status = dict(l.split(':', 1) for l in open('/proc/self/status').read().splitlines() if ':' in l)
-keep = ('Uid', 'Gid', 'Groups', 'CapInh', 'CapPrm', 'CapEff', 'CapBnd', 'CapAmb', 'NoNewPrivs', 'Seccomp')
+keep = ('Uid', 'Gid', 'Groups', 'CapInh', 'CapPrm', 'CapEff', 'CapAmb', 'NoNewPrivs', 'Seccomp')
 limits = {n: resource.getrlimit(getattr(resource, n)) for n in dir(resource) if n.startswith('RLIMIT_') and n != 'RLIMIT_FSIZE'}
 fsize = resource.getrlimit(resource.RLIMIT_FSIZE)[1] >> 20
 try:
@@ -1631,4 +1642,194 @@ async fn a_second_serving_executor_on_one_root_is_refused_and_sweeps_nothing() {
     // Released with the executor: the root can be taken again.
     drop(first);
     assert!(build(67200).is_ok());
+}
+
+// ---------------------------------------------------------------------------
+// A runtime that cannot give what the hardening needs disables mounts only.
+// ---------------------------------------------------------------------------
+
+/// A lock that cannot be taken for any reason but "held" (ENOLCK, ENOSYS,
+/// EOPNOTSUPP on some network or FUSE volumes) degrades: no sweep, mounts disabled
+/// with a typed reason, plain calls served. "Held" stays a hard startup error.
+#[tokio::test]
+async fn a_lock_that_cannot_be_taken_disables_mounts_and_not_the_executor() {
+    let Some(_alone) = Root::exclusive() else {
+        return;
+    };
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().canonicalize().unwrap();
+    let mut cfg = SubprocessConfig::from_lookup(&|_: &str| None::<String>).unwrap();
+    cfg.bin = PathBuf::from(env!("CARGO_BIN_EXE_python_executor"));
+    cfg.slots = 1;
+    cfg.uid_base = 68000;
+    cfg.staging_root = Some(root.clone());
+    // A leftover that a sweep would reclaim: it must stay.
+    let leftover = StagedCall::create(&root, 1).unwrap();
+    let leftover_dir = root.join(leftover.id());
+    std::mem::forget(leftover);
+    for code in [libc::ENOLCK, libc::ENOSYS, libc::EOPNOTSUPP] {
+        let ex =
+            SubprocessExecutor::new_for_serving_with(cfg.clone(), Duration::from_secs(60), |r| {
+                StagingLock::acquire_with(r, |_| Err(std::io::Error::from_raw_os_error(code)))
+            })
+            .unwrap();
+        assert_eq!(
+            run_plain(&ex, "output = 1").await.unwrap(),
+            json!(1),
+            "{code}"
+        );
+        let refused = ex.stage_call(1).unwrap_err();
+        assert!(
+            matches!(
+                refused,
+                StageError::MountsDisabled("staging_lock_unavailable")
+            ),
+            "{refused:?}"
+        );
+        assert!(
+            leftover_dir.exists(),
+            "{code}: swept without owning the root"
+        );
+        let mounts = CallMounts {
+            stage_id: "a".repeat(32),
+            out_mb: 1,
+        };
+        let err = run_staged(&ex, mounts, "output = 2")
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("disabled") && err.contains("staging_lock_unavailable"),
+            "{err}"
+        );
+    }
+    let held = SubprocessExecutor::new_for_serving_with(cfg, Duration::from_secs(60), |r| {
+        StagingLock::acquire_with(r, |_| {
+            Err(std::io::Error::from_raw_os_error(libc::EWOULDBLOCK))
+        })
+    });
+    assert!(held.err().is_some_and(|e| e.0.contains("already owned")));
+}
+
+// The next two run the scenario in a fresh child process of this test binary that
+// starts, by `pre_exec`, WITHOUT CAP_SETPCAP (and cannot regain it: it is dropped
+// from the bounding set) or WITH a non-zero inheritable set: process-wide state a
+// test must not leave to the others.
+
+const INNER: &str = "COLMENA_PYEXEC_INNER_TEST";
+
+fn capget() -> ([u32; 6], [u32; 2]) {
+    let header = [0x2008_0522u32, 0];
+    let mut data = [0u32; 6];
+    let rc = unsafe { libc::syscall(libc::SYS_capget, header.as_ptr(), data.as_mut_ptr()) };
+    assert_eq!(rc, 0);
+    (data, header)
+}
+
+/// Re-runs `test` in a child of this binary with `setup` applied before its exec;
+/// true when it passed.
+fn rerun(test: &str, setup: fn()) -> bool {
+    use std::os::unix::process::CommandExt;
+    let mut cmd = std::process::Command::new(std::env::current_exe().unwrap());
+    cmd.args(["--exact", test, "--nocapture", "--test-threads=1"]);
+    cmd.env(INNER, "1").env("COLMENA_PYEXEC_JAIL_TESTS", "1");
+    unsafe {
+        cmd.pre_exec(move || {
+            setup();
+            Ok(())
+        })
+    };
+    let out = cmd.output().unwrap();
+    let text =
+        String::from_utf8_lossy(&out.stdout).to_string() + &String::from_utf8_lossy(&out.stderr);
+    if !out.status.success() {
+        eprintln!("{text}");
+    }
+    out.status.success() && text.contains("1 passed")
+}
+
+fn without_setpcap() {
+    const CAP_SETPCAP: u32 = 8;
+    let zero: libc::c_ulong = 0;
+    unsafe {
+        libc::prctl(
+            libc::PR_CAPBSET_DROP,
+            CAP_SETPCAP as libc::c_ulong,
+            zero,
+            zero,
+            zero,
+        );
+    }
+    let (mut data, header) = capget();
+    data[0] &= !(1 << CAP_SETPCAP); // effective
+    data[1] &= !(1 << CAP_SETPCAP); // permitted
+    unsafe { libc::syscall(libc::SYS_capset, header.as_ptr(), data.as_ptr()) };
+}
+
+fn with_inheritable() {
+    let (mut data, header) = capget();
+    data[2] = 1 << 13; // CAP_NET_RAW, which a runtime may leave inheritable
+    unsafe { libc::syscall(libc::SYS_capset, header.as_ptr(), data.as_ptr()) };
+}
+
+#[test]
+fn a_runtime_without_cap_setpcap_disables_mounts_and_serves_plain_calls() {
+    // The child process mounts and unmounts under the shared root while its templates
+    // start: no other test of THIS process may touch mounts meanwhile.
+    let Some(_alone) = Root::exclusive() else {
+        return;
+    };
+    assert!(rerun("inner_without_setpcap", without_setpcap));
+}
+
+#[tokio::test]
+async fn inner_without_setpcap() {
+    if std::env::var(INNER).is_err() {
+        return;
+    }
+    let Some(root) = Root::exclusive() else {
+        return;
+    };
+    let ex = executor(Some(&root));
+    // The template started (the jail's own probe needs nothing it lacks) and a plain
+    // call is served.
+    assert_eq!(run_plain(&ex, "output = 1").await.unwrap(), json!(1));
+    let staged = StagedCall::create(&root.path, 1).unwrap();
+    let err = run_staged(&ex, staged.mounts(), "output = 2")
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(
+        err.contains("disabled") && err.contains("capability_drop_failed"),
+        "{err}"
+    );
+    assert_eq!(run_plain(&ex, "output = 3").await.unwrap(), json!(3));
+}
+
+#[test]
+fn a_runtime_that_starts_with_an_inheritable_set_still_gets_mounts() {
+    // The child process mounts and unmounts under the shared root while its templates
+    // start: no other test of THIS process may touch mounts meanwhile.
+    let Some(_alone) = Root::exclusive() else {
+        return;
+    };
+    assert!(rerun("inner_with_inheritable", with_inheritable));
+}
+
+#[tokio::test]
+async fn inner_with_inheritable() {
+    if std::env::var(INNER).is_err() {
+        return;
+    }
+    let Some(root) = Root::exclusive() else {
+        return;
+    };
+    let ex = executor(Some(&root));
+    let staged = StagedCall::create(&root.path, 1).unwrap();
+    let code = "status = dict(l.split(':', 1) for l in open('/proc/self/status').read().splitlines() if ':' in l)\n\
+        output = status['CapInh'].strip()";
+    // Started with CAP_NET_RAW inheritable, a mounts call sees none, and mounts are
+    // enabled (the capabilities probe held).
+    let inh = run_staged(&ex, staged.mounts(), code).await.unwrap();
+    assert_eq!(inh, json!("0000000000000000"));
 }

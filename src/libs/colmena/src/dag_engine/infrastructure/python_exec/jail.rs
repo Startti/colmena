@@ -293,13 +293,31 @@ fn bind_dir(fd: &std::os::fd::OwnedFd, target: &str, read_only: bool) -> io::Res
     }
 }
 
-/// A jail that stages run mounts, which gets the extra layers that keep the
-/// read-only guarantee of `/data` from resting on the empty capability sets
-/// alone: the bounding set is cleared and the filter denies the new mount API. A
-/// jail without a staging root is today's, with neither (it cannot be told from
-/// inside whether the filter is extended: the capability checks answer the same).
-pub(crate) fn staged_jail(spec: &JailSpec) -> bool {
-    spec.staging_root.is_some()
+/// A call that asks for mounts gets the capability hardening that keeps the
+/// read-only guarantee of `/data` from resting on the empty effective and permitted
+/// sets alone: the bounding and inheritable sets are cleared. It is tied to the call,
+/// not to the jail: a runtime that cannot grant it (no CAP_SETPCAP) then fails the
+/// mount probe, which disables mounts, instead of failing every call and the
+/// jail's own self-test. A call without mounts is untouched.
+pub(crate) fn hardens_capabilities(hdr: &CallHeader) -> bool {
+    hdr.mounts.is_some()
+}
+
+/// Clears the inheritable capability set (a container may start with one), leaving
+/// the effective and permitted sets as they are, and reads it back.
+pub(crate) fn clear_inheritable() -> io::Result<()> {
+    let header = [0x2008_0522u32, 0]; // capability version 3, this process
+    let mut data = [0u32; 6];
+    check(unsafe { libc::syscall(libc::SYS_capget, header.as_ptr(), data.as_mut_ptr()) } as i32)?;
+    data[2] = 0;
+    data[5] = 0;
+    check(unsafe { libc::syscall(libc::SYS_capset, header.as_ptr(), data.as_ptr()) } as i32)?;
+    let mut after = [0u32; 6];
+    check(unsafe { libc::syscall(libc::SYS_capget, header.as_ptr(), after.as_mut_ptr()) } as i32)?;
+    if after[2] != 0 || after[5] != 0 {
+        return Err(io::Error::other("the inheritable set stayed"));
+    }
+    Ok(())
 }
 
 /// Drops every capability from the bounding set, then reads it back: a set that
@@ -433,14 +451,15 @@ pub fn enter(spec: &JailSpec, hdr: &CallHeader, conn: UnixStream) -> Result<Unix
     }
     std::env::set_current_dir("/tmp").map_err(at("mounts"))?;
 
-    // 3b. Capability bounding set, cleared for a jail that stages run mounts: it
+    // 3b. Capability bounding and inheritable sets, cleared for a call that asks for mounts: it
     //     needs CAP_SETPCAP, so it is done while the process is still root. The
     //     permitted and effective sets are cleared by the uid change below; with
     //     the bounding set empty and no_new_privs set, nothing the program runs
     //     can regain a capability (it cannot run a program at all: execve is
     //     refused by the filter).
-    if staged_jail(spec) {
+    if hardens_capabilities(hdr) {
         drop_bounding_set().map_err(at("privileges"))?;
+        clear_inheritable().map_err(at("privileges"))?;
     }
 
     // 4. Identity: one unprivileged uid/gid per slot.
@@ -491,18 +510,104 @@ pub fn enter(spec: &JailSpec, hdr: &CallHeader, conn: UnixStream) -> Result<Unix
 mod tests {
     use super::*;
 
-    /// Only a jail with a staging root gets the extra layers (the bounding set
-    /// cleared, the mount API denied); one without is today's jail.
+    /// Only a call that asks for mounts gets the capability hardening (bounding
+    /// and inheritable sets cleared): a plain call, staged executor or not, is
+    /// today's, so a runtime that cannot grant it breaks no plain call.
     #[test]
-    fn the_extra_layers_belong_to_a_staged_jail_only() {
-        let spec = |staging_root| JailSpec {
-            uid_base: 1,
-            tmp_mb: 1,
-            hide_paths: vec![],
-            staging_root,
+    fn the_capability_hardening_belongs_to_mounts_calls_only() {
+        let header = |mounts| CallHeader {
+            slot: 0,
+            memory_mb: 1,
+            cpu_secs: 1,
+            max_request_bytes: 1,
+            mounts,
         };
-        assert!(!staged_jail(&spec(None)));
-        assert!(staged_jail(&spec(Some("/x".into()))));
+        assert!(!hardens_capabilities(&header(None)));
+        let mounts = super::super::child::CallMounts {
+            stage_id: "a".repeat(32),
+            out_mb: 1,
+        };
+        assert!(hardens_capabilities(&header(Some(mounts))));
+    }
+
+    /// Reads a capability line of this process's status as a number.
+    fn cap_line(key: &str) -> u64 {
+        let status = std::fs::read_to_string("/proc/self/status").unwrap();
+        let v = status.lines().find_map(|l| l.strip_prefix(key)).unwrap();
+        u64::from_str_radix(v.trim(), 16).unwrap()
+    }
+
+    /// Rewrites this process's effective, permitted and inheritable sets.
+    fn set_caps(eff: u64, perm: u64, inh: u64) -> i64 {
+        let header = [0x2008_0522u32, 0];
+        let word = |v: u64, i: u32| (v >> (32 * i)) as u32;
+        let data = [
+            word(eff, 0),
+            word(perm, 0),
+            word(inh, 0),
+            word(eff, 1),
+            word(perm, 1),
+            word(inh, 1),
+        ];
+        unsafe { libc::syscall(libc::SYS_capset, header.as_ptr(), data.as_ptr()) }
+    }
+
+    fn in_child(body: fn() -> i32) -> i32 {
+        match unsafe { libc::fork() } {
+            0 => {
+                unsafe { libc::alarm(30) };
+                let code = std::panic::catch_unwind(body).unwrap_or(99);
+                unsafe { libc::_exit(code) }
+            }
+            pid => {
+                let mut status = 0;
+                assert_eq!(unsafe { libc::waitpid(pid, &mut status, 0) }, pid);
+                if libc::WIFEXITED(status) {
+                    libc::WEXITSTATUS(status)
+                } else {
+                    98
+                }
+            }
+        }
+    }
+
+    /// Without CAP_SETPCAP the bounding set cannot be dropped: the function says
+    /// so (EPERM) and leaves it, which for a mounts call ends the call before any
+    /// code runs and for the mount probe disables the capability.
+    #[test]
+    fn without_cap_setpcap_the_bounding_set_cannot_be_dropped() {
+        if std::env::var("COLMENA_PYEXEC_JAIL_TESTS").as_deref() != Ok("1") {
+            return;
+        }
+        let code = in_child(|| {
+            const CAP_SETPCAP: u64 = 1 << 8;
+            let (eff, perm) = (cap_line("CapEff:"), cap_line("CapPrm:"));
+            assert_eq!(set_caps(eff & !CAP_SETPCAP, perm & !CAP_SETPCAP, 0), 0);
+            let e = drop_bounding_set().unwrap_err();
+            i32::from(e.raw_os_error() != Some(libc::EPERM))
+        });
+        assert_eq!(code, 0);
+    }
+
+    /// A non-zero inheritable set (a container runtime may start that way) is
+    /// cleared, and the effective and permitted sets are left as they were.
+    #[test]
+    fn a_non_zero_inheritable_set_is_cleared_and_nothing_else_changes() {
+        if std::env::var("COLMENA_PYEXEC_JAIL_TESTS").as_deref() != Ok("1") {
+            return;
+        }
+        let code = in_child(|| {
+            const CAP_NET_RAW: u64 = 1 << 13;
+            let (eff, perm) = (cap_line("CapEff:"), cap_line("CapPrm:"));
+            assert_eq!(set_caps(eff, perm, CAP_NET_RAW), 0);
+            assert_eq!(cap_line("CapInh:"), CAP_NET_RAW);
+            clear_inheritable().unwrap();
+            let held = cap_line("CapInh:") == 0
+                && cap_line("CapEff:") == eff
+                && cap_line("CapPrm:") == perm;
+            i32::from(!held)
+        });
+        assert_eq!(code, 0);
     }
 
     /// Without a staging root the spec is the bytes it always was.
