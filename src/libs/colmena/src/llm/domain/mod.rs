@@ -5,6 +5,7 @@ pub mod decision_model_repository;
 pub mod file_cache_repository;
 pub mod file_provider_factory_port;
 pub mod file_provider_repository;
+pub mod large_tabular;
 pub mod llm_config;
 pub mod llm_error;
 pub mod llm_message;

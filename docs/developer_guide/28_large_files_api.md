@@ -62,6 +62,12 @@ FileSource::SignedUrl (url) → resolve_files
 [adapter emite formato correcto del provider con file_id/file_uri]
 ```
 
+## Archivos tabulares grandes (`COLMENA_LARGE_TABULAR`)
+
+La ruta de archivos tabulares grandes (interruptor encendido) no lee el archivo entero en memoria; esta primera pieza solo fija cuál archivo cuenta como grande. «Grande» tiene una sola definición, `llm::domain::large_tabular::is_large_tabular(mime, tamaño, interruptor)`: el interruptor está encendido, el mime es `text/csv` o xlsx (sin distinguir mayúsculas ni parámetros; el `.xls` antiguo no se acepta) y `size_bytes` es conocido y **estrictamente mayor** a 52 428 800 (50 MiB). Exactamente 50 MiB es pequeño, un tamaño ausente es pequeño y, con el interruptor apagado, nada es grande a ningún tamaño. `refusal_text()` es el texto que una herramienta que no puede leer un archivo grande entero le da al modelo; hoy dice lo que es verdad («demasiado grande para esta herramienta, no se puede analizar en este turno») y el texto futuro («usa `attachment_run_python` con `tables`») queda detrás de `LARGE_FILE_TOOL_AVAILABLE`, que cambia a `true` la unidad que entregue esa herramienta. Todo rechazo lleva el código `large_tabular_file`. `validate_storage_key` es la validación barata de una llave del host (no vacía, hasta 1024 caracteres, sin caracteres de control ni segmentos `..`).
+
+Pruebas: `cargo test --lib large_tabular` cubre la definición en su frontera.
+
 ## Estrategia por provider
 
 | Provider  | Imagen | PDF |
