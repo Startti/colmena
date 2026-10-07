@@ -25,6 +25,7 @@ pub(super) struct RecordingModel {
     /// Every message body and every volatile system suffix, in order.
     texts: Mutex<Vec<String>>,
     files: AtomicUsize,
+    calls: AtomicUsize,
 }
 
 impl RecordingModel {
@@ -42,10 +43,12 @@ impl RecordingModel {
             inner: ScriptedAdapter::new(script),
             texts: Mutex::default(),
             files: AtomicUsize::new(0),
+            calls: AtomicUsize::new(0),
         })
     }
 
     fn record(&self, request: &LlmRequest) {
+        self.calls.fetch_add(1, Ordering::SeqCst);
         let mut texts = self.texts.lock().unwrap();
         for m in request.messages() {
             texts.push(m.content().to_string());
@@ -60,6 +63,11 @@ impl RecordingModel {
     /// Everything the model was shown, as one string.
     pub(super) fn seen(&self) -> String {
         self.texts.lock().unwrap().join("\n")
+    }
+
+    /// How many times the model was called (summaries included).
+    pub(super) fn calls(&self) -> usize {
+        self.calls.load(Ordering::SeqCst)
     }
 
     /// Files attached to any message the model received.
@@ -126,6 +134,27 @@ pub(super) async fn run_turn(
     run_turn_with_tools(reg, db_url, files, Value::Null, model).await
 }
 
+/// [`run_turn`] with no agent session, so the node has no attachment catalog.
+pub(super) async fn run_turn_without_session(
+    reg: &Arc<HashMapNodeRegistry>,
+    db_url: &str,
+    files: Vec<Value>,
+    model: &Arc<RecordingModel>,
+) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+    use crate::dag_engine::application::ports::NodeRegistryPort;
+    let node = reg.get_node("llm_call").expect("llm_call is registered");
+    let _guard = OverrideGuard::install(model.clone());
+    let inputs: HashMap<String, Value> = HashMap::from([
+        ("__colmena_session_id".to_string(), json!("s1")),
+        ("files".to_string(), Value::Array(files)),
+    ]);
+    let config = json!({
+        "provider": "openai", "model": "m", "api_key": "k", "stream": false,
+        "prompt": "go", "connection_url": db_url,
+    });
+    node.execute(&inputs, &config, &mut Value::Null, None).await
+}
+
 /// [`run_turn`] with a `tool_configurations` block (`Null`: none).
 pub(super) async fn run_turn_with_tools(
     reg: &Arc<HashMapNodeRegistry>,
@@ -156,10 +185,14 @@ pub(super) async fn run_turn_with_tools(
 #[derive(Default)]
 pub(super) struct CountingStorage {
     inner: LocalCacheStorageAdapter,
+    stores: AtomicUsize,
     reads: AtomicUsize,
 }
 
 impl CountingStorage {
+    pub(super) fn stores(&self) -> usize {
+        self.stores.load(Ordering::SeqCst)
+    }
     /// Whole-object and streamed reads together.
     pub(super) fn reads(&self) -> usize {
         self.reads.load(Ordering::SeqCst)
@@ -169,6 +202,7 @@ impl CountingStorage {
 #[async_trait::async_trait]
 impl OutputStorageRepository for CountingStorage {
     async fn store(&self, req: StoreRequest) -> Result<StoredOutput, StorageError> {
+        self.stores.fetch_add(1, Ordering::SeqCst);
         self.inner.store(req).await
     }
     async fn read(&self, key: &str) -> Result<StoredBytes, StorageError> {

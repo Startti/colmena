@@ -1980,7 +1980,7 @@ impl ExecutableNode for LlmNode {
         if let (Some(reg), Some(sid)) =
             (attachment_registry.as_ref(), agent_session_id_str.as_ref())
         {
-            use crate::llm::domain::attachments::{AttachmentSource, UpsertAttachmentInput};
+            use crate::llm::domain::attachments::UpsertAttachmentInput;
 
             let raw_entries: Vec<serde_json::Value> = inputs
                 .get("files")
@@ -2021,7 +2021,11 @@ impl ExecutableNode for LlmNode {
                 // it originated. Inline files reuse `retained_inline_bytes`;
                 // SignedUrl files are re-fetched (acceptable for Plan A).
                 // TODO(plan-a-opt): share bytes with provider upload to avoid re-fetch.
-                let storage_key = if let Some(storage) = self.storage.as_ref() {
+                // A storage reference is already stored: its row points at the
+                // host's key and no copy is made.
+                let storage_key = if let Some(key) = storage_ref_key(file) {
+                    Some(key.to_string())
+                } else if let Some(storage) = self.storage.as_ref() {
                     persist_attachment_bytes(
                         storage.as_ref(),
                         file.retained_inline_bytes.as_deref(),
@@ -2069,7 +2073,15 @@ impl ExecutableNode for LlmNode {
                     continue;
                 }
 
-                let origin = crate::llm::domain::attachments::origin::USER_UPLOAD.to_string();
+                // A storage reference points at an object the HOST owns: the
+                // marker keeps every deleter and every whole-object read away
+                // from it, whatever the switch says later.
+                let origin = if storage_ref_key(file).is_some() {
+                    crate::llm::domain::attachments::origin::HOST_STORAGE_REF
+                } else {
+                    crate::llm::domain::attachments::origin::USER_UPLOAD
+                }
+                .to_string();
                 let stored = storage_key.is_some();
                 let input = UpsertAttachmentInput {
                     agent_session_id: sid.clone(),
@@ -2111,24 +2123,29 @@ impl ExecutableNode for LlmNode {
                         .flatten()
                         .and_then(|row| row.description);
                     if should_queue_summary(existing_description.as_deref()) {
-                        let inline_bytes_for_summary = if matches!(source, AttachmentSource::Inline)
-                        {
-                            file.retained_inline_bytes.clone()
-                        } else {
-                            None
-                        };
-                        let has_summarisable_source = !matches!(source, AttachmentSource::Inline)
-                            || inline_bytes_for_summary.is_some();
-                        if has_summarisable_source {
-                            summary_targets.push(SummaryTarget {
-                                document_id: document_id.clone(),
-                                source,
-                                mime_type: file.mime_type.clone(),
-                                filename: file.filename.clone(),
-                                inline_bytes: inline_bytes_for_summary,
-                            });
+                        if let Some(target) = summary_target(file, &document_id, source) {
+                            summary_targets.push(target);
                         }
                     }
+                }
+            }
+        } else {
+            // No catalog to register in (no agent session, or no attachment
+            // registry): a storage reference cannot be registered, and it must
+            // not just vanish.
+            for file in resolved_files
+                .iter()
+                .filter(|f| storage_ref_key(f).is_some())
+            {
+                let notice = format!(
+                    "[file: {}] was not delivered: this call has no attachment catalog (no agent \
+                     session or no attachment registry), so a storage reference cannot be \
+                     registered.",
+                    clipped(&file.filename)
+                );
+                crate::colmena_log!("WARN: storage reference not registered: {}", notice);
+                if skipped_notices.len() < MAX_SKIP_NOTICES {
+                    skipped_notices.push(notice);
                 }
             }
         }
@@ -4736,8 +4753,51 @@ fn registration_file_id(file: &crate::llm::domain::FileData) -> Option<String> {
         // its bytes, and a later load_attachment serves them inline from
         // storage (§141).
         FileSource::SignedUrl(_) if file.mime_type.starts_with("image/") => Some(String::new()),
+        // A large tabular file is served from the host's storage by its key
+        // (never from a provider), so it too registers with an empty id.
+        FileSource::StorageRef(_) => Some(String::new()),
         _ => None,
     }
+}
+
+/// The host's storage key of a [`FileSource::StorageRef`] file; `None` for any
+/// other source.
+fn storage_ref_key(file: &crate::llm::domain::FileData) -> Option<&str> {
+    match &file.source {
+        crate::llm::domain::FileSource::StorageRef(key) => Some(key),
+        _ => None,
+    }
+}
+
+/// The summary task Step 3 queues for a file it just registered, or `None`.
+///
+/// A storage reference never gets one: summarising reads the source back, and a
+/// `Path` source is read from the LOCAL disk in local mode, so a key must never
+/// be handed to it. A large file is also exactly what the summary cannot read.
+fn summary_target(
+    file: &crate::llm::domain::FileData,
+    document_id: &str,
+    source: crate::llm::domain::attachments::AttachmentSource,
+) -> Option<SummaryTarget> {
+    use crate::llm::domain::attachments::AttachmentSource;
+    if storage_ref_key(file).is_some() {
+        return None;
+    }
+    let inline_bytes = if matches!(source, AttachmentSource::Inline) {
+        file.retained_inline_bytes.clone()
+    } else {
+        None
+    };
+    if matches!(source, AttachmentSource::Inline) && inline_bytes.is_none() {
+        return None;
+    }
+    Some(SummaryTarget {
+        document_id: document_id.to_string(),
+        source,
+        mime_type: file.mime_type.clone(),
+        filename: file.filename.clone(),
+        inline_bytes,
+    })
 }
 
 /// What Step 3 registers for one resolved file.
@@ -8619,3 +8679,6 @@ mod attachment_notices;
 
 #[cfg(test)]
 mod load_attachment_redirect;
+
+#[cfg(test)]
+mod storage_ref_turn;
