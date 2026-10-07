@@ -29,6 +29,8 @@ pub enum Cap {
     Bytes,
     #[error("the workbook has more sheets than the limit")]
     Sheets,
+    #[error("the workbook's shared strings are over the limit")]
+    SharedStrings,
 }
 
 /// Why a part is not a workbook part, in fixed words.

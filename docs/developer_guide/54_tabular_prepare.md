@@ -976,3 +976,28 @@ a part with more is `TooManyStyles`.
   (`workbookPr date1904`) is 1,462 days behind (42,735 is the same 2021-01-01).
 - **No date means a number**: negative, not finite, past 9999-12-31, day 0 without a time,
   an elapsed time past one day (`[h]:mm` over 1.5), and any serial under a plain format.
+
+### Shared strings (`xlsx_strings.rs`)
+
+Cells point into the shared-strings table by index and a sheet can use any entry at any
+row, so it is the one part of a workbook that is **read whole**. Hence a cap with a typed
+refusal, not a spill:
+
+- The part's declared size must be at most 128 MiB (`MAX_SHARED_STRINGS_XML_BYTES`; the
+  archive pre-check already knows it, so a larger one is refused before it is read) and the
+  table at most 10,000,000 entries; else `TooLarge(SharedStrings)`, which the driver records
+  as `xlsx_too_large`.
+- The text goes into one buffer and one `u32` end offset per string, both **reserved up
+  front from the declared size**, so the table never grows by doubling: the text is never
+  larger than the XML it came from (decoding only shrinks it) and the offsets are at most
+  40 MiB. Worst case about 168 MiB, against the 4 GiB of the job, and reached only by a
+  workbook whose sheets are already near the 400 MiB cap.
+
+A real workbook near that cap can have more unique text than this holds; it is refused with
+a message to export as CSV. **Spilling the table to the local file is the known way to lift
+the cap and is not built.**
+
+A string is the concatenation of the text runs of its `si` element (a plain `t`, or the `t`
+of each rich-text run `r`, whitespace kept); phonetic runs (`rPh`) are not part of the value.
+Entities and CDATA are resolved, and so is Excel's `_xHHHH_` escape (a carriage return is
+`_x000D_`, `_x005F_` is a literal underscore) when it is exactly that.
