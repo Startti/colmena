@@ -19,6 +19,7 @@
 //! are refused as unsupported. No workbook under these limits needs zip64: its
 //! sizes are above 4 GiB, which the caps forbid.
 
+use std::collections::HashSet;
 use std::io::{self, Read, Seek, SeekFrom};
 use thiserror::Error;
 
@@ -40,8 +41,11 @@ pub const RATIO_GRACE_BYTES: u64 = MIB;
 /// Compressed bytes times this must reach the uncompressed bytes (1 %).
 pub const RATIO_INVERSE: u64 = 100;
 
+/// Deflate cannot expand more than about 1032 times.
+const MAX_DEFLATE_EXPANSION: u64 = 1032;
 const EOCD_LEN: usize = 22;
 const CENTRAL_LEN: usize = 46;
+const LOCAL_LEN: usize = 30;
 
 /// The limits of the check. The defaults are the constants above; tests lower
 /// them, nothing outside the crate can.
@@ -49,6 +53,8 @@ const CENTRAL_LEN: usize = 46;
 pub(crate) struct ArchiveLimits {
     pub max_entries: usize,
     pub max_central_dir_bytes: u64,
+    pub max_entry_bytes: u64,
+    pub max_total_bytes: u64,
 }
 
 impl Default for ArchiveLimits {
@@ -56,6 +62,8 @@ impl Default for ArchiveLimits {
         Self {
             max_entries: MAX_ENTRIES,
             max_central_dir_bytes: MAX_CENTRAL_DIR_BYTES,
+            max_entry_bytes: MAX_ENTRY_BYTES,
+            max_total_bytes: MAX_TOTAL_BYTES,
         }
     }
 }
@@ -171,6 +179,8 @@ pub(crate) fn check_archive_with<R: Read + Seek>(
     r.read_exact(&mut central).map_err(io_error)?;
 
     let mut entries = Vec::with_capacity(entries_total);
+    let mut spans: Vec<(u64, u64)> = Vec::with_capacity(entries_total);
+    let mut names: HashSet<Vec<u8>> = HashSet::with_capacity(entries_total);
     let mut total: u64 = 0;
     let mut at = 0usize;
     for _ in 0..entries_total {
@@ -179,7 +189,7 @@ pub(crate) fn check_archive_with<R: Read + Seek>(
             .filter(|h| h.starts_with(b"PK\x01\x02"))
             .ok_or(ArchiveError::InconsistentHeaders)?;
         let (flags, method) = (le16(h, 8), le16(h, 10));
-        let (csize32, usize32) = (le32(h, 20), le32(h, 24));
+        let (crc, csize32, usize32) = (le32(h, 16), le32(h, 20), le32(h, 24));
         let (name_len, extra_len, comment_len) = (
             usize::from(le16(h, 28)),
             usize::from(le16(h, 30)),
@@ -201,8 +211,37 @@ pub(crate) fn check_archive_with<R: Read + Seek>(
         {
             return Err(ArchiveError::Unsupported);
         }
+        if !valid_name(name) {
+            return Err(ArchiveError::BadName);
+        }
+        if !names.insert(name.to_vec()) {
+            return Err(ArchiveError::DuplicateName);
+        }
         let (csize, usize_) = (u64::from(csize32), u64::from(usize32));
         total = total.saturating_add(usize_);
+        if usize_ > limits.max_entry_bytes {
+            return Err(ArchiveError::EntryTooLarge);
+        }
+        if total > limits.max_total_bytes {
+            return Err(ArchiveError::TotalTooLarge);
+        }
+        let impossible = match method {
+            0 => csize != usize_,
+            _ => usize_ > csize.saturating_mul(MAX_DEFLATE_EXPANSION) + MAX_DEFLATE_EXPANSION,
+        };
+        if impossible || (name.ends_with(b"/") && usize_ != 0) {
+            return Err(ArchiveError::ImpossibleSizes);
+        }
+        if usize_ > RATIO_GRACE_BYTES && csize.saturating_mul(RATIO_INVERSE) < usize_ {
+            return Err(ArchiveError::RatioTooLow);
+        }
+        let local_len = check_local(
+            r,
+            name,
+            local_offset,
+            (flags, method, crc, csize32, usize32),
+        )?;
+        spans.push((local_offset, local_offset + local_len + csize));
         entries.push(EntryInfo {
             name: String::from_utf8_lossy(name).into_owned(),
             method,
@@ -212,6 +251,16 @@ pub(crate) fn check_archive_with<R: Read + Seek>(
     }
     if at != central.len() {
         return Err(ArchiveError::InconsistentHeaders);
+    }
+    // Every entry's bytes lie before the central directory and none overlaps
+    // another: sorted by position, each ends before the next begins.
+    spans.sort_unstable();
+    let mut floor = 0u64;
+    for (start, end) in spans {
+        if start < floor || end > cd_offset {
+            return Err(ArchiveError::InconsistentHeaders);
+        }
+        floor = end;
     }
     Ok(ArchiveSummary {
         entries,
@@ -251,6 +300,60 @@ fn locator_at<R: Read + Seek>(r: &mut R, at: u64) -> Result<bool, ArchiveError> 
     Ok(&sig == b"PK\x06\x07")
 }
 
+/// Reads the local header at `offset` and compares it with the central
+/// directory. Returns the length of the header with its name and extra field.
+/// With a data descriptor (bit 3) the local CRC and sizes are zero by design
+/// and are not compared.
+fn check_local<R: Read + Seek>(
+    r: &mut R,
+    name: &[u8],
+    offset: u64,
+    (flags, method, crc, csize, usize_): (u16, u16, u32, u32, u32),
+) -> Result<u64, ArchiveError> {
+    let mut h = [0u8; LOCAL_LEN];
+    r.seek(SeekFrom::Start(offset))
+        .map_err(|_| ArchiveError::InconsistentHeaders)?;
+    r.read_exact(&mut h).map_err(|e| match e.kind() {
+        io::ErrorKind::UnexpectedEof => ArchiveError::InconsistentHeaders,
+        _ => ArchiveError::Io,
+    })?;
+    let (name_len, extra_len) = (usize::from(le16(&h, 26)), u64::from(le16(&h, 28)));
+    let sizes_agree = flags & 0x0008 != 0
+        || (le32(&h, 14) == crc && le32(&h, 18) == csize && le32(&h, 22) == usize_);
+    if !h.starts_with(b"PK\x03\x04")
+        || le16(&h, 6) != flags
+        || le16(&h, 8) != method
+        || !sizes_agree
+        || name_len != name.len()
+    {
+        return Err(ArchiveError::InconsistentHeaders);
+    }
+    let mut local_name = vec![0u8; name_len];
+    r.read_exact(&mut local_name).map_err(|e| match e.kind() {
+        io::ErrorKind::UnexpectedEof => ArchiveError::InconsistentHeaders,
+        _ => ArchiveError::Io,
+    })?;
+    if local_name != name {
+        return Err(ArchiveError::InconsistentHeaders);
+    }
+    Ok((LOCAL_LEN + name_len) as u64 + extra_len)
+}
+
+/// A name that cannot escape a directory or be mistaken for another: UTF-8,
+/// not empty, at most [`MAX_NAME_BYTES`], no control character, backslash,
+/// leading slash, drive letter or `..` segment.
+fn valid_name(name: &[u8]) -> bool {
+    let Ok(s) = std::str::from_utf8(name) else {
+        return false;
+    };
+    !s.is_empty()
+        && s.len() <= MAX_NAME_BYTES
+        && !s.chars().any(|c| c.is_control() || c == '\\')
+        && !s.starts_with('/')
+        && s.as_bytes().get(1) != Some(&b':')
+        && !s.split('/').any(|segment| segment == "..")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -259,6 +362,10 @@ mod tests {
 
     fn check(bytes: Vec<u8>) -> Result<ArchiveSummary, ArchiveError> {
         check_archive(&mut Cursor::new(bytes))
+    }
+
+    fn deflated(name: &str, data: &[u8], csize: u32, usize_: u32) -> Entry {
+        Entry::stored(name, data).claim(8, csize, usize_)
     }
 
     #[test]
@@ -273,6 +380,120 @@ mod tests {
         let wb = summary.entry("xl/workbook.xml").unwrap();
         assert_eq!((wb.compressed, wb.uncompressed, wb.method), (11, 11, 0));
         assert!(summary.entry("nope").is_none());
+    }
+
+    #[test]
+    fn an_entry_over_the_per_entry_limit_is_refused() {
+        // Claims 3 GiB with a plausible ratio; nothing is inflated to find out.
+        let big = deflated(
+            "xl/worksheets/sheet1.xml",
+            b"x",
+            1_500_000_000,
+            3_000_000_000,
+        );
+        assert_eq!(check(build(&[big])), Err(ArchiveError::EntryTooLarge));
+    }
+
+    #[test]
+    fn the_total_over_the_limit_is_refused_even_when_each_entry_is_fine() {
+        let one = |n: &str| deflated(n, b"x", 900_000_000, 1_800_000_000);
+        let bytes = build(&[one("a"), one("b")]);
+        assert_eq!(check(bytes), Err(ArchiveError::TotalTooLarge));
+    }
+
+    #[test]
+    fn the_ratio_rule_is_one_percent_above_a_one_mib_grace() {
+        let data = vec![7u8; 11_000];
+        // Exactly 1 %: accepted. One byte less: refused.
+        let at = deflated("a", &data, 11_000, 1_100_000);
+        assert!(check(build(&[at])).is_ok());
+        let under = deflated("a", &data[..10_999], 10_999, 1_100_000);
+        assert_eq!(check(build(&[under])), Err(ArchiveError::RatioTooLow));
+        // The lowest ratio of a real workbook (8.2 %) passes.
+        let real = deflated("a", &vec![1u8; 90_200], 90_200, 1_100_000);
+        assert!(check(build(&[real])).is_ok());
+        // Up to 1 MiB the ratio is not checked (a long run of one value).
+        let small = deflated("a", &vec![1u8; 1024], 1024, 1_048_576);
+        assert!(check(build(&[small])).is_ok());
+    }
+
+    #[test]
+    fn sizes_deflate_cannot_produce_are_refused() {
+        let e = deflated("a", b"0123456789", 10, 2_000_000);
+        assert_eq!(check(build(&[e])), Err(ArchiveError::ImpossibleSizes));
+        // A stored entry is as long as it is stored.
+        let s = Entry::stored("a", b"abc").claim(0, 3, 4);
+        assert_eq!(check(build(&[s])), Err(ArchiveError::ImpossibleSizes));
+    }
+
+    #[test]
+    fn a_local_header_that_disagrees_with_the_central_directory_is_refused() {
+        // The central directory says 1000 bytes, the local header 1 GiB.
+        let mut e = Entry::stored("a", &vec![0u8; 1000]).lie_central(1000, 1000);
+        e.local.usize_ = 1 << 30;
+        assert_eq!(check(build(&[e])), Err(ArchiveError::InconsistentHeaders));
+        // A different name in the local header.
+        let mut e = Entry::stored("a", b"x");
+        e.local_name = Some(b"b".to_vec());
+        assert_eq!(check(build(&[e])), Err(ArchiveError::InconsistentHeaders));
+        // A method the local header does not share is a disagreement too: patch it.
+        let mut bytes = build(&[Entry::stored("a", b"xyz")]);
+        bytes[8] = 8;
+        assert_eq!(check(bytes), Err(ArchiveError::InconsistentHeaders));
+    }
+
+    #[test]
+    fn data_outside_the_file_or_overlapping_the_next_entry_is_refused() {
+        // Both headers claim 5,000 bytes; the file holds three.
+        let e = Entry::stored("a", b"abc").claim(0, 5000, 5000);
+        assert_eq!(check(build(&[e])), Err(ArchiveError::InconsistentHeaders));
+        // The first entry claims more than it holds: its data would run over the
+        // local header of the second.
+        let a = Entry::stored("a", b"abc").claim(0, 40, 40);
+        let b = Entry::stored("b", &[9u8; 100]);
+        assert_eq!(
+            check(build(&[a, b])),
+            Err(ArchiveError::InconsistentHeaders)
+        );
+        // Two central records for one local header.
+        let a = Entry::stored("a", b"abc");
+        let mut b = Entry::stored("b", b"abc");
+        b.offset_override = Some(0);
+        assert_eq!(
+            check(build(&[a, b])),
+            Err(ArchiveError::InconsistentHeaders)
+        );
+    }
+
+    #[test]
+    fn a_data_descriptor_leaves_the_local_sizes_at_zero() {
+        let mut e = Entry::stored("a", b"hello");
+        e.flags = 0x0008;
+        assert!(check(build(&[e])).is_ok());
+    }
+
+    #[test]
+    fn names_that_could_escape_or_confuse_are_refused() {
+        for bad in [
+            "../evil.xml",
+            "xl/../../evil.xml",
+            "/abs.xml",
+            "a\\b.xml",
+            "C:evil.xml",
+            "bad\u{1}name",
+            "nul\u{0}name",
+            "",
+        ] {
+            let e = Entry::stored(bad, b"x");
+            assert_eq!(check(build(&[e])), Err(ArchiveError::BadName), "{bad:?}");
+        }
+        let bytes = build(&[Entry::stored("a.xml", b"1"), Entry::stored("a.xml", b"2")]);
+        assert_eq!(check(bytes), Err(ArchiveError::DuplicateName));
+        let long = "x".repeat(MAX_NAME_BYTES + 1);
+        assert_eq!(
+            check(build(&[Entry::stored(&long, b"x")])),
+            Err(ArchiveError::BadName)
+        );
     }
 
     #[test]
@@ -321,5 +542,46 @@ mod tests {
         let err = check(cut).unwrap_err();
         assert!(err.is_not_an_archive());
         assert!(!ArchiveError::EntryTooLarge.is_not_an_archive());
+    }
+
+    /// Counts what the check reads.
+    struct Counting<R> {
+        inner: R,
+        read: u64,
+        biggest: usize,
+    }
+
+    impl<R: Read> Read for Counting<R> {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            let n = self.inner.read(buf)?;
+            self.read += n as u64;
+            self.biggest = self.biggest.max(buf.len());
+            Ok(n)
+        }
+    }
+
+    impl<R: Seek> Seek for Counting<R> {
+        fn seek(&mut self, pos: SeekFrom) -> io::Result<u64> {
+            self.inner.seek(pos)
+        }
+    }
+
+    #[test]
+    fn only_headers_are_read_however_large_the_entries_are() {
+        let payload = vec![0u8; 20 * 1024 * 1024];
+        let bytes = build(&[
+            Entry::stored("xl/worksheets/sheet1.xml", &payload),
+            Entry::stored("xl/workbook.xml", b"<workbook/>"),
+        ]);
+        let mut counting = Counting {
+            inner: Cursor::new(bytes),
+            read: 0,
+            biggest: 0,
+        };
+        // The 20 MiB of zeros are stored, so the ratio is 1: it passes.
+        check_archive(&mut counting).unwrap();
+        // The end of the file (64 KiB at most) and a few small headers.
+        assert!(counting.read < 128 * 1024, "read {} bytes", counting.read);
+        assert!(counting.biggest <= 65_536 + EOCD_LEN);
     }
 }

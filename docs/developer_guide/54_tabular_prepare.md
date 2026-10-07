@@ -859,19 +859,32 @@ each one. Everything is dark behind `COLMENA_LARGE_TABULAR`, like the CSV.
 ### Archive pre-check (`precheck.rs`)
 
 An xlsx is a zip. Before any entry is opened, `check_archive` reads the
-end-of-central-directory record and the central directory and refuses the archive
-against limits. **Nothing is inflated**: the reads are the last 64 KiB of the file and
-a central directory of at most 8 MiB, so a bomb costs a few small reads whatever it
-would expand to.
+end-of-central-directory record, the central directory and the local header of every
+entry, and refuses the archive against limits. **Nothing is inflated**: the reads are
+the last 64 KiB of the file, a central directory of at most 8 MiB, and 30 bytes plus a
+name (at most 512 bytes) per entry, so a bomb costs a few small reads whatever it would
+expand to (a test counts the bytes read over a 20 MiB entry).
 
-- Entries: at most 10,000. Central directory: at most 8 MiB. Both are estimates, not
-  prototyped; a central directory that is smaller than its entries need, or that does
-  not end where the end record says, is `InconsistentHeaders`.
-- Zip64, encryption, several disks and methods other than stored and deflate are
-  `Unsupported`. No workbook under the caps needs zip64, whose sizes start at 4 GiB.
-- A file that is not a zip at all (no end record, empty, truncated) is `NotAnArchive`,
-  told apart from one over a limit: the driver will record the first as
-  `unreadable_file` and the rest as `archive_limit`.
+| Limit | Value | Provenance |
+|---|---|---|
+| entries | 10,000 | estimate, not prototyped |
+| central directory | 8 MiB | estimate, not prototyped |
+| one entry, uncompressed | 2 GiB | spike item 6: the largest real entry at the cell cap is 1.74 GiB |
+| all entries, uncompressed | 2.5 GiB | spike item 6 |
+| ratio, entries above 1 MiB | compressed at least 1 % of uncompressed | spike item 6: lowest real workbook 8.2 %, bomb 0.097 % (generated files only) |
 
-Errors are a fixed enum (`ArchiveError`); its text carries no name, size or byte of the
-file. Later slices add the checks of names, sizes and local headers.
+Also refused: sizes deflate cannot produce (more than 1032 times the compressed size;
+a stored entry whose two sizes differ), a name that is not UTF-8, is empty, is longer
+than 512 bytes, has a control character or a backslash, starts with `/`, starts with a
+drive letter, or has a `..` segment, two entries with one name, a local header that
+disagrees with the central directory (method, flags, CRC, sizes, name; with a data
+descriptor the local CRC and sizes are zero by design and are not compared), an entry
+whose bytes run outside the file or into another entry, and zip64, encryption, several
+disks or a method other than stored and deflate (`Unsupported`: no workbook under the
+caps needs zip64, whose sizes start at 4 GiB). The central directory is what the reader
+trusts, so a local header that says something else is a lie about the size.
+
+Errors are a fixed enum (`ArchiveError`) whose text carries no name, size or byte of
+the file. A file that is not a zip at all (`NotAnArchive`, also a truncated one) is told
+apart from one over a limit: the driver will record the first as `unreadable_file` and
+the rest as `archive_limit`.

@@ -33,6 +33,11 @@ pub(crate) struct Entry {
     pub flags: u16,
     pub central: Sizes,
     pub local: Sizes,
+    /// Where the central directory says the local header is, when it is not
+    /// where it was written.
+    pub offset_override: Option<u32>,
+    /// What the local header says the name is (a lie), if different.
+    pub local_name: Option<Vec<u8>>,
 }
 
 impl Entry {
@@ -49,6 +54,8 @@ impl Entry {
             flags: 0,
             central: s,
             local: s,
+            offset_override: None,
+            local_name: None,
         }
     }
 
@@ -82,16 +89,18 @@ pub(crate) fn build(entries: &[Entry]) -> Vec<u8> {
     let mut offsets = Vec::new();
     for e in entries {
         offsets.push(out.len() as u32);
-        let name = &e.name;
+        let name = e.local_name.as_ref().unwrap_or(&e.name);
         out.extend_from_slice(b"PK\x03\x04");
         le16(&mut out, 20);
         le16(&mut out, e.flags);
         le16(&mut out, e.method);
         le16(&mut out, 0);
         le16(&mut out, 0);
-        le32(&mut out, crc32(&e.data));
-        le32(&mut out, e.local.csize);
-        le32(&mut out, e.local.usize_);
+        // A data descriptor (bit 3) leaves the sizes and the CRC at zero.
+        let descriptor = e.flags & 0x0008 != 0;
+        le32(&mut out, if descriptor { 0 } else { crc32(&e.data) });
+        le32(&mut out, if descriptor { 0 } else { e.local.csize });
+        le32(&mut out, if descriptor { 0 } else { e.local.usize_ });
         le16(&mut out, name.len() as u16);
         le16(&mut out, 0);
         out.extend_from_slice(name);
@@ -115,7 +124,7 @@ pub(crate) fn build(entries: &[Entry]) -> Vec<u8> {
         le16(&mut out, 0);
         le16(&mut out, 0);
         le32(&mut out, 0);
-        le32(&mut out, *off);
+        le32(&mut out, e.offset_override.unwrap_or(*off));
         out.extend_from_slice(&e.name);
     }
     let cd_size = out.len() as u32 - cd_start;
