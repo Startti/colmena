@@ -34,6 +34,7 @@ use crate::tabular_prepare::ports::{
     NoopProgress, PrepareConfig, PrepareProgress, PrepareProgressInfo, PrepareRequest,
     PrepareRunner, ProgressState,
 };
+use crate::tabular_prepare::precheck::ArchiveError;
 use crate::tabular_prepare::prepare::{
     PrepareStartError, StorageCsvSource, StoragePartSink, StorageXlsxSource,
 };
@@ -42,7 +43,8 @@ use crate::tabular_prepare::registry::{
 };
 use crate::tabular_prepare::writer::{WriterConfig, WriterError};
 use crate::tabular_prepare::xlsx_convert::convert_xlsx;
-use crate::tabular_prepare::xlsx_spool::{XlsxError, MAX_XLSX_BYTES};
+use crate::tabular_prepare::xlsx_sheet::{MAX_CELLS, MAX_COLUMNS, MAX_ROWS};
+use crate::tabular_prepare::xlsx_spool::{Cap, Invalid, XlsxError, MAX_XLSX_BYTES};
 use async_trait::async_trait;
 use bytes::Bytes;
 use chrono::{DateTime, Utc};
@@ -251,7 +253,88 @@ fn classify(e: &TableError) -> (&'static str, String) {
         TableError::Writer(WriterError::Sink(_)) => {
             (STORAGE, "a prepared object could not be stored".into())
         }
+        TableError::Xlsx(e) => classify_xlsx(e),
         _ => (INTERNAL, "the conversion failed".into()),
+    }
+}
+
+/// The reason and the fixed detail of a workbook that could not be read. No sheet
+/// name, cell, key or library message goes in: the sentences are chosen by the
+/// kind of error alone.
+fn classify_xlsx(e: &XlsxError) -> (&'static str, String) {
+    use reason::*;
+    match e {
+        XlsxError::Archive(ArchiveError::NotAnArchive) => {
+            (UNREADABLE_FILE, "the file is not an xlsx workbook".into())
+        }
+        XlsxError::Archive(ArchiveError::Io) | XlsxError::Local => (
+            INTERNAL,
+            "the workbook could not be handled in local storage".into(),
+        ),
+        XlsxError::Archive(a) => (
+            ARCHIVE_LIMIT,
+            match a {
+                ArchiveError::Unsupported => {
+                    "the workbook's archive uses zip64, encryption or an unsupported method"
+                }
+                ArchiveError::TooManyEntries => "the workbook's archive has too many entries",
+                ArchiveError::CentralDirectoryTooLarge => {
+                    "the workbook's archive directory is too large"
+                }
+                ArchiveError::BadName => {
+                    "the workbook's archive has an entry name that is not acceptable"
+                }
+                ArchiveError::DuplicateName => {
+                    "the workbook's archive has two entries with one name"
+                }
+                ArchiveError::EntryTooLarge => "a part of the workbook expands past its size limit",
+                ArchiveError::TotalTooLarge => "the workbook expands past its total size limit",
+                ArchiveError::RatioTooLow => {
+                    "a part of the workbook is compressed beyond the ratio limit"
+                }
+                ArchiveError::ImpossibleSizes => {
+                    "a part of the workbook declares sizes its compression cannot produce"
+                }
+                _ => "the workbook's archive headers are inconsistent",
+            }
+            .into(),
+        ),
+        XlsxError::TooLarge(cap) => (
+            XLSX_TOO_LARGE,
+            match cap {
+                Cap::Bytes => BYTES_DETAIL.into(),
+                Cap::Sheets => {
+                    "the workbook has more sheets than the limit; export fewer sheets or use CSV"
+                        .into()
+                }
+                Cap::Rows => format!("a sheet has more than {MAX_ROWS} rows; export it as CSV"),
+                Cap::Columns => {
+                    format!("a sheet has more than {MAX_COLUMNS} columns; export it as CSV")
+                }
+                Cap::Cells => {
+                    format!("the workbook has more than {MAX_CELLS} cells; export it as CSV")
+                }
+                Cap::SharedStrings => {
+                    "the workbook's text is over the limit; export it as CSV".into()
+                }
+            },
+        ),
+        XlsxError::Invalid(i) => (
+            UNREADABLE_FILE,
+            match i {
+                Invalid::TokenTooLong | Invalid::CellTooLong | Invalid::RowTooLong => {
+                    "a cell, a row or an element of the workbook is longer than the limit"
+                }
+                Invalid::BeyondHeader => "a row has a value past the last column of the header",
+                Invalid::NoData => "the workbook has no sheet with data",
+                _ => "the file is not a valid xlsx workbook",
+            }
+            .into(),
+        ),
+        XlsxError::SourceMissing | XlsxError::SourceUnavailable => {
+            (STORAGE, "the source could not be read from storage".into())
+        }
+        XlsxError::Cancelled => (INTERNAL, "the conversion stopped unexpectedly".into()),
     }
 }
 
@@ -1107,6 +1190,156 @@ mod tests {
     }
 
     #[test]
+    fn every_workbook_failure_has_a_reason_and_a_fixed_text_without_content() {
+        use crate::tabular_prepare::xlsx_spool::{Cap, Invalid};
+        let archive = |a: ArchiveError| TableError::Xlsx(XlsxError::Archive(a));
+        let archive_cases = [
+            (
+                ArchiveError::Unsupported,
+                "the workbook's archive uses zip64, encryption or an unsupported method",
+            ),
+            (
+                ArchiveError::TooManyEntries,
+                "the workbook's archive has too many entries",
+            ),
+            (
+                ArchiveError::CentralDirectoryTooLarge,
+                "the workbook's archive directory is too large",
+            ),
+            (
+                ArchiveError::BadName,
+                "the workbook's archive has an entry name that is not acceptable",
+            ),
+            (
+                ArchiveError::DuplicateName,
+                "the workbook's archive has two entries with one name",
+            ),
+            (
+                ArchiveError::EntryTooLarge,
+                "a part of the workbook expands past its size limit",
+            ),
+            (
+                ArchiveError::TotalTooLarge,
+                "the workbook expands past its total size limit",
+            ),
+            (
+                ArchiveError::RatioTooLow,
+                "a part of the workbook is compressed beyond the ratio limit",
+            ),
+            (
+                ArchiveError::ImpossibleSizes,
+                "a part of the workbook declares sizes its compression cannot produce",
+            ),
+            (
+                ArchiveError::InconsistentHeaders,
+                "the workbook's archive headers are inconsistent",
+            ),
+        ];
+        for (a, detail) in archive_cases {
+            let (code, d) = classify(&archive(a));
+            assert_eq!((code, d.as_str()), (reason::ARCHIVE_LIMIT, detail), "{a:?}");
+        }
+        let x = |e: XlsxError| classify(&TableError::Xlsx(e));
+        let cases: Vec<(XlsxError, &str, String)> = vec![
+            (
+                XlsxError::Archive(ArchiveError::NotAnArchive),
+                reason::UNREADABLE_FILE,
+                "the file is not an xlsx workbook".into(),
+            ),
+            (
+                XlsxError::Archive(ArchiveError::Io),
+                reason::INTERNAL,
+                "the workbook could not be handled in local storage".into(),
+            ),
+            (
+                XlsxError::Local,
+                reason::INTERNAL,
+                "the workbook could not be handled in local storage".into(),
+            ),
+            (
+                XlsxError::TooLarge(Cap::Bytes),
+                reason::XLSX_TOO_LARGE,
+                BYTES_DETAIL.into(),
+            ),
+            (
+                XlsxError::TooLarge(Cap::Sheets),
+                reason::XLSX_TOO_LARGE,
+                "the workbook has more sheets than the limit; export fewer sheets or use CSV"
+                    .into(),
+            ),
+            (
+                XlsxError::TooLarge(Cap::Rows),
+                reason::XLSX_TOO_LARGE,
+                "a sheet has more than 1048576 rows; export it as CSV".into(),
+            ),
+            (
+                XlsxError::TooLarge(Cap::Columns),
+                reason::XLSX_TOO_LARGE,
+                "a sheet has more than 16384 columns; export it as CSV".into(),
+            ),
+            (
+                XlsxError::TooLarge(Cap::Cells),
+                reason::XLSX_TOO_LARGE,
+                "the workbook has more than 50000000 cells; export it as CSV".into(),
+            ),
+            (
+                XlsxError::TooLarge(Cap::SharedStrings),
+                reason::XLSX_TOO_LARGE,
+                "the workbook's text is over the limit; export it as CSV".into(),
+            ),
+            (
+                XlsxError::Invalid(Invalid::Xml),
+                reason::UNREADABLE_FILE,
+                "the file is not a valid xlsx workbook".into(),
+            ),
+            (
+                XlsxError::Invalid(Invalid::NoWorkbook),
+                reason::UNREADABLE_FILE,
+                "the file is not a valid xlsx workbook".into(),
+            ),
+            (
+                XlsxError::Invalid(Invalid::BadCell),
+                reason::UNREADABLE_FILE,
+                "the file is not a valid xlsx workbook".into(),
+            ),
+            (
+                XlsxError::Invalid(Invalid::CellTooLong),
+                reason::UNREADABLE_FILE,
+                "a cell, a row or an element of the workbook is longer than the limit".into(),
+            ),
+            (
+                XlsxError::Invalid(Invalid::BeyondHeader),
+                reason::UNREADABLE_FILE,
+                "a row has a value past the last column of the header".into(),
+            ),
+            (
+                XlsxError::Invalid(Invalid::NoData),
+                reason::UNREADABLE_FILE,
+                "the workbook has no sheet with data".into(),
+            ),
+            (
+                XlsxError::SourceMissing,
+                reason::STORAGE,
+                "the source could not be read from storage".into(),
+            ),
+            (
+                XlsxError::SourceUnavailable,
+                reason::STORAGE,
+                "the source could not be read from storage".into(),
+            ),
+            (
+                XlsxError::Cancelled,
+                reason::INTERNAL,
+                "the conversion stopped unexpectedly".into(),
+            ),
+        ];
+        for (e, code, detail) in cases {
+            let (c, d) = x(e);
+            assert_eq!((c, d.as_str()), (code, detail.as_str()), "{e:?}");
+        }
+    }
+
+    #[test]
     fn the_time_budget_is_the_design_value_and_the_reasons_are_stable_snake_case() {
         assert_eq!(PREP_TIMEOUT, Duration::from_secs(300));
         let all = [
@@ -1115,6 +1348,8 @@ mod tests {
             reason::UNREADABLE_FILE,
             reason::TABLE_TOO_LARGE,
             reason::INTERNAL,
+            reason::XLSX_TOO_LARGE,
+            reason::ARCHIVE_LIMIT,
         ];
         for r in all {
             assert!(
@@ -1127,6 +1362,11 @@ mod tests {
         sorted.dedup();
         assert_eq!(sorted.len(), all.len());
         assert_eq!(reason::TIME, "time");
+        // The two Excel reasons are spelled with an underscore.
+        assert_eq!(
+            (reason::XLSX_TOO_LARGE, reason::ARCHIVE_LIMIT),
+            ("xlsx_too_large", "archive_limit")
+        );
     }
 }
 
