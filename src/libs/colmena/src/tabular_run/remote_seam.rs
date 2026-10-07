@@ -366,3 +366,244 @@ impl MountedExecutor for RemoteExecutor {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::super::stage::StageLimits;
+    use super::super::testkit::*;
+    use super::super::verify::verify_prepared;
+    use super::*;
+    use std::sync::atomic::Ordering::SeqCst;
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    /// Runs `produce` to the end against an unbounded reader of the channel and
+    /// returns the bytes it sent and how it ended.
+    async fn sent(
+        p: &Prepared,
+        tables: &[usize],
+        limits: StageLimits,
+    ) -> (Vec<u8>, Result<Staged, RunRefusal>, bool) {
+        let plan = verify_prepared(&*p.registry, &*p.storage, SOURCE)
+            .await
+            .unwrap();
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<Result<Bytes, std::io::Error>>(2);
+        let call = MountedCall {
+            storage: &*p.storage,
+            plan: &plan,
+            tables,
+            limits,
+            out_mb: 4,
+            sink: None,
+        };
+        let collect = async {
+            let (mut all, mut errored) = (vec![], false);
+            while let Some(item) = rx.recv().await {
+                match item {
+                    Ok(b) => all.extend_from_slice(&b),
+                    Err(_) => errored = true,
+                }
+            }
+            (all, errored)
+        };
+        let (made, (all, errored)) = tokio::join!(produce(tx, b"{}".to_vec(), &call), collect);
+        (all, made, errored)
+    }
+
+    /// Only canonical paths go out, never a key; the declared sizes match what
+    /// follows; the body ends with the empty frame.
+    #[tokio::test]
+    async fn the_request_body_names_files_by_canonical_path_and_never_a_key() {
+        let p = prepared(&[("sales", 2)], 6).await;
+        let (all, made, errored) = sent(&p, &[0], StageLimits::default()).await;
+        assert!(!errored);
+        let staged = made.unwrap();
+        assert_eq!((staged.parts, staged.tables.clone()), (2, vec![0]));
+        for needle in [SOURCE, ROOT, "chat-attachments", "gs://", "http"] {
+            assert!(
+                !String::from_utf8_lossy(&all).contains(needle),
+                "{needle} on the wire"
+            );
+        }
+        let chunks: Vec<Result<Bytes, ()>> = vec![Ok(Bytes::from(all))];
+        let mut r = Reader::new(
+            futures::stream::iter(chunks),
+            Duration::from_secs(1),
+            Duration::from_secs(5),
+        );
+        let _: serde_json::Value = r.json().await.unwrap();
+        let mut seen = vec![];
+        while let Some(raw) = r.frame().await.unwrap() {
+            let e: FileEntry = serde_json::from_slice(&raw).unwrap();
+            let mut body = vec![];
+            r.copy_exact(e.size, &mut body).await.unwrap();
+            seen.push((e.path, body.len()));
+        }
+        r.expect_end().await.unwrap();
+        assert_eq!(
+            seen[1..],
+            [
+                ("t0/part-00000.parquet".to_string(), 6),
+                ("t0/part-00001.parquet".to_string(), 6)
+            ]
+        );
+        assert_eq!(seen[0].0, "manifest.json");
+    }
+
+    /// A storage that sends other than it declared aborts the body: the server
+    /// would see an error, never a short file it takes for the real one.
+    #[tokio::test]
+    async fn a_storage_that_lies_about_a_size_aborts_the_body() {
+        for (total, declared) in [(10u64, 20u64), (20, 10)] {
+            let p = prepared(&[("sales", 1)], 4).await;
+            let plan = verify_prepared(&*p.registry, &*p.storage, SOURCE)
+                .await
+                .unwrap();
+            let live = Arc::new(Live::default());
+            let l = live.clone();
+            p.storage.serve(&plan.part_key(0, 0).unwrap(), move || {
+                generated(total, 5, declared, l.clone(), None)
+            });
+            let (_, made, errored) = sent(&p, &[0], StageLimits::default()).await;
+            assert_eq!(
+                made.unwrap_err(),
+                RunRefusal::Invalid(Invalid::Parts),
+                "{total}/{declared}"
+            );
+            assert!(errored, "the body was aborted");
+            assert!(live.produced.load(SeqCst) as u64 <= declared.max(total));
+        }
+    }
+
+    #[tokio::test]
+    async fn a_part_or_call_over_its_limit_is_refused_before_its_bytes_are_read() {
+        let p = prepared(&[("sales", 2)], 100).await;
+        let manifest_len = p.manifest.to_json().unwrap().len() as u64;
+        let part = StageLimits {
+            total_bytes: 1 << 30,
+            part_bytes: 99,
+        };
+        let (_, made, errored) = sent(&p, &[0], part).await;
+        assert_eq!(
+            made.unwrap_err(),
+            RunRefusal::OverBudget(Budget::Part { limit_bytes: 99 })
+        );
+        assert!(errored);
+        let total = StageLimits {
+            total_bytes: manifest_len + 150,
+            part_bytes: 100,
+        };
+        let (_, made, _) = sent(&p, &[0], total).await;
+        assert_eq!(
+            made.unwrap_err(),
+            RunRefusal::OverBudget(Budget::Data {
+                limit_bytes: manifest_len + 150
+            })
+        );
+        let (_, made, _) = sent(
+            &p,
+            &[0],
+            StageLimits {
+                total_bytes: manifest_len + 200,
+                part_bytes: 100,
+            },
+        )
+        .await;
+        assert!(made.is_ok(), "exactly at the limit");
+    }
+
+    #[tokio::test]
+    async fn a_storage_failure_while_sending_hides_the_adapters_text() {
+        let p = prepared(&[("sales", 1)], 4).await;
+        let plan = verify_prepared(&*p.registry, &*p.storage, SOURCE)
+            .await
+            .unwrap();
+        p.storage
+            .broken
+            .lock()
+            .unwrap()
+            .push(plan.part_key(0, 0).unwrap());
+        let (_, made, errored) = sent(&p, &[0], StageLimits::default()).await;
+        let err = made.unwrap_err();
+        assert_eq!(err, RunRefusal::Storage);
+        assert!(!err.message().contains("secret"));
+        let _ = errored;
+    }
+
+    #[test]
+    fn the_servers_refusals_become_the_existing_typed_refusals() {
+        let body = |r: &str| {
+            Some(Refusal {
+                refusal: r.into(),
+                reason: None,
+            })
+        };
+        let refusal = |e: MountedError| match e {
+            MountedError::Refused(r) => r,
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(
+            refusal(refusal_of(503, true, body("busy"))),
+            RunRefusal::OverBudget(Budget::Volumes)
+        );
+        assert_eq!(
+            refusal(refusal_of(503, true, None)),
+            RunRefusal::OverBudget(Budget::Volumes)
+        );
+        assert_eq!(
+            refusal(refusal_of(503, false, body("mounts_disabled"))),
+            RunRefusal::Unavailable(Unavailable::MountsDisabled)
+        );
+        assert_eq!(
+            refusal(refusal_of(501, false, body("no_staging_root"))),
+            RunRefusal::Unavailable(Unavailable::NoStagingRoot)
+        );
+        assert_eq!(
+            refusal(refusal_of(404, false, None)),
+            RunRefusal::Unavailable(Unavailable::Unsupported)
+        );
+        assert!(matches!(
+            refusal(refusal_of(413, false, body("too_large"))),
+            RunRefusal::OverBudget(Budget::Data { .. })
+        ));
+        assert_eq!(
+            refusal(refusal_of(502, false, None)),
+            RunRefusal::Unavailable(Unavailable::Executor)
+        );
+        assert_eq!(
+            refusal(refusal_of(503, false, None)),
+            RunRefusal::Unavailable(Unavailable::Executor)
+        );
+        assert!(
+            matches!(refusal_of(401, false, None), MountedError::Run(PythonRunError::Internal(t)) if t.contains("rejected"))
+        );
+    }
+
+    #[test]
+    fn a_dropped_name_is_shown_only_if_it_passes_the_local_charset() {
+        let list = vec![
+            Dropped {
+                name: Some("big.csv".into()),
+                reason: "TooLarge".into(),
+            },
+            Dropped {
+                name: Some("bad name.csv".into()),
+                reason: "TooLarge".into(),
+            },
+            Dropped {
+                name: None,
+                reason: "Weird".into(),
+            },
+        ];
+        let got = dropped(&list);
+        assert_eq!(
+            got[0],
+            Rejection {
+                name: Some("big.csv".into()),
+                reason: RejectReason::TooLarge
+            }
+        );
+        assert_eq!(got[1].name, None);
+        assert_eq!(got[2].reason, RejectReason::Unreadable);
+    }
+}
