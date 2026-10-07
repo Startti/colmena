@@ -5,7 +5,7 @@
 
 **How to use (for the exploration/spec phase):** before opening files to assess a change, look up the target file below. **Used by** is its blast radius — the files that break if you change its public surface. **Depends on** is what it needs. Start by reading only those, not the whole repo.
 
-- Files indexed: **473**
+- Files indexed: **474**
 - Modules with at least one importer: **235**
 
 ## Blast-radius ranking (change these with the most care)
@@ -23,8 +23,8 @@
 | 22 | `llm::domain::attachments` | `src/libs/colmena/src/llm/domain/attachments/mod.rs` |
 | 21 | `gdocs::domain` | `src/libs/colmena/src/gdocs/domain/mod.rs` |
 | 20 | `documents::domain::ids` | `src/libs/colmena/src/documents/domain/ids.rs` |
+| 18 | `llm::infrastructure` | `src/libs/colmena/src/llm/infrastructure/mod.rs` |
 | 17 | `crdt_documents` | `src/libs/colmena/src/crdt_documents/mod.rs` |
-| 17 | `llm::infrastructure` | `src/libs/colmena/src/llm/infrastructure/mod.rs` |
 | 16 | `dag_engine::domain::python_executor` | `src/libs/colmena/src/dag_engine/domain/python_executor.rs` |
 | 15 | `tabular_prepare::manifest` | `src/libs/colmena/src/tabular_prepare/manifest.rs` |
 | 14 | `dag_engine::domain::error` | `src/libs/colmena/src/dag_engine/domain/error.rs` |
@@ -492,6 +492,11 @@
 - Module: `dag_engine::infrastructure::nodes::llm::large_files`
 - **Used by (0)**: — (leaf / entrypoint / not imported intra-crate)
 - Depends on (3): `llm::application`, `llm::domain`, `llm::domain::attachments`
+
+#### `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm/large_run_turn.rs`
+- Module: `dag_engine::infrastructure::nodes::llm::large_run_turn`
+- **Used by (0)**: — (leaf / entrypoint / not imported intra-crate)
+- Depends on (2): `llm::infrastructure`, `tabular_run::testkit`
 
 #### `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm/load_attachment_redirect.rs`
 - Module: `dag_engine::infrastructure::nodes::llm::load_attachment_redirect`
@@ -1902,7 +1907,7 @@
 
 #### `src/libs/colmena/src/llm/infrastructure/mod.rs`
 - Module: `llm::infrastructure`
-- **Used by (17)**: `src/libs/colmena/src/dag_engine/application/preflight.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/critic.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm/node_harness.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm/storage_ref_turn.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm/whole_read_guard.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/planner.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/reactor.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/tts.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/util/extract_with_schema.rs`, `src/libs/colmena/src/dag_engine/infrastructure/registry.rs`, `src/libs/colmena/src/dag_engine/infrastructure/sql_llm_critic.rs`, `src/libs/colmena/src/llm/infrastructure/decision_model_provider_factory.rs`, `src/libs/colmena/src/llm/infrastructure/llm_provider_factory.rs`, `src/libs/colmena/src/llm/infrastructure/tts_provider_factory.rs`, `src/libs/colmena/src/node_bindings/registry.rs`, `src/libs/colmena/src/python_bindings/mod.rs`
+- **Used by (18)**: `src/libs/colmena/src/dag_engine/application/preflight.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/critic.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm/large_run_turn.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm/node_harness.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm/storage_ref_turn.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm/whole_read_guard.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/planner.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/reactor.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/tts.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/util/extract_with_schema.rs`, `src/libs/colmena/src/dag_engine/infrastructure/registry.rs`, `src/libs/colmena/src/dag_engine/infrastructure/sql_llm_critic.rs`, `src/libs/colmena/src/llm/infrastructure/decision_model_provider_factory.rs`, `src/libs/colmena/src/llm/infrastructure/llm_provider_factory.rs`, `src/libs/colmena/src/llm/infrastructure/tts_provider_factory.rs`, `src/libs/colmena/src/node_bindings/registry.rs`, `src/libs/colmena/src/python_bindings/mod.rs`
 - Depends on (0): — (no intra-crate imports)
 
 #### `src/libs/colmena/src/llm/infrastructure/openai_adapter.rs`
@@ -2363,7 +2368,7 @@
 
 #### `src/libs/colmena/src/tabular_run/testkit.rs`
 - Module: `tabular_run::testkit`
-- **Used by (1)**: `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm_synthetic_tools/attachment_run_python/large.rs`
+- **Used by (2)**: `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm/large_run_turn.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm_synthetic_tools/attachment_run_python/large.rs`
 - Depends on (7): `dag_engine::domain::python_executor`, `storage::domain`, `tabular_prepare`, `tabular_prepare::manifest`, `tabular_prepare::ports`, `tabular_prepare::registry`, `tabular_prepare::sqlite_registry`
 
 #### `src/libs/colmena/src/tabular_run/verify.rs`

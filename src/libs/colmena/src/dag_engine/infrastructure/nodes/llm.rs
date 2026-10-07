@@ -462,6 +462,11 @@ pub struct LlmNode {
     /// construction by `HashMapNodeRegistry::set_large_tabular` and read at the
     /// start of each call. Off: every large-file branch below is skipped.
     pub(crate) large_tabular: Arc<std::sync::atomic::AtomicBool>,
+    /// The runtime that runs the model's code over a prepared large file, set
+    /// once after construction by `HashMapNodeRegistry::set_large_tabular_runtime`.
+    /// Read only while the switch above is on.
+    pub(crate) large_runtime:
+        Arc<std::sync::OnceLock<Arc<crate::tabular_run::runtime::LargeTabularRuntime>>>,
 }
 
 impl LlmNode {
@@ -518,6 +523,7 @@ impl LlmNode {
             state_repository: None,
             host_token_port: Arc::default(),
             large_tabular: Arc::default(),
+            large_runtime: Arc::default(),
         }
     }
 
@@ -2652,6 +2658,14 @@ impl ExecutableNode for LlmNode {
             if let Some(reg) = attachment_registry.clone() {
                 executor = executor.with_attachment_registry(reg);
             }
+            // Large tabular (dark behind COLMENA_LARGE_TABULAR): a call over a
+            // host-owned large file runs over its prepared tables. Nothing is
+            // wired with the switch off or without a runtime.
+            if self.large_tabular_enabled() {
+                if let Some(runtime) = self.large_runtime.get() {
+                    executor = executor.with_large_tabular(runtime.clone());
+                }
+            }
             if let Some(repo) = skill_repo.clone() {
                 executor = executor.with_skills(repo.clone());
 
@@ -2953,10 +2967,21 @@ impl ExecutableNode for LlmNode {
             // attachment plumbing (Bulk T0) which is wired automatically when
             // the LlmNode's `storage` is set.
             use crate::dag_engine::infrastructure::nodes::llm_synthetic_tools::attachment_run_python::{
-                build_attachment_run_python_tool_definition, ATTACHMENT_RUN_PYTHON_TOOL_NAME,
+                build_attachment_run_python_tool_definition,
+                build_attachment_run_python_tool_definition_for_large_files,
+                ATTACHMENT_RUN_PYTHON_TOOL_NAME,
             };
             if configured_aliases.contains(ATTACHMENT_RUN_PYTHON_TOOL_NAME) {
-                tools.push(build_attachment_run_python_tool_definition());
+                // The large-file text and `tables` argument are shown only while
+                // a runtime that can serve them is wired; otherwise the tool is
+                // exactly what it always was.
+                tools.push(
+                    if self.large_tabular_enabled() && self.large_runtime.get().is_some() {
+                        build_attachment_run_python_tool_definition_for_large_files()
+                    } else {
+                        build_attachment_run_python_tool_definition()
+                    },
+                );
             }
 
             // data_run_python (Task 15, 2026-07-02) — opt-in by name via
@@ -8718,6 +8743,9 @@ mod characterisation;
 
 #[cfg(test)]
 mod large_files;
+
+#[cfg(test)]
+mod large_run_turn;
 
 #[cfg(test)]
 mod storage_key_entries;

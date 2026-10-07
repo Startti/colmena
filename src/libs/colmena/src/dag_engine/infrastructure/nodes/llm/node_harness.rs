@@ -26,6 +26,8 @@ pub(super) struct RecordingModel {
     texts: Mutex<Vec<String>>,
     files: AtomicUsize,
     calls: AtomicUsize,
+    /// The description of every tool the node offered, in order.
+    tools: Mutex<Vec<String>>,
 }
 
 impl RecordingModel {
@@ -44,6 +46,7 @@ impl RecordingModel {
             texts: Mutex::default(),
             files: AtomicUsize::new(0),
             calls: AtomicUsize::new(0),
+            tools: Mutex::default(),
         })
     }
 
@@ -55,6 +58,14 @@ impl RecordingModel {
             self.files
                 .fetch_add(m.files().map_or(0, |f| f.len()), Ordering::SeqCst);
         }
+        if let Some(tools) = request.tools() {
+            let mut offered = self.tools.lock().unwrap();
+            offered.extend(
+                tools
+                    .iter()
+                    .map(|t| format!("{}: {}", t.name, t.description)),
+            );
+        }
         if let Some(suffix) = request.config().volatile_system_suffix() {
             texts.push(suffix.to_string());
         }
@@ -63,6 +74,11 @@ impl RecordingModel {
     /// Everything the model was shown, as one string.
     pub(super) fn seen(&self) -> String {
         self.texts.lock().unwrap().join("\n")
+    }
+
+    /// `name: description` of every tool offered to the model, in order.
+    pub(super) fn tools_offered(&self) -> Vec<String> {
+        self.tools.lock().unwrap().clone()
     }
 
     /// How many times the model was called (summaries included).
