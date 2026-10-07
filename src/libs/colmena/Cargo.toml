@@ -158,10 +158,11 @@ arrow-csv = "58.3.0"
 # Windows-1252 CSV files are transcoded to UTF-8 (already in the lock).
 encoding_rs = "0.8"
 # Excel (`xlsx`) preparation reads the workbook archive itself, to bound what it
-# inflates: `zip` for the container (stored and deflate only, as calamine uses
-# it) and `quick-xml` for its parts. Both versions are already in the lock
-# through calamine, so the lock gains no package.
-zip = { version = "0.6", default-features = false, features = ["deflate"] }
+# inflates and to have ONE reading of the archive (its own pre-check; no second
+# directory discovered by a library): `flate2` only inflates the raw bytes of a part
+# at an offset the pre-check validated, `quick-xml` parses its XML. Both are
+# already in the lock (through zip and calamine), so the lock gains no package.
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 quick-xml = "0.31"
 
 # One-time OAuth consent CLI utility (`colmena_oauth_setup` binary). Tiny dep
@@ -221,6 +222,8 @@ wiremock = "0.6"
 serde_json = { version = "1.0", features = ["preserve_order"] }
 derivative = "2.2"
 tempfile = "3.10"
+# Builds workbooks in tests (the reader itself does not use it).
+zip = { version = "0.6", default-features = false, features = ["deflate"] }
 serial_test = "3"
 tower = { version = "0.5", features = ["util"] }
 

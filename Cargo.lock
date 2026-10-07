@@ -796,6 +796,7 @@ dependencies = [
  "docx-rs",
  "dotenvy",
  "encoding_rs",
+ "flate2",
  "formualizer",
  "futures",
  "google-cloud-storage",

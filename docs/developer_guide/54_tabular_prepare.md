@@ -933,14 +933,29 @@ part as an XML reader under **two guards**, because the pre-check only reads hea
   parse loop resets it after every event. A test shows the parser buffering less than the
   limit plus one 16 KiB buffer of a 50 KiB node.
 
+**One reading of the archive.** The part is found at the offset the pre-check validated (its
+local header already compared with the central directory) and only its raw bytes go to a
+decoder (`flate2`, or none for a stored part), under `Limited`, which also checks the part's
+CRC-32 at its end (a part shorter, longer or different from what the directory says is an
+error). **No library ever discovers a directory of its own.** The first version handed the
+file to `zip::ZipArchive`, which looks for the end record nearest the end of the file with
+no check of its comment: a forged record placed in the real one's comment made it parse a
+directory the pre-check never saw (65,535 entries, no entry cap, no size cap). Two refusals
+close the class on the pre-check's own side too: the central directory must end exactly at
+the end record (`cd_offset + cd_size == eocd_at`, no gap that could shift where another
+reader finds it), and a comment that contains another end-record signature is refused.
+`tests/xlsx_hostile_memory.rs` opens both crafted archives with a counting allocator and
+asserts the refusal costs under 2 MiB.
+
 Parts are looked up by the names the pre-check saw (unique, with no `..`), never by
 listing.
 
-**Dependencies.** `zip` 0.6 (stored and deflate only) and `quick-xml` 0.31 are now direct
-dependencies, at the versions calamine already pulls in, so `Cargo.lock` gains only the two
-edges and no package. Calamine itself is not used for large workbooks: it opens the
-archive itself (no inflate guard), loads the whole shared-strings table into memory and
-cannot be bounded from outside.
+**Dependencies.** `flate2` 1 (the pure-Rust backend) and `quick-xml` 0.31 are direct
+dependencies, at the versions already in the lock (through `zip` and calamine), so
+`Cargo.lock` gains only the two edges and no package; `zip` is now a dev-dependency that
+builds workbooks in tests. Neither calamine nor `zip` reads a large workbook: calamine opens
+the archive itself (no inflate guard) and loads the whole shared-strings table into memory,
+and `zip` discovers its own directory (above).
 
 ### The structure of the workbook (`xlsx_workbook.rs`)
 

@@ -19,7 +19,6 @@ use quick_xml::events::{BytesStart, Event};
 use quick_xml::Reader;
 use std::io::{self, BufRead, Read, Seek, SeekFrom};
 use thiserror::Error;
-use zip::ZipArchive;
 
 /// Sheets a workbook may have. It is the number of tables a manifest holds.
 pub const MAX_SHEETS: usize = crate::tabular_prepare::manifest::MAX_TABLES;
@@ -54,10 +53,29 @@ struct ExpandsPastDeclared;
 #[error("an XML element is longer than the limit")]
 struct TokenTooLong;
 
-/// Ends a part at the size its archive declared for it.
+#[derive(Debug, Error)]
+#[error("a part is shorter than declared or its checksum is wrong")]
+struct BadChecksum;
+
+/// Ends a part at the size its archive declared for it, and checks its CRC-32 at
+/// the end: a part that is shorter, longer or different from what the directory
+/// says is an error.
 pub struct Limited<R> {
     inner: R,
     left: u64,
+    crc: flate2::Crc,
+    expected: u32,
+}
+
+impl<R> Limited<R> {
+    pub fn new(inner: R, declared: u64, crc: u32) -> Self {
+        Self {
+            inner,
+            left: declared,
+            crc: flate2::Crc::new(),
+            expected: crc,
+        }
+    }
 }
 
 impl<R: Read> Read for Limited<R> {
@@ -65,7 +83,8 @@ impl<R: Read> Read for Limited<R> {
         if self.left == 0 {
             // The declared size is read: anything more is a lie in the header.
             return match self.inner.read(&mut [0u8; 1])? {
-                0 => Ok(0),
+                0 if self.crc.sum() == self.expected => Ok(0),
+                0 => Err(io::Error::other(BadChecksum)),
                 _ => Err(io::Error::other(ExpandsPastDeclared)),
             };
         }
@@ -73,6 +92,11 @@ impl<R: Read> Read for Limited<R> {
             .len()
             .min(usize::try_from(self.left).unwrap_or(usize::MAX));
         let n = self.inner.read(&mut buf[..want])?;
+        if n == 0 {
+            // Shorter than declared.
+            return Err(io::Error::other(BadChecksum));
+        }
+        self.crc.update(&buf[..n]);
         self.left -= n as u64;
         Ok(n)
     }
@@ -157,7 +181,7 @@ pub fn xml_failure(e: &quick_xml::Error) -> XlsxError {
 
 /// An opened workbook archive: what it declares and a way to read its parts.
 pub struct Package {
-    archive: ZipArchive<Spooled>,
+    file: Spooled,
     summary: ArchiveSummary,
     max_token_bytes: u64,
     max_sheets: usize,
@@ -174,12 +198,8 @@ impl Package {
             ArchiveError::Io => XlsxError::Local,
             other => XlsxError::Archive(other),
         })?;
-        spooled
-            .seek(SeekFrom::Start(0))
-            .map_err(|_| XlsxError::Local)?;
-        let archive = ZipArchive::new(spooled).map_err(|_| XlsxError::Invalid(Invalid::Xml))?;
         Ok(Self {
-            archive,
+            file: spooled,
             summary,
             max_token_bytes: limits.max_token_bytes,
             max_sheets: limits.max_sheets,
@@ -200,20 +220,27 @@ impl Package {
 
     /// The part `name` as an XML reader, whose reads are bounded by the size the
     /// archive declared for it and by the token limit.
+    ///
+    /// There is one reading of the archive: the one the pre-check made. The part is
+    /// found at the offset it validated (its local header already compared with the
+    /// central directory) and only its raw bytes are handed to the decoder, so no
+    /// other directory is ever discovered or allocated.
     pub fn xml(&mut self, name: &str) -> Result<XmlPart<'_>, XlsxError> {
-        let declared = self
+        let entry = self
             .summary
             .entry(name)
             .ok_or(XlsxError::Invalid(Invalid::Xml))?
-            .uncompressed;
-        let file = self
-            .archive
-            .by_name(name)
-            .map_err(|_| XlsxError::Invalid(Invalid::Xml))?;
-        let limited = Limited {
-            inner: file,
-            left: declared,
+            .clone();
+        self.file
+            .seek(SeekFrom::Start(entry.data_offset))
+            .map_err(|_| XlsxError::Local)?;
+        let raw = (&mut self.file).take(entry.compressed);
+        let inner: Box<dyn Read + '_> = if entry.method == 0 {
+            Box::new(raw)
+        } else {
+            Box::new(flate2::read::DeflateDecoder::new(raw))
         };
+        let limited = Limited::new(inner, entry.uncompressed, entry.crc);
         Ok(Reader::from_reader(Guarded::new(
             limited,
             self.max_token_bytes,
@@ -253,7 +280,7 @@ pub fn attribute(e: &BytesStart, local: &[u8]) -> Result<Option<String>, XlsxErr
 }
 
 /// A part of the workbook, parsed as XML.
-pub type XmlPart<'a> = Reader<Guarded<Limited<zip::read::ZipFile<'a>>>>;
+pub type XmlPart<'a> = Reader<Guarded<Limited<Box<dyn Read + 'a>>>>;
 
 #[cfg(test)]
 #[cfg(test)]
@@ -282,23 +309,30 @@ mod tests {
 
     #[test]
     fn a_part_ends_at_the_size_its_archive_declared() {
-        let mut exact = Limited {
-            inner: Cursor::new(vec![1u8; 10]),
-            left: 10,
-        };
+        use crate::tabular_prepare::zipfix::crc32;
+        let ones = |n: usize| Cursor::new(vec![1u8; n]);
+        let crc = crc32(&[1u8; 10]);
+        let mut exact = Limited::new(ones(10), 10, crc);
         let mut out = Vec::new();
         exact.read_to_end(&mut out).unwrap();
         assert_eq!(out.len(), 10);
         // One byte more than declared is a lie, whatever the reads look like.
-        let mut over = Limited {
-            inner: Cursor::new(vec![1u8; 11]),
-            left: 10,
-        };
-        let e = over.read_to_end(&mut out).unwrap_err();
+        let e = Limited::new(ones(11), 10, crc)
+            .read_to_end(&mut out)
+            .unwrap_err();
         assert_eq!(
             io_failure(&e),
             XlsxError::Archive(ArchiveError::EntryTooLarge)
         );
+        // Shorter than declared, or with the wrong checksum, is a corrupt part.
+        let e = Limited::new(ones(9), 10, crc)
+            .read_to_end(&mut out)
+            .unwrap_err();
+        assert_eq!(io_failure(&e), XlsxError::Invalid(Invalid::Xml));
+        let e = Limited::new(ones(10), 10, crc ^ 1)
+            .read_to_end(&mut out)
+            .unwrap_err();
+        assert_eq!(io_failure(&e), XlsxError::Invalid(Invalid::Xml));
     }
 
     #[test]
