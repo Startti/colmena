@@ -447,8 +447,8 @@ mod tests {
         a_delete_that_never_returns_does_not_hold_the_failure_back
     );
     pg_driver_case!(
-        tabular_prepare_pg_the_lease_is_the_budget_plus_the_grace_and_outlasts_the_bounded_job,
-        the_lease_is_the_budget_plus_the_grace_and_outlasts_the_bounded_job
+        tabular_prepare_pg_the_claimed_lease_is_the_budget_plus_the_job_grace,
+        the_claimed_lease_is_the_budget_plus_the_job_grace
     );
     pg_driver_case!(
         tabular_prepare_pg_a_cleanup_of_a_deleted_source_that_does_not_answer_keeps_the_row_and_its_keys,
@@ -473,6 +473,10 @@ mod tests {
     pg_driver_case!(
         tabular_prepare_pg_a_release_that_never_returns_is_given_up_on,
         a_release_that_never_returns_is_given_up_on
+    );
+    pg_driver_case!(
+        tabular_prepare_pg_the_longest_owner_path_ends_before_the_lease_does,
+        the_longest_owner_path_ends_before_the_lease_does
     );
     pg_case!(
         tabular_prepare_pg_a_deleting_row_is_never_taken_by_an_older_format_claim,

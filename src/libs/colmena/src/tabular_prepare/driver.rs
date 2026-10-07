@@ -34,8 +34,7 @@ use crate::tabular_prepare::ports::{
 };
 use crate::tabular_prepare::prepare::{PrepareStartError, StorageCsvSource, StoragePartSink};
 use crate::tabular_prepare::registry::{
-    lease_for, ClaimRequest, PreparationRegistry, ReadyInfo, RegistryError, TerminalOutcome,
-    FORMAT_VERSION, LEASE_GRACE,
+    ClaimRequest, PreparationRegistry, ReadyInfo, RegistryError, TerminalOutcome, FORMAT_VERSION,
 };
 use crate::tabular_prepare::writer::{WriterConfig, WriterError};
 use async_trait::async_trait;
@@ -55,17 +54,21 @@ pub const PROGRESS_INTERVAL: Duration = Duration::from_secs(2);
 /// does not answer in this time is given up on, never waited for forever.
 pub const TERMINAL_STEP: Duration = Duration::from_secs(10);
 
-/// The most such steps a job takes outside its budget: the first progress report
-/// before it starts, and after it ended a failure write, a delete, an ownership
-/// read, a second delete or the release.
-pub const MAX_TERMINAL_STEPS: u32 = 5;
+/// The most bounded steps an owner takes outside its budget on its longest path:
+/// the claim and the first progress report before it, and after it the ownership
+/// read, the delete, the ownership read and the delete of a failed cleanup and the
+/// failure write (a source found missing whose cleanup fails). Steps of a job that
+/// no longer owns its row do not count: it writes nothing that needs the lease.
+/// `the_longest_owner_path_ends_before_the_lease_does` runs this path with every
+/// step taking its whole bound and fails when the path or the time changes.
+pub const MAX_OWNER_STEPS: u32 = 7;
 
-// The lease is the budget plus `LEASE_GRACE` (see `registry::lease_for`), and the
-// budget bounds everything up to the manifest, so the job outlasts its lease only
-// if the steps after the budget could together take the whole grace.
-const _: () = assert!(
-    (TERMINAL_STEP.as_secs() * MAX_TERMINAL_STEPS as u64) < LEASE_GRACE.num_seconds() as u64
-);
+/// Added to the budget to make the lease of a claim: longer than the owner's steps
+/// outside the budget, with room. It replaces the registry's 60 s grace, which the
+/// longest path could outrun (7 steps of 10 s).
+pub const JOB_GRACE: Duration = Duration::from_secs(90);
+
+const _: () = assert!(TERMINAL_STEP.as_secs() * (MAX_OWNER_STEPS as u64) < JOB_GRACE.as_secs());
 
 /// Time a preparation may take before it stops itself.
 pub const PREP_TIMEOUT: Duration = Duration::from_secs(300);
@@ -477,7 +480,8 @@ async fn run_prepare(
         Err(e) => return Ok(PrepareOutcome::Refused(e)),
     };
     let owner = format!("prep-{}", uuid::Uuid::new_v4());
-    let lease = chrono::Duration::from_std(env.budget).unwrap_or(chrono::Duration::days(1));
+    let lease =
+        chrono::Duration::from_std(env.budget + JOB_GRACE).unwrap_or(chrono::Duration::days(1));
     let claim = within(
         env,
         env.registry.claim(ClaimRequest {
@@ -485,7 +489,7 @@ async fn run_prepare(
             source_bytes: i64::try_from(req.size_bytes).unwrap_or(i64::MAX),
             format_version: FORMAT_VERSION,
             owner: owner.clone(),
-            lease: lease_for(lease),
+            lease,
             now: (env.clock)(),
         }),
     )
@@ -980,6 +984,7 @@ mod tests {
 pub(crate) mod cases {
     use super::*;
     use crate::tabular_prepare::prepare::fake::{root_of, PlacedStorage};
+    use crate::tabular_prepare::registry::lease_for;
     use crate::tabular_prepare::registry::PrepareStatus;
     use chrono::TimeZone;
 
@@ -1479,11 +1484,15 @@ pub(crate) mod cases {
     pub(crate) struct Recording {
         pub seen: std::sync::Mutex<Vec<PrepareProgressInfo>>,
         pub arrived: tokio::sync::Notify,
+        pub slow: std::sync::Mutex<Option<Arc<crate::tabular_prepare::registry_faults::Slow>>>,
     }
 
     #[async_trait]
     impl PrepareProgress for Recording {
         async fn report(&self, _key: &str, info: PrepareProgressInfo) {
+            if let Some(s) = self.slow.lock().unwrap().clone() {
+                s.pass("progress");
+            }
             self.seen.lock().unwrap().push(info);
             self.arrived.notify_one();
         }
@@ -1941,15 +1950,14 @@ pub(crate) mod cases {
         assert_eq!(f.code, reason::STORAGE);
     }
 
-    pub(crate) async fn the_lease_is_the_budget_plus_the_grace_and_outlasts_the_bounded_job(
+    pub(crate) async fn the_claimed_lease_is_the_budget_plus_the_job_grace(
         registry: Arc<dyn PreparationRegistry>,
     ) {
         let source = fresh_source();
         let source = source.as_str();
         let storage = PlacedStorage::with_source(source, five_rows());
         *storage.hang_stores_from.lock().unwrap() = Some(1);
-        let budget = Duration::from_secs(300);
-        let env = env(registry.clone(), storage.clone()).with_budget(budget);
+        let env = env(registry.clone(), storage.clone()).with_budget(Duration::from_secs(300));
         let req = request(source, 40);
         let run = tokio::spawn(async move { prepare_csv(&env, &req).await });
         storage.hung.notified().await;
@@ -1957,21 +1965,73 @@ pub(crate) mod cases {
         run.abort();
         let _ = run.await;
         let claimed = Utc.with_ymd_and_hms(2026, 10, 6, 12, 0, 0).unwrap();
-        // Budget plus the registry's grace, not the budget alone.
         assert_eq!(
             row.lease_until,
-            Some(
-                claimed
-                    + chrono::Duration::seconds(300)
-                    + crate::tabular_prepare::registry::LEASE_GRACE
-            )
+            Some(claimed + chrono::Duration::seconds(300) + chrono::Duration::seconds(90))
         );
-        // The job after the budget is at most MAX_TERMINAL_STEPS bounded steps.
-        let after = TERMINAL_STEP * MAX_TERMINAL_STEPS;
-        assert!(
-            chrono::Duration::from_std(after).unwrap()
-                < crate::tabular_prepare::registry::LEASE_GRACE
+    }
+
+    /// The proof that the job is over before its lease is, by running it: the
+    /// longest path an owner can take, with every bounded step taking its whole
+    /// bound on a virtual clock. The conversion has used the whole budget when the
+    /// source turns out to be gone, the cleanup of it fails, and the failure is then
+    /// recorded: claim, first progress, two ownership reads, two deletes and the
+    /// failure write. A step added to this path changes the log below and the time.
+    pub(crate) async fn the_longest_owner_path_ends_before_the_lease_does(
+        registry: Arc<dyn PreparationRegistry>,
+    ) {
+        use crate::tabular_prepare::registry_faults::{FaultyRegistry, Slow};
+        let source = fresh_source();
+        let source = source.as_str();
+        let start = Utc.with_ymd_and_hms(2026, 10, 6, 12, 0, 0).unwrap();
+        let slow = Slow::new(start);
+        let storage = PlacedStorage::with_source(source, late_word_file());
+        *storage.slow.lock().unwrap() = Some(slow.clone());
+        *storage.second_open_cost.lock().unwrap() = Some(PREP_TIMEOUT);
+        *storage.remove_source_on_second_open.lock().unwrap() = true;
+        *storage.fail_delete.lock().unwrap() = true;
+        let faulty = FaultyRegistry::new(registry.clone());
+        *faulty.faults.slow.lock().unwrap() = Some(slow.clone());
+        let progress = Arc::new(Recording::default());
+        *progress.slow.lock().unwrap() = Some(slow.clone());
+        let clock = slow.clone();
+        let env = env(faulty, storage.clone())
+            .with_clock(Arc::new(move || clock.now()))
+            .with_progress(progress)
+            .with_writer(WriterConfig {
+                max_rows: 2000,
+                max_bytes: usize::MAX,
+            });
+        let out = prepare_csv(&env, &request(source, 60_000)).await.unwrap();
+        assert!(matches!(out, PrepareOutcome::Failed(_)), "{out:?}");
+        let log = slow.log.lock().unwrap().clone();
+        let ops: Vec<&str> = log.iter().map(|(op, _)| *op).collect();
+        assert_eq!(
+            ops,
+            [
+                "claim",
+                "progress",
+                "still_owned",
+                "delete",
+                "still_owned",
+                "delete",
+                "fail_with_blobs",
+                "progress"
+            ],
+            "the path changed: update the proof (JOB_GRACE, MAX_OWNER_STEPS)"
         );
+        // Every action that needs the lease happened before it ran out.
+        let lease_until = slow.lease_until.lock().unwrap().expect("the claimed lease");
+        for (op, at) in &log {
+            if matches!(*op, "delete" | "fail_with_blobs" | "release" | "complete") {
+                assert!(
+                    at < &lease_until,
+                    "{op} at {at} after the lease {lease_until}"
+                );
+            }
+        }
+        // And the lease is the budget plus the grace.
+        assert_eq!(lease_until, start + chrono::Duration::seconds(300 + 90));
     }
 
     pub(crate) async fn a_cleanup_of_a_deleted_source_that_does_not_answer_keeps_the_row_and_its_keys(
@@ -2030,9 +2090,38 @@ pub(crate) mod cases {
         }
     }
 
+    /// A log event can be lost when the first hit of its call site races another
+    /// test's (tracing's call-site registration is global), never invented. So the
+    /// scenarios run again until every event is seen, and what must not appear is
+    /// checked on every run.
     pub(crate) async fn logs_carry_a_fixed_sentence_a_kind_and_an_opaque_id_never_a_key_or_adapter_text(
         registry: Arc<dyn PreparationRegistry>,
     ) {
+        for attempt in 0..10 {
+            let (text, ids) = log_scenarios(&registry).await;
+            for forbidden in ["secret", "chat-attachments", ".csv", "prepared/"] {
+                assert!(
+                    !text.contains(forbidden),
+                    "{forbidden:?} in the log:\n{text}"
+                );
+            }
+            let seen = ids.iter().all(|id| text.contains(id.as_str()))
+                && text.contains("kind=\"registry\"")
+                && text.contains("kind=\"upload_failed\"");
+            for id in &ids {
+                assert_eq!(id.len(), 12);
+                // Hexadecimal digits of a digest, not a piece of the key.
+                assert!(id.bytes().all(|b| b.is_ascii_hexdigit()), "{id}");
+                assert!(!"chat-attachments/u/s/".contains(id.as_str()));
+            }
+            if seen {
+                return;
+            }
+            assert!(attempt < 9, "events missing after ten runs:\n{text}");
+        }
+    }
+
+    async fn log_scenarios(registry: &Arc<dyn PreparationRegistry>) -> (String, Vec<String>) {
         use crate::tabular_prepare::registry_faults::FaultyRegistry;
         use std::sync::atomic::Ordering::SeqCst;
         let captured = Captured::default();
@@ -2041,6 +2130,8 @@ pub(crate) mod cases {
             .with_ansi(false)
             .finish();
         let _guard = tracing::subscriber::set_default(subscriber);
+        // Callsites first hit by other tests with no subscriber cache "never": look again.
+        tracing::callsite::rebuild_interest_cache();
         let config = PrepareConfig::from_switch(Some("on"));
         let mut ids = Vec::new();
         // 1. The registry cannot record the outcome (its text names a key).
@@ -2077,24 +2168,7 @@ pub(crate) mod cases {
         ids.push(opaque_id(&source));
 
         let text = String::from_utf8(captured.0.lock().unwrap().clone()).unwrap();
-        for forbidden in ["secret", "chat-attachments", ".csv", "prepared/"] {
-            assert!(
-                !text.contains(forbidden),
-                "{forbidden:?} in the log:\n{text}"
-            );
-        }
-        // The identifier is there, opaque and stable, and each line has a kind or a reason.
-        for id in &ids {
-            assert_eq!(id.len(), 12);
-            // Hexadecimal digits of a digest, not a piece of the key.
-            assert!(id.bytes().all(|b| b.is_ascii_hexdigit()), "{id}");
-            assert!(!"chat-attachments/u/s/".contains(id.as_str()));
-            assert!(text.contains(id.as_str()), "{id} missing:\n{text}");
-        }
-        assert!(
-            text.contains("kind=\"registry\"") && text.contains("kind=\"upload_failed\""),
-            "{text}"
-        );
+        (text, ids)
     }
 
     pub(crate) async fn a_source_key_that_cannot_be_a_key_is_refused_without_a_row(
@@ -2476,8 +2550,8 @@ mod registry_tests {
         a_delete_that_never_returns_does_not_hold_the_failure_back
     );
     sqlite_case!(
-        tabular_prepare_the_lease_is_the_budget_plus_the_grace_and_outlasts_the_bounded_job,
-        the_lease_is_the_budget_plus_the_grace_and_outlasts_the_bounded_job
+        tabular_prepare_the_claimed_lease_is_the_budget_plus_the_job_grace,
+        the_claimed_lease_is_the_budget_plus_the_job_grace
     );
     sqlite_case!(
         tabular_prepare_a_cleanup_of_a_deleted_source_that_does_not_answer_keeps_the_row_and_its_keys,
@@ -2502,5 +2576,9 @@ mod registry_tests {
     sqlite_case!(
         tabular_prepare_a_release_that_never_returns_is_given_up_on,
         a_release_that_never_returns_is_given_up_on
+    );
+    sqlite_case!(
+        tabular_prepare_the_longest_owner_path_ends_before_the_lease_does,
+        the_longest_owner_path_ends_before_the_lease_does
     );
 }

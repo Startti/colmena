@@ -8,8 +8,56 @@ use chrono::{DateTime, Duration, Utc};
 use std::sync::atomic::{AtomicBool, Ordering::SeqCst};
 use std::sync::Arc;
 
+/// A virtual clock for the proof that a job ends before its lease does: every
+/// bounded step that passes through it takes (almost) its full bound, and each
+/// step is logged with the time at which it took effect.
+pub(crate) struct Slow {
+    now: std::sync::Mutex<DateTime<Utc>>,
+    pub log: std::sync::Mutex<Vec<(&'static str, DateTime<Utc>)>>,
+    pub lease_until: std::sync::Mutex<Option<DateTime<Utc>>>,
+    inside_budget: AtomicBool,
+}
+
+impl Slow {
+    pub fn new(start: DateTime<Utc>) -> Arc<Self> {
+        Arc::new(Self {
+            now: std::sync::Mutex::new(start),
+            log: std::sync::Mutex::new(Vec::new()),
+            lease_until: std::sync::Mutex::new(None),
+            inside_budget: AtomicBool::new(false),
+        })
+    }
+    pub fn now(&self) -> DateTime<Utc> {
+        *self.now.lock().unwrap()
+    }
+    pub fn advance(&self, by: std::time::Duration) {
+        *self.now.lock().unwrap() += Duration::from_std(by).unwrap();
+    }
+    /// A step that takes its whole bound (less a millisecond), then takes effect.
+    /// The conversion runs inside the budget, which is modelled as one block of time
+    /// (see `leave_budget`): the steps inside it neither advance the clock nor count.
+    pub fn enter_budget(&self) {
+        self.inside_budget.store(true, SeqCst);
+    }
+    /// The budget is over: it took its whole length.
+    pub fn leave_budget(&self, length: std::time::Duration) {
+        self.advance(length);
+        self.inside_budget.store(false, SeqCst);
+    }
+    pub fn pass(&self, op: &'static str) {
+        if self.inside_budget.load(SeqCst) {
+            return;
+        }
+        self.advance(
+            crate::tabular_prepare::driver::TERMINAL_STEP - std::time::Duration::from_millis(1),
+        );
+        self.log.lock().unwrap().push((op, self.now()));
+    }
+}
+
 #[derive(Default)]
 pub(crate) struct Faults {
+    pub slow: std::sync::Mutex<Option<Arc<Slow>>>,
     /// `complete` answers a backend error whose text must never be logged.
     pub fail_complete: AtomicBool,
     /// `complete` never returns.
@@ -52,7 +100,17 @@ pub(crate) const SECRET: &str = "secret-registry-text-chat-attachments/u/s/x.csv
 #[async_trait]
 impl PreparationRegistry for FaultyRegistry {
     async fn claim(&self, r: ClaimRequest) -> Result<Option<Claim>, RegistryError> {
-        self.inner.claim(r).await
+        let slow = self.faults.slow.lock().unwrap().clone();
+        if let Some(s) = &slow {
+            s.pass("claim");
+        }
+        let key = r.source_key.clone();
+        let out = self.inner.claim(r).await?;
+        if let Some(s) = slow {
+            *s.lease_until.lock().unwrap() =
+                self.inner.get(&key).await?.and_then(|row| row.lease_until);
+        }
+        Ok(out)
     }
     async fn complete(
         &self,
@@ -61,6 +119,9 @@ impl PreparationRegistry for FaultyRegistry {
         i: ReadyInfo,
         n: DateTime<Utc>,
     ) -> Result<TerminalOutcome, RegistryError> {
+        if let Some(s) = self.faults.slow.lock().unwrap().clone() {
+            s.pass("complete");
+        }
         if self.faults.hang_complete.load(SeqCst) {
             self.faults.complete_reached.notify_one();
             futures::future::pending::<()>().await;
@@ -79,6 +140,9 @@ impl PreparationRegistry for FaultyRegistry {
         b: &[String],
         n: DateTime<Utc>,
     ) -> Result<TerminalOutcome, RegistryError> {
+        if let Some(s) = self.faults.slow.lock().unwrap().clone() {
+            s.pass("fail_with_blobs");
+        }
         if self.faults.hang_fail.load(SeqCst) {
             self.faults.fail_reached.notify_one();
             futures::future::pending::<()>().await;
@@ -103,12 +167,21 @@ impl PreparationRegistry for FaultyRegistry {
         if self.faults.delete_before_track.swap(false, SeqCst) {
             self.inner.delete(k).await?;
         }
+        if let Some(s) = self.faults.slow.lock().unwrap().clone() {
+            s.enter_budget();
+        }
         self.inner.track_blobs(k, o, b, n).await
     }
     async fn still_owned(&self, k: &str, o: &str) -> Result<bool, RegistryError> {
+        if let Some(s) = self.faults.slow.lock().unwrap().clone() {
+            s.pass("still_owned");
+        }
         self.inner.still_owned(k, o).await
     }
     async fn release(&self, k: &str, o: &str) -> Result<bool, RegistryError> {
+        if let Some(s) = self.faults.slow.lock().unwrap().clone() {
+            s.pass("release");
+        }
         if self.faults.hang_release.load(SeqCst) {
             self.faults.release_reached.notify_one();
             futures::future::pending::<()>().await;
