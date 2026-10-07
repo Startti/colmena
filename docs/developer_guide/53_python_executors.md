@@ -184,6 +184,14 @@ by group or others, and the descriptors it ends up with are what gets bound, so 
 changes nothing. `check_out_volume` refuses an `out` that is larger than the bound the header declares, has no size, or
 shares the volume of the call directory.
 
+The call header carries an optional `mounts` object `{stage_id, out_mb}` and nothing else: a call without prepared
+data sends exactly the header it always sent, with no `mounts` key. The jail needs a staging root to honour it, set
+with `COLMENA_PYTHON_EXECUTOR_STAGING_DIR` (an absolute, existing directory without `..`, canonicalised once at
+startup) and read ONLY while `COLMENA_LARGE_TABULAR` is on; with the switch off the variable is not even looked at.
+The subprocess executor passes it to the template as `--staging-root`, as `python_executor self-test` and `zygote`
+accept it. `SubprocessExecutor::run_staged` is the call that sends `mounts`; without a staging root it starts no
+child. For now the jail refuses a call that asks for mounts (it ends before any code runs, with the crash text).
+
 ### Startup self-test (Linux)
 
 Before it binds its socket, the template forks a throwaway child that enters the jail as slot 9999 (uid

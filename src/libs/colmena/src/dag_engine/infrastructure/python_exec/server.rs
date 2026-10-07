@@ -351,6 +351,7 @@ fn start(args: ServeArgs) -> Result<(), (i32, String)> {
         uid_base: cfg.uid_base,
         tmp_mb: cfg.tmp_mb,
         hide_paths: cfg.hide_paths.clone(),
+        staging_root: cfg.staging_root.clone(),
     };
     // First, while this is the only thread: the self-test forks.
     if let Err(checks) = selftest::run(&spec) {

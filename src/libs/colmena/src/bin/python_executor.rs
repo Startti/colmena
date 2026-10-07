@@ -30,6 +30,8 @@ mod linux {
             tmp_mb: u64,
             #[arg(long = "hide", value_parser = absolute)]
             hide: Vec<PathBuf>,
+            #[arg(long, value_parser = absolute)]
+            staging_root: Option<PathBuf>,
         },
         /// Proves each layer of the process jail in a throwaway child. Prints
         /// one JSON object per check and exits 0 only when every one held.
@@ -40,6 +42,8 @@ mod linux {
             tmp_mb: u64,
             #[arg(long = "hide", value_parser = absolute)]
             hide: Vec<PathBuf>,
+            #[arg(long, value_parser = absolute)]
+            staging_root: Option<PathBuf>,
         },
         /// HTTP front for remote callers: `POST /v1/run`, `GET /healthz` and
         /// `GET /readyz`. The executor takes the `COLMENA_PYTHON_EXECUTOR_*`
@@ -86,23 +90,27 @@ mod linux {
                 uid_base,
                 tmp_mb,
                 hide,
+                staging_root,
             } => zygote::run(zygote::ZygoteArgs {
                 socket,
                 jail: JailSpec {
                     uid_base,
                     tmp_mb,
                     hide_paths: hide,
+                    staging_root,
                 },
             }),
             Cmd::SelfTest {
                 uid_base,
                 tmp_mb,
                 hide,
+                staging_root,
             } => {
                 let spec = JailSpec {
                     uid_base,
                     tmp_mb,
                     hide_paths: hide,
+                    staging_root,
                 };
                 let (code, checks) = match selftest::run(&spec) {
                     Ok(checks) => (0, checks),

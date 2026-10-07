@@ -23,6 +23,7 @@ const HEADER: CallHeader = CallHeader {
     memory_mb: 256,
     cpu_secs: 5,
     max_request_bytes: 1024,
+    mounts: None,
 };
 /// A probe still running after this counts as failed.
 const PROBE_TIMEOUT: Duration = Duration::from_secs(30);

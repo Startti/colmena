@@ -57,6 +57,10 @@ pub struct JailSpec {
     pub tmp_mb: u64,
     /// Absolute paths hidden on top of [`DEFAULT_HIDDEN`], files included.
     pub hide_paths: Vec<PathBuf>,
+    /// Where calls that carry prepared data are staged (dark behind
+    /// `COLMENA_LARGE_TABULAR`); `None` is today's jail, with nothing added.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub staging_root: Option<PathBuf>,
 }
 
 /// The layer that could not be applied, and why.
@@ -240,6 +244,11 @@ pub fn enter(spec: &JailSpec, hdr: &CallHeader, conn: UnixStream) -> Result<Unix
         None,
     )
     .map_err(at("mounts"))?;
+    // Prepared data is not bound yet: a call that asks for it ends here, before
+    // any code runs, rather than running without it.
+    if hdr.mounts.is_some() {
+        return Err(at("mounts")(io::Error::from(io::ErrorKind::Unsupported)));
+    }
     mount(
         Some("tmpfs"),
         Path::new("/tmp"),
@@ -316,12 +325,27 @@ pub fn enter(spec: &JailSpec, hdr: &CallHeader, conn: UnixStream) -> Result<Unix
 mod tests {
     use super::*;
 
+    /// Without a staging root the spec is the bytes it always was.
+    #[test]
+    fn a_spec_without_staging_is_byte_for_byte_what_it_was() {
+        let today = r#"{"uid_base":20000,"tmp_mb":64,"hide_paths":["/x"]}"#;
+        let spec = JailSpec {
+            uid_base: 20000,
+            tmp_mb: 64,
+            hide_paths: vec!["/x".into()],
+            staging_root: None,
+        };
+        assert_eq!(serde_json::to_string(&spec).unwrap(), today);
+        assert_eq!(serde_json::from_str::<JailSpec>(today).unwrap(), spec);
+    }
+
     #[test]
     fn root_and_an_overflowing_slot_uid_are_refused() {
         let spec = |uid_base| JailSpec {
             uid_base,
             tmp_mb: 1,
             hide_paths: vec![],
+            staging_root: None,
         };
         assert_eq!(uid_for(&spec(u32::MAX - 1), 2), u32::MAX);
         for (uid_base, slot) in [(0, 0), (u32::MAX - 1, 1), (u32::MAX - 1, 2)] {
