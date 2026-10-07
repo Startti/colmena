@@ -35,14 +35,78 @@ fn postlude() -> String {
     small[at..].to_string()
 }
 
+/// What follows the postlude: when the code wrote files with `emit_table`, the
+/// answer carries their report next to the result, under a marker the runtime
+/// unwraps. Nothing is added when no file was written.
+const EMITTED_TAIL: &str =
+    "if _ct_emitted:\n    output = {'__colmena_emitted': _ct_emitted, 'result': output}\n";
+
+/// The key the report travels under.
+pub const EMITTED_KEY: &str = "__colmena_emitted";
+
 /// The model's code wrapped for the large path: the same imports and the same
 /// `result` convention as the small path, with `tables` and the `df` guard in
 /// place of a loaded DataFrame.
 pub fn wrap_large_code(code: &str) -> String {
     format!(
-        "\nimport pandas as pd\nimport numpy as np\nimport scipy.stats as stats\n\n{PRELUDE}\nresult = None\n\n{code}\n\n{}\n",
+        "\nimport pandas as pd\nimport numpy as np\nimport scipy.stats as stats\n\n{PRELUDE}\nresult = None\n\n{code}\n\n{}\n{EMITTED_TAIL}",
         postlude()
     )
+}
+
+/// What the code says about a file it wrote with `emit_table`. Untrusted: it
+/// comes from the sandbox, so it is only ever shown beside a file the reader kept,
+/// matched by name, and every field is cleaned.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EmitReport {
+    pub name: String,
+    pub rows: Option<u64>,
+    pub dtypes: Vec<(String, String)>,
+}
+
+/// Most columns of dtypes kept, and the longest name or dtype text.
+const MAX_REPORT_COLUMNS: usize = 200;
+const MAX_REPORT_TEXT: usize = 64;
+
+/// Splits the answer of a wrapped run into the code's result and the reports of
+/// the files it wrote. An answer without the marker is the result as it is.
+pub fn unwrap_emitted(output: Value) -> (Value, Vec<EmitReport>) {
+    let Value::Object(mut map) = output else {
+        return (output, vec![]);
+    };
+    if map.len() != 2 || !map.contains_key(EMITTED_KEY) || !map.contains_key("result") {
+        return (Value::Object(map), vec![]);
+    }
+    let result = map.remove("result").unwrap_or(Value::Null);
+    let clean = |text: &str| crate::llm::domain::large_tabular::inert_text(text, MAX_REPORT_TEXT);
+    let reports = map
+        .remove(EMITTED_KEY)
+        .and_then(|v| match v {
+            Value::Array(items) => Some(items),
+            _ => None,
+        })
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|item| {
+            let name = item.get("name")?.as_str()?.to_string();
+            let dtypes = item
+                .get("dtypes")
+                .and_then(Value::as_object)
+                .map(|m| {
+                    m.iter()
+                        .take(MAX_REPORT_COLUMNS)
+                        .filter_map(|(k, v)| Some((clean(k), clean(v.as_str()?))))
+                        .collect()
+                })
+                .unwrap_or_default();
+            Some(EmitReport {
+                name,
+                rows: item.get("rows").and_then(Value::as_u64),
+                dtypes,
+            })
+        })
+        .collect();
+    (result, reports)
 }
 
 /// The inputs the prelude reads: the chosen tables (name, position in the
@@ -71,6 +135,11 @@ pub fn prelude_inputs(manifest: &Manifest, tables: &[usize]) -> Map<String, Valu
     inputs.insert("_ct_tables".into(), Value::Array(chosen));
     inputs.insert("_ct_data_dir".into(), Value::from(DATA_DIR));
     inputs.insert("_ct_read_max".into(), Value::from(READ_MAX_BYTES));
+    let out = crate::tabular_run::collect::CollectLimits::default();
+    inputs.insert("_ct_out_dir".into(), Value::from("/out"));
+    inputs.insert("_ct_out_files".into(), Value::from(out.max_files));
+    inputs.insert("_ct_out_file_max".into(), Value::from(out.file_bytes));
+    inputs.insert("_ct_out_total_max".into(), Value::from(out.total_bytes));
     inputs
 }
 
@@ -232,7 +301,12 @@ mod tests {
         }
         // The same postlude, byte for byte.
         let tail = |s: &str| s[s.find(POSTLUDE_MARKER).unwrap()..].trim_end().to_string();
-        assert_eq!(tail(&wrapped), tail(&small));
+        assert_eq!(
+            tail(&wrapped)
+                .trim_end_matches(EMITTED_TAIL.trim_end())
+                .trim_end(),
+            tail(&small)
+        );
         assert!(!wrapped.contains("_attachment_records"));
         assert!(wrapped.contains(PRELUDE));
         // The prelude comes before the model's code, so `tables` exists for it.
@@ -334,6 +408,59 @@ mod tests {
     }
 
     #[test]
+    fn the_report_of_written_files_is_split_from_the_result_and_cleaned() {
+        let out = json!({
+            "__colmena_emitted": [
+                {"name": "a.csv", "rows": 3, "dtypes": {"x": "int64", "bad`col": "ob\nject"}, "size": 9},
+                {"rows": 1},
+                "junk"
+            ],
+            "result": {"total": 5}
+        });
+        let (result, reports) = unwrap_emitted(out);
+        assert_eq!(result, json!({"total": 5}));
+        assert_eq!(reports.len(), 1);
+        assert_eq!(reports[0].rows, Some(3));
+        assert_eq!(
+            reports[0].dtypes[1],
+            ("badcol".to_string(), "ob ject".to_string())
+        );
+        // No marker: the answer is the result, whatever its shape.
+        for plain in [
+            json!({"a": 1}),
+            json!([1]),
+            json!(null),
+            json!({"result": 1, "other": 2}),
+        ] {
+            assert_eq!(unwrap_emitted(plain.clone()), (plain, vec![]));
+        }
+    }
+
+    fn emit_failure(body: &str) -> String {
+        let mut m = inputs();
+        m.insert("_ct_out_files".into(), Value::from(2));
+        m.insert("_ct_out_dir".into(), Value::from("/nonexistent-out"));
+        failure(body, m)
+    }
+
+    /// The checks that need no pandas: format, name, count and duplicates.
+    #[test]
+    fn emit_table_refuses_a_bad_format_name_or_count_before_touching_anything() {
+        let msg = emit_failure("emit_table(None, 'a', 'xlsx')");
+        assert!(msg.contains("'csv' or 'parquet'"), "{msg}");
+        for bad in ["", "a b", "../x", "x.csv", "é", &"n".repeat(49)] {
+            let msg = emit_failure(&format!("emit_table(None, {bad:?})"));
+            assert!(msg.contains("1 to 48 letters"), "{bad:?}: {msg}");
+        }
+        let msg = emit_failure("_ct_emitted.extend([{'name': 'a.csv', 'size': 0}, {'name': 'b.csv', 'size': 0}])\n    emit_table(None, 'c')");
+        assert!(msg.contains("at most 2 files"), "{msg}");
+        let msg = emit_failure(
+            "_ct_emitted.append({'name': 'a.csv', 'size': 0})\n    emit_table(None, 'a')",
+        );
+        assert!(msg.contains("already written"), "{msg}");
+    }
+
+    #[test]
     fn inputs_keep_the_manifest_position_of_the_chosen_tables_and_no_path_or_key() {
         let m = prelude_inputs(&manifest(), &[1]);
         let tables = m["_ct_tables"].as_array().unwrap();
@@ -343,6 +470,10 @@ mod tests {
         assert_eq!(tables[0]["columns"][0]["type"], "string");
         assert_eq!(m["_ct_data_dir"], DATA_DIR);
         assert_eq!(m["_ct_read_max"], READ_MAX_BYTES);
+        assert_eq!(m["_ct_out_dir"], "/out");
+        assert_eq!(m["_ct_out_files"], 8);
+        assert_eq!(m["_ct_out_file_max"], 64 * 1024 * 1024);
+        assert_eq!(m["_ct_out_total_max"], 128 * 1024 * 1024);
         // An index the manifest does not have is dropped, not invented.
         assert_eq!(
             prelude_inputs(&manifest(), &[7])["_ct_tables"],
@@ -460,5 +591,120 @@ mod reads {
         let code = wrap_large_code("result = df.shape");
         let err = python(&code, "restricted", &inputs).unwrap_err();
         assert!(err.contains("`df` is not loaded"), "{err}");
+    }
+
+    /// Inputs for the output helper, pointing at `out`.
+    fn emitting(out: &std::path::Path) -> Option<Map<String, Value>> {
+        let dir = tempfile::tempdir().unwrap();
+        let mut inputs = staged(dir.path())?;
+        std::mem::forget(dir);
+        inputs.insert("_ct_out_dir".into(), Value::from(out.to_str().unwrap()));
+        Some(inputs)
+    }
+
+    #[test]
+    fn emit_table_writes_csv_from_a_frame_and_from_parts_with_one_header() {
+        let out = tempfile::tempdir().unwrap();
+        let Some(inputs) = emitting(out.path()) else {
+            return;
+        };
+        let report = run(
+            "emit_table(tables['t'].head(3, columns=['a']), 'head')\n\
+             emit_table(tables['t'].parts(columns=['a', 'b']), 'all')\n\
+             output = _ct_emitted",
+            &inputs,
+        );
+        assert_eq!(report[0]["name"], "head.csv");
+        assert_eq!(report[0]["rows"], 3);
+        assert_eq!(report[1]["rows"], 10);
+        assert_eq!(
+            report[1]["dtypes"],
+            serde_json::json!({"a": "int64", "b": "object"})
+        );
+        let all = std::fs::read_to_string(out.path().join("all.csv")).unwrap();
+        assert_eq!(all.lines().count(), 11, "one header and ten rows: {all}");
+        assert!(all.starts_with("a,b\n0,v\n"));
+    }
+
+    #[test]
+    fn emit_table_writes_one_parquet_and_refuses_several() {
+        let out = tempfile::tempdir().unwrap();
+        let Some(inputs) = emitting(out.path()) else {
+            return;
+        };
+        let ok = run(
+            "emit_table(tables['t'].read(columns=['a']), 'one', 'parquet')\noutput = _ct_emitted[0]['rows']",
+            &inputs,
+        );
+        assert_eq!(ok, 10);
+        assert!(
+            std::fs::metadata(out.path().join("one.parquet"))
+                .unwrap()
+                .len()
+                > 0
+        );
+        let msg = python(
+            &format!("{PRELUDE}\ntry:\n    emit_table(tables['t'].parts(), 'x', 'parquet')\nexcept LargeTableError as e:\n    output = str(e)"),
+            "restricted",
+            &inputs,
+        )
+        .unwrap();
+        assert!(
+            msg.as_str()
+                .unwrap()
+                .contains("parquet takes one DataFrame"),
+            "{msg}"
+        );
+    }
+
+    /// A file over its limit is refused in the sandbox with the way out, after
+    /// the chunk that crossed it; the reader would drop it anyway.
+    #[test]
+    fn emit_table_refuses_a_file_over_the_limit_with_a_clear_error() {
+        let out = tempfile::tempdir().unwrap();
+        let Some(mut inputs) = emitting(out.path()) else {
+            return;
+        };
+        inputs.insert("_ct_out_file_max".into(), Value::from(20));
+        let msg = python(
+            &format!("{PRELUDE}\ntry:\n    emit_table(tables['t'].parts(), 'big')\nexcept LargeTableError as e:\n    output = str(e)"),
+            "restricted",
+            &inputs,
+        )
+        .unwrap();
+        let text = msg.as_str().unwrap();
+        assert!(
+            text.contains("big.csv is over the limit") && text.contains("aggregate"),
+            "{text}"
+        );
+    }
+
+    /// Through the wrapper: the report travels beside the result under the marker
+    /// and `unwrap_emitted` splits it; with no file written the answer is the
+    /// result alone.
+    #[test]
+    fn the_wrapped_answer_carries_the_report_only_when_a_file_was_written() {
+        let out = tempfile::tempdir().unwrap();
+        let Some(inputs) = emitting(out.path()) else {
+            return;
+        };
+        if python("import scipy", "none", &Map::new()).is_err() {
+            eprintln!("skipped: scipy is needed by the wrapper's imports");
+            return;
+        }
+        let with = python(
+            &wrap_large_code("emit_table(tables['t'].head(2, columns=['a']), 'h')\nresult = 7"),
+            "restricted",
+            &inputs,
+        )
+        .unwrap();
+        let (result, reports) = unwrap_emitted(with);
+        assert_eq!(result, 7);
+        assert_eq!(
+            (reports[0].name.as_str(), reports[0].rows),
+            ("h.csv", Some(2))
+        );
+        let without = python(&wrap_large_code("result = 7"), "restricted", &inputs).unwrap();
+        assert_eq!(without, 7);
     }
 }

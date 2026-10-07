@@ -4,6 +4,9 @@
 # `read` needs columns and has a size limit, `parts` is the only unbounded path.
 # Uses only what restricted mode allows; the user's code never imports pyarrow.
 
+import re as _re
+
+
 class LargeTableError(ValueError):
     pass
 
@@ -219,6 +222,62 @@ class _NoDf:
 
     def __repr__(self):
         self._no()
+
+
+_CT_OUT_NAME = _re.compile(r'^[A-Za-z0-9_-]{1,48}$')
+_ct_emitted = []
+
+
+def _ct_file_size(path):
+    # The size of a file without reading it: a read-only map, which needs no open().
+    import numpy as _np
+    try:
+        return int(_np.memmap(path, dtype='uint8', mode='r').shape[0])
+    except (ValueError, OSError):
+        return 0
+
+
+def emit_table(data, name, format='csv'):
+    """Write a DataFrame (or, for csv, an iterable of DataFrames) to a file that
+    is returned with the answer. Limits: a few files, each and all together under
+    a size; a file over a limit is refused here, and dropped by the reader anyway."""
+    if format not in ('csv', 'parquet'):
+        _ct_fail("emit_table: format must be 'csv' or 'parquet'")
+    if not isinstance(name, str) or not _CT_OUT_NAME.match(name):
+        _ct_fail("emit_table: name must be 1 to 48 letters, digits, '_' or '-'")
+    if len(_ct_emitted) >= _ct_out_files:
+        _ct_fail("emit_table: at most %d files can be returned" % _ct_out_files)
+    file_name = '%s.%s' % (name, format)
+    if any(e['name'] == file_name for e in _ct_emitted):
+        _ct_fail("emit_table: %s was already written" % file_name)
+    import pandas as pd
+    single = isinstance(data, pd.DataFrame)
+    if format == 'parquet' and not single:
+        _ct_fail("emit_table: parquet takes one DataFrame; use format='csv' for several parts, or combine them first")
+    path = '%s/%s' % (_ct_out_dir, file_name)
+    already = sum(e['size'] for e in _ct_emitted)
+    rows, first, dtypes, size = 0, True, None, 0
+    for frame in ([data] if single else data):
+        if not isinstance(frame, pd.DataFrame):
+            _ct_fail("emit_table takes a DataFrame or an iterable of DataFrames")
+        if dtypes is None:
+            dtypes = {str(c): str(t) for c, t in list(frame.dtypes.items())[:200]}
+        if format == 'csv':
+            frame.to_csv(path, mode='w' if first else 'a', header=first, index=False)
+        else:
+            frame.to_parquet(path, index=False)
+        first = False
+        rows += len(frame)
+        size = _ct_file_size(path)
+        if size > _ct_out_file_max or already + size > _ct_out_total_max:
+            _ct_fail(
+                "emit_table: %s is over the limit (%d MiB for a file, %d MiB for all files); "
+                "return fewer rows or aggregate first"
+                % (file_name, _ct_out_file_max // _CT_MIB, _ct_out_total_max // _CT_MIB)
+            )
+    if first:
+        _ct_fail("emit_table: there was nothing to write")
+    _ct_emitted.append({'name': file_name, 'format': format, 'rows': rows, 'dtypes': dtypes, 'size': size})
 
 
 tables = _Tables(_ct_tables)

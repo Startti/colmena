@@ -21,6 +21,7 @@ pub(super) const LARGE_FILES_TEXT: &str = "\n\nLarge files (over 50 MiB): `df` i
 - `for part in t.parts(columns=[...]):` up to 500,000 rows per part; aggregate\n  each part and combine. Use this for anything that touches every row.\n\
 - `t.head()` to look at a few rows.\n\
 A whole table cannot be loaded at once. Runs may take up to 5 minutes.\n\
+To return a file, call `emit_table(df_or_parts, \"name\", \"csv\" | \"parquet\")` (up to 8 files; parquet takes one DataFrame).\n\
 No charts or images: return aggregated numbers and build charts from them.\n\
 The optional `tables` argument names the tables to make readable (default: all).";
 
