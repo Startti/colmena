@@ -14,10 +14,21 @@ el motor se comporta exactamente como antes, para cualquier tamaño.
   el archivo ni subirlo al proveedor. Registrarlo como adjunto llega en un cambio
   posterior de la misma cadena; hasta entonces el modelo todavía no lo ve. Los campos que lee el motor son `id`, `mime_type`,
   `filename`, `size_bytes` y `storage_key`.
-- Cualquier otra entrada con solo `storage_key` se sigue omitiendo en silencio
-  (no se rechaza): interruptor apagado, otro tipo de archivo, `size_bytes` ausente o
-  menor o igual a 50 MiB (exactamente 50 MiB es pequeño). Las demás entradas no
-  cambian de índice.
+- **Qué debe enviar ADP, exactamente.** `mime_type` igual a `text/csv` o a
+  `application/vnd.openxmlformats-officedocument.spreadsheetml.sheet` (se ignoran
+  mayúsculas y parámetros como `; charset=utf-8`) y `size_bytes` entero, tomado de
+  los metadatos reales del objeto, **mayor** a 52 428 800. No sirven
+  `application/csv`, `text/plain`, `application/vnd.ms-excel` (`.xls`) ni
+  `application/octet-stream` aunque el nombre termine en `.csv` o `.xlsx`: el motor
+  no deduce el tipo por el nombre.
+- Cualquier otra entrada con solo `storage_key` no se registra como archivo grande
+  (no se rechaza ni falla el turno): interruptor apagado, otro tipo de archivo,
+  `size_bytes` ausente o menor o igual a 50 MiB (exactamente 50 MiB es pequeño). Las
+  demás entradas no cambian de índice. Con el interruptor **apagado** se omite en
+  silencio, como siempre. Con el interruptor **encendido** el motor escribe en el
+  log (WARN, siempre activo) el motivo concreto, con el nombre del archivo como
+  texto inerte y nunca la llave (hasta 10 avisos por turno); el aviso al modelo llega
+  en el cambio siguiente.
 - Si la entrada trae además `data`, `url` o `path`, se interpreta como hasta ahora
   (prioridad `data > url > path`): la llave solo se usa cuando no hay ninguna otra
   fuente. El emisor debe omitir `data` y `url` para los archivos grandes.

@@ -1690,7 +1690,7 @@ impl ExecutableNode for LlmNode {
         // Check if there are any files passed in the node inputs
         if let Some(files_val) = inputs.get("files").or_else(|| config.get("files")) {
             if let Some(files_arr) = files_val.as_array() {
-                (resolved_files, parsed_entries) = parse_file_entries_with(
+                (resolved_files, parsed_entries, _) = parse_file_entries_noting(
                     files_arr,
                     crate::dag_engine::engine::local_mode(),
                     large_tabular,
@@ -4435,15 +4435,72 @@ pub(crate) fn parse_file_entries(
 /// the lowest priority: an entry that also has `data`, `url` or `path` parses as
 /// it does today. Any other entry with only a `storage_key` (switch off, another
 /// type, size missing or at most 50 MiB) is skipped silently, as today.
+#[cfg(test)]
 pub(crate) fn parse_file_entries_with(
     arr: &[serde_json::Value],
     local_mode: bool,
     large_tabular: bool,
 ) -> Result<(Vec<crate::llm::domain::FileData>, Vec<usize>), crate::llm::domain::LlmError> {
-    use crate::llm::domain::large_tabular::is_large_tabular;
+    parse_file_entries_noting(arr, local_mode, large_tabular).map(|(files, kept, _)| (files, kept))
+}
+
+/// Most skipped-entry notices one turn carries to the model.
+const MAX_SKIP_NOTICES: usize = 10;
+
+/// The files, the `files[]` index each came from, and the skip notices.
+type ParsedEntries = (Vec<crate::llm::domain::FileData>, Vec<usize>, Vec<String>);
+
+/// Longest filename or mime string a notice repeats.
+const MAX_NOTICE_FIELD: usize = 80;
+
+/// A client-controlled string as inert data (see
+/// [`inert_text`](crate::llm::domain::large_tabular::inert_text)), clipped to
+/// [`MAX_NOTICE_FIELD`].
+fn clipped(text: &str) -> String {
+    crate::llm::domain::large_tabular::inert_text(text, MAX_NOTICE_FIELD)
+}
+
+/// Why a key-only entry was not routed as a large tabular file. Names the file
+/// and what the host sent as delimited data; never the key.
+fn skipped_key_entry_notice(
+    filename: &str,
+    mime_type: &str,
+    size_hint: Option<u64>,
+    key_problem: Option<&str>,
+) -> String {
+    use crate::llm::domain::large_tabular::LARGE_TABULAR_THRESHOLD_BYTES as LIMIT;
+    let reason = match (key_problem, size_hint) {
+        (Some(problem), _) => problem.to_string(),
+        (None, None) => "the entry has no size_bytes".to_string(),
+        (None, Some(size)) if size <= LIMIT => {
+            format!("it is {size} bytes, not above {LIMIT}")
+        }
+        (None, Some(_)) => format!(
+            "its mime type [mime: {}] is not text/csv or an xlsx workbook",
+            clipped(mime_type)
+        ),
+    };
+    format!(
+        "[file: {}] was not delivered: {reason}, so it is not a large tabular file, and an \
+         entry with only a storage key is not read otherwise.",
+        clipped(filename)
+    )
+}
+
+/// [`parse_file_entries_with`] that also reports why each key-only entry was
+/// skipped, for the turn to tell the model. Notices exist only with the switch
+/// on, at most [`MAX_SKIP_NOTICES`]; with it off nothing is reported and every
+/// entry is handled exactly as before.
+pub(crate) fn parse_file_entries_noting(
+    arr: &[serde_json::Value],
+    local_mode: bool,
+    large_tabular: bool,
+) -> Result<ParsedEntries, crate::llm::domain::LlmError> {
+    use crate::llm::domain::large_tabular::{is_large_tabular, validate_storage_key};
     use crate::llm::domain::{FileData, FileSource, LlmError};
     let mut out = Vec::with_capacity(arr.len());
     let mut kept = Vec::with_capacity(arr.len());
+    let mut notices: Vec<String> = Vec::new();
 
     for (index, file_obj) in arr.iter().enumerate() {
         let Some(obj) = file_obj.as_object() else {
@@ -4538,12 +4595,31 @@ pub(crate) fn parse_file_entries_with(
                 }
             };
             FileSource::InlineBytes { bytes }
-        } else if let Some(key) =
-            storage_key_present.filter(|_| is_large_tabular(&mime_type, size_hint, large_tabular))
-        {
+        } else if let Some(key) = storage_key_present.filter(|key| {
+            is_large_tabular(&mime_type, size_hint, large_tabular)
+                && validate_storage_key(key).is_ok()
+        }) {
             FileSource::StorageRef(key.to_string())
         } else {
-            crate::colmena_log!("WARN: file entry has no data/url/path; skipping");
+            if large_tabular && storage_key_present.is_some() {
+                let key_problem = storage_key_present
+                    .and_then(|key| validate_storage_key(key).err())
+                    .filter(|_| is_large_tabular(&mime_type, size_hint, large_tabular));
+                let notice =
+                    skipped_key_entry_notice(&filename, &mime_type, size_hint, key_problem);
+                // An operational log, always on: the skipped entry must be traceable.
+                tracing::warn!(
+                    target: "colmena::attachment",
+                    event = "attachment.key_only_entry_skipped",
+                    notice = %notice,
+                    "storage_key-only file entry skipped"
+                );
+                if notices.len() < MAX_SKIP_NOTICES {
+                    notices.push(notice);
+                }
+            } else {
+                crate::colmena_log!("WARN: file entry has no data/url/path; skipping");
+            }
             continue;
         };
 
@@ -4558,7 +4634,7 @@ pub(crate) fn parse_file_entries_with(
         kept.push(index);
     }
 
-    Ok((out, kept))
+    Ok((out, kept, notices))
 }
 
 /// Persist the bytes of an inbound attachment (`inputs.files[]`) to the
@@ -8504,3 +8580,6 @@ mod large_files;
 
 #[cfg(test)]
 mod storage_key_entries;
+
+#[cfg(test)]
+mod attachment_notices;
