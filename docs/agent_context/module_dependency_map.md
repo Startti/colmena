@@ -5,8 +5,8 @@
 
 **How to use (for the exploration/spec phase):** before opening files to assess a change, look up the target file below. **Used by** is its blast radius — the files that break if you change its public surface. **Depends on** is what it needs. Start by reading only those, not the whole repo.
 
-- Files indexed: **457**
-- Modules with at least one importer: **223**
+- Files indexed: **458**
+- Modules with at least one importer: **224**
 
 ## Blast-radius ranking (change these with the most care)
 
@@ -2166,7 +2166,7 @@
 
 #### `src/libs/colmena/src/tabular_prepare/csv.rs`
 - Module: `tabular_prepare::csv`
-- **Used by (3)**: `src/libs/colmena/src/tabular_prepare/convert.rs`, `src/libs/colmena/src/tabular_prepare/driver.rs`, `src/libs/colmena/src/tabular_prepare/scan.rs`
+- **Used by (4)**: `src/libs/colmena/src/tabular_prepare/convert.rs`, `src/libs/colmena/src/tabular_prepare/driver.rs`, `src/libs/colmena/src/tabular_prepare/scan.rs`, `src/libs/colmena/src/tabular_prepare/xlsx_columns.rs`
 - Depends on (3): `tabular_prepare::infer`, `tabular_prepare::manifest`, `tabular_prepare::scan`
 
 #### `src/libs/colmena/src/tabular_prepare/driver.rs`
@@ -2181,12 +2181,12 @@
 
 #### `src/libs/colmena/src/tabular_prepare/infer.rs`
 - Module: `tabular_prepare::infer`
-- **Used by (2)**: `src/libs/colmena/src/tabular_prepare/convert.rs`, `src/libs/colmena/src/tabular_prepare/csv.rs`
+- **Used by (3)**: `src/libs/colmena/src/tabular_prepare/convert.rs`, `src/libs/colmena/src/tabular_prepare/csv.rs`, `src/libs/colmena/src/tabular_prepare/xlsx_columns.rs`
 - Depends on (1): `tabular_prepare::manifest`
 
 #### `src/libs/colmena/src/tabular_prepare/manifest.rs`
 - Module: `tabular_prepare::manifest`
-- **Used by (7)**: `src/libs/colmena/src/tabular_prepare/convert.rs`, `src/libs/colmena/src/tabular_prepare/csv.rs`, `src/libs/colmena/src/tabular_prepare/driver.rs`, `src/libs/colmena/src/tabular_prepare/infer.rs`, `src/libs/colmena/src/tabular_prepare/part_sink.rs`, `src/libs/colmena/src/tabular_prepare/prepare.rs`, `src/libs/colmena/src/tabular_prepare/writer.rs`
+- **Used by (8)**: `src/libs/colmena/src/tabular_prepare/convert.rs`, `src/libs/colmena/src/tabular_prepare/csv.rs`, `src/libs/colmena/src/tabular_prepare/driver.rs`, `src/libs/colmena/src/tabular_prepare/infer.rs`, `src/libs/colmena/src/tabular_prepare/part_sink.rs`, `src/libs/colmena/src/tabular_prepare/prepare.rs`, `src/libs/colmena/src/tabular_prepare/writer.rs`, `src/libs/colmena/src/tabular_prepare/xlsx_columns.rs`
 - Depends on (0): — (no intra-crate imports)
 
 #### `src/libs/colmena/src/tabular_prepare/mod.rs`
@@ -2249,6 +2249,11 @@
 - **Used by (2)**: `src/libs/colmena/src/tabular_prepare/convert.rs`, `src/libs/colmena/src/tabular_prepare/driver.rs`
 - Depends on (2): `tabular_prepare::manifest`, `tabular_prepare::part_sink`
 
+#### `src/libs/colmena/src/tabular_prepare/xlsx_columns.rs`
+- Module: `tabular_prepare::xlsx_columns`
+- **Used by (0)**: — (leaf / entrypoint / not imported intra-crate)
+- Depends on (5): `tabular_prepare::csv`, `tabular_prepare::infer`, `tabular_prepare::manifest`, `tabular_prepare::xlsx_sheet`, `tabular_prepare::xlsx_styles`
+
 #### `src/libs/colmena/src/tabular_prepare/xlsx_package.rs`
 - Module: `tabular_prepare::xlsx_package`
 - **Used by (4)**: `src/libs/colmena/src/tabular_prepare/xlsx_sheet.rs`, `src/libs/colmena/src/tabular_prepare/xlsx_strings.rs`, `src/libs/colmena/src/tabular_prepare/xlsx_styles.rs`, `src/libs/colmena/src/tabular_prepare/xlsx_workbook.rs`
@@ -2256,7 +2261,7 @@
 
 #### `src/libs/colmena/src/tabular_prepare/xlsx_sheet.rs`
 - Module: `tabular_prepare::xlsx_sheet`
-- **Used by (0)**: — (leaf / entrypoint / not imported intra-crate)
+- **Used by (1)**: `src/libs/colmena/src/tabular_prepare/xlsx_columns.rs`
 - Depends on (6): `tabular_prepare::xlsx_package`, `tabular_prepare::xlsx_spool`, `tabular_prepare::xlsx_strings`, `tabular_prepare::xlsx_styles`, `tabular_prepare::xlsx_workbook`, `tabular_prepare::xlsxfix`
 
 #### `src/libs/colmena/src/tabular_prepare/xlsx_spool.rs`
@@ -2271,7 +2276,7 @@
 
 #### `src/libs/colmena/src/tabular_prepare/xlsx_styles.rs`
 - Module: `tabular_prepare::xlsx_styles`
-- **Used by (1)**: `src/libs/colmena/src/tabular_prepare/xlsx_sheet.rs`
+- **Used by (2)**: `src/libs/colmena/src/tabular_prepare/xlsx_columns.rs`, `src/libs/colmena/src/tabular_prepare/xlsx_sheet.rs`
 - Depends on (4): `tabular_prepare::xlsx_package`, `tabular_prepare::xlsx_spool`, `tabular_prepare::xlsxfix`, `tabular_prepare::zipfix`
 
 #### `src/libs/colmena/src/tabular_prepare/xlsx_workbook.rs`
