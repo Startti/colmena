@@ -1545,3 +1545,12 @@ The prelude's tests run it in `restricted` mode through the in-process helper. T
 (`parts` visits every row once, `read` with columns and filters, the wrapped code end to end) make the parts with pandas and
 need python3 with pandas, pyarrow and scipy; without them each prints a skip line, so a developer machine without pandas
 runs the rest (names, schema, handle misuse, `df`, limits, estimate, wrapper, inputs).
+
+### One call, start to finish (`runtime.rs`)
+
+`LargeTabularRuntime::run(LargeRunRequest)` is what the routing hands a large file to. In order: `ensure_prepared` (the
+preparation wait, 240 s by default; a switch that is off is `NotEnabled`, a preparation that is running is `StillPreparing`
+with its percent, a failure is `PreparationFailed` with the recorded reason and whether it is final), then
+`verify_prepared`, then the choice of tables (`tables` empty means all), then `run_with_mounts` on the executor with the
+wrapped code, mode `restricted`, the heavy deadline (`HEAVY_TIMEOUT_SECS`, 300 s, on the large path only) and an output
+volume of `OUT_MIB`. The `source_key` is the catalog row's, never the model's.
