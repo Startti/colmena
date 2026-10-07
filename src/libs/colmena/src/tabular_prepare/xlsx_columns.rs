@@ -429,4 +429,34 @@ mod tests {
             assert!(batcher.push(&vec![(0, cell)]).is_ok());
         }
     }
+
+    #[test]
+    fn a_batch_closes_at_the_rows_cells_and_bytes_bounds() {
+        use crate::tabular_prepare::csv::{BATCH_BYTES, BATCH_CELLS, BATCH_ROWS};
+        let names = |n: usize| (0..n).map(|i| format!("c{i}")).collect::<Vec<_>>();
+        let mut rows = Batcher::new(&names(1), &[ColumnType::Int]);
+        for _ in 0..BATCH_ROWS - 1 {
+            rows.push(&vec![(0, num(1.0))]).unwrap();
+        }
+        assert!(!rows.is_full());
+        rows.push(&vec![(0, num(1.0))]).unwrap();
+        assert!(rows.is_full());
+        // A wide sheet: 1,000 columns close at 1,000 rows.
+        let mut wide = Batcher::new(&names(1000), &vec![ColumnType::Int; 1000]);
+        for _ in 0..BATCH_CELLS / 1000 - 1 {
+            wide.push(&vec![]).unwrap();
+        }
+        assert!(!wide.is_full());
+        wide.push(&vec![]).unwrap();
+        assert!(wide.is_full());
+        // Text: one cell of 1 MiB, eight times.
+        let mut text = Batcher::new(&names(1), &[ColumnType::String]);
+        let big = Cell::Text("x".repeat(BATCH_BYTES / 8).into());
+        for _ in 0..7 {
+            text.push(&vec![(0, big.clone())]).unwrap();
+        }
+        assert!(!text.is_full());
+        text.push(&vec![(0, big)]).unwrap();
+        assert!(text.is_full());
+    }
 }

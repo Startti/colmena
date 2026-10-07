@@ -1142,3 +1142,9 @@ sampled and written (see above).
   conflict). `restarts`, `demoted` and `all_strings` are reported as for a CSV; the
   `ConvertedTable` of a sheet reports `utf-8`, no replacements and the blank rows it dropped
   (`blank_dropped`).
+- Cells are capped over the **whole workbook**: each sheet may use what the sheets before it
+  left of the 50,000,000.
+- The table list of a sheet that cannot fit the registry row (64 KiB) is refused right after
+  its first read, as for a CSV.
+- Cancelling the control, or dropping the future, stops the read at its next row; the keys put
+  so far are in `ConvertControl::paths()` for the caller to remove.
