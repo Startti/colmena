@@ -67,7 +67,7 @@ fn retry_after(r: &reqwest::Response) -> Duration {
 }
 
 /// `path` under `base`, keeping the path of `base` whether or not it ends in `/`.
-fn endpoint(base: &Url, path: &str) -> Url {
+pub(crate) fn endpoint(base: &Url, path: &str) -> Url {
     let mut url = base.clone();
     url.set_path(&format!("{}/{path}", base.path().trim_end_matches('/')));
     url
@@ -118,7 +118,10 @@ impl RemoteExecutor {
 
     /// `rb` with this caller's credentials. The token file is read on each
     /// call, so a rotated token is picked up.
-    async fn authorized(&self, rb: RequestBuilder) -> Result<RequestBuilder, PythonRunError> {
+    pub(crate) async fn authorized(
+        &self,
+        rb: RequestBuilder,
+    ) -> Result<RequestBuilder, PythonRunError> {
         let token = match (&self.cfg.auth, &self.id_tokens) {
             (RemoteAuthConfig::BearerFile(p), _) => {
                 let text = tokio::fs::read_to_string(p).await.unwrap_or_default();
@@ -139,6 +142,14 @@ impl RemoteExecutor {
             _ => return Ok(rb),
         };
         Ok(rb.bearer_auth(token.map_err(PythonRunError::Internal)?))
+    }
+
+    /// For the mounts transport (`tabular_run::remote_seam`), which sends its
+    /// own streamed request with the same client and the same credentials as
+    /// `/v1/run`: the HTTP client, the service's base URL, and the longest
+    /// deadline a call may ask for.
+    pub fn transport(&self) -> (&reqwest::Client, &Url, Duration) {
+        (&self.http, &self.cfg.url, self.max_timeout)
     }
 
     /// The status of `rb` sent with this caller's credentials, if answered.
