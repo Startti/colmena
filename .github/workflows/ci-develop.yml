@@ -120,6 +120,7 @@ jobs:
     env:
       PYO3_PYTHON: python3
       COLMENA_PYEXEC_JAIL_TESTS: "1"
+      COLMENA_PYEXEC_EXPECT_PYARROW: "1"
     steps:
       - name: System packages (same Python stack as a Debian bookworm deployment)
         env:
@@ -127,7 +128,10 @@ jobs:
         run: |
           apt-get update
           apt-get install -y --no-install-recommends ca-certificates curl git build-essential pkg-config libssl-dev \
-            python3 python3-dev libpython3.11 python3-pandas python3-numpy python3-scipy
+            python3 python3-dev libpython3.11 python3-pandas python3-numpy python3-scipy python3-pip
+          # pyarrow 21.0.0 (>= 18.1, the minimum the template's thread check needs): the executor image has it,
+          # so the template here loads it and the Parquet-through-/data test must run, not be skipped.
+          pip install --break-system-packages --no-deps pyarrow==21.0.0
 
       - name: Checkout code
         uses: actions/checkout@v4
