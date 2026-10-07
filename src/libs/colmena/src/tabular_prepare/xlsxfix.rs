@@ -7,6 +7,10 @@ pub(crate) struct Wb {
     /// Name, `<row>` elements.
     sheets: Vec<(String, String)>,
     hidden: Vec<usize>,
+    chartsheet: bool,
+    date1904: bool,
+    shared: Option<Vec<String>>,
+    styles: Option<String>,
 }
 
 impl Wb {
@@ -14,6 +18,10 @@ impl Wb {
         Self {
             sheets: Vec::new(),
             hidden: Vec::new(),
+            chartsheet: false,
+            date1904: false,
+            shared: None,
+            styles: None,
         }
     }
 
@@ -24,6 +32,41 @@ impl Wb {
 
     pub fn hidden(mut self, index: usize) -> Self {
         self.hidden.push(index);
+        self
+    }
+
+    /// Adds a chart sheet after the worksheets: it has no cells.
+    pub fn chartsheet(mut self) -> Self {
+        self.chartsheet = true;
+        self
+    }
+
+    pub fn date1904(mut self) -> Self {
+        self.date1904 = true;
+        self
+    }
+
+    pub fn shared(mut self, strings: &[&str]) -> Self {
+        self.shared = Some(strings.iter().map(|s| s.to_string()).collect());
+        self
+    }
+
+    /// `cellXfs` as the number-format ids of its `xf` elements, plus the custom
+    /// formats (`id`, code).
+    pub fn styles(mut self, xf_formats: &[u32], custom: &[(u32, &str)]) -> Self {
+        let formats: String = custom
+            .iter()
+            .map(|(id, code)| format!("<numFmt numFmtId=\"{id}\" formatCode=\"{code}\"/>"))
+            .collect();
+        let xfs: String = xf_formats
+            .iter()
+            .map(|id| format!("<xf numFmtId=\"{id}\"/>"))
+            .collect();
+        self.styles = Some(format!(
+            "<styleSheet><numFmts count=\"{}\">{formats}</numFmts><cellXfs count=\"{}\">{xfs}</cellXfs></styleSheet>",
+            custom.len(),
+            xf_formats.len()
+        ));
         self
     }
 
@@ -53,8 +96,43 @@ impl Wb {
                 format!("<worksheet><sheetData>{rows}</sheetData></worksheet>").as_bytes(),
             ));
         }
+        if self.chartsheet {
+            sheets_xml.push_str("<sheet name=\"Chart\" sheetId=\"90\" r:id=\"rId90\"/>");
+            rels.push_str(&format!(
+                "<Relationship Id=\"rId90\" Type=\"{rels_ns}/chartsheet\" Target=\"chartsheets/sheet1.xml\"/>"
+            ));
+            entries.push(Entry::stored("xl/chartsheets/sheet1.xml", b"<chartsheet/>"));
+        }
+        if let Some(strings) = &self.shared {
+            let items: String = strings
+                .iter()
+                .map(|s| format!("<si><t>{s}</t></si>"))
+                .collect();
+            rels.push_str(&format!(
+                "<Relationship Id=\"rId91\" Type=\"{rels_ns}/sharedStrings\" Target=\"sharedStrings.xml\"/>"
+            ));
+            entries.push(Entry::stored(
+                "xl/sharedStrings.xml",
+                format!(
+                    "<sst count=\"{0}\" uniqueCount=\"{0}\">{items}</sst>",
+                    strings.len()
+                )
+                .as_bytes(),
+            ));
+        }
+        if let Some(styles) = &self.styles {
+            rels.push_str(&format!(
+                "<Relationship Id=\"rId92\" Type=\"{rels_ns}/styles\" Target=\"styles.xml\"/>"
+            ));
+            entries.push(Entry::stored("xl/styles.xml", styles.as_bytes()));
+        }
+        let pr = if self.date1904 {
+            "<workbookPr date1904=\"1\"/>"
+        } else {
+            "<workbookPr/>"
+        };
         let workbook =
-            format!("<workbook xmlns:r=\"{rels_ns}\"><sheets>{sheets_xml}</sheets></workbook>");
+            format!("<workbook xmlns:r=\"{rels_ns}\">{pr}<sheets>{sheets_xml}</sheets></workbook>");
         let mut all = vec![
             Entry::stored(
                 "_rels/.rels",
