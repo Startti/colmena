@@ -361,7 +361,7 @@
 #### `src/libs/colmena/src/dag_engine/engine.rs`
 - Module: `dag_engine::engine`
 - **Used by (3)**: `src/libs/colmena/src/dag_engine/infrastructure/registry.rs`, `src/libs/colmena/src/dag_engine/log_policy.rs`, `src/libs/colmena/src/tabular_prepare/ports.rs`
-- Depends on (20): `dag_engine::application::ports`, `dag_engine::application::run_control`, `dag_engine::application::run_use_case`, `dag_engine::application::secure_value_service`, `dag_engine::domain::error`, `dag_engine::domain::events`, `dag_engine::domain::graph`, `dag_engine::domain::state`, `dag_engine::infrastructure::persistence`, `dag_engine::infrastructure::persistence::postgres_dag_state_repository`, `dag_engine::infrastructure::pool_registry`, `dag_engine::infrastructure::registry`, `dag_engine::infrastructure::sql_port_factory`, `dag_engine::sse_mapper`, `llm::domain`, `llm::infrastructure::persistence`, `llm::infrastructure::persistence::repository_factory`, `storage::domain`, `storage::infrastructure`, `tabular_prepare::ports`
+- Depends on (21): `dag_engine::application::ports`, `dag_engine::application::run_control`, `dag_engine::application::run_use_case`, `dag_engine::application::secure_value_service`, `dag_engine::domain::error`, `dag_engine::domain::events`, `dag_engine::domain::graph`, `dag_engine::domain::state`, `dag_engine::infrastructure::persistence`, `dag_engine::infrastructure::persistence::postgres_dag_state_repository`, `dag_engine::infrastructure::pool_registry`, `dag_engine::infrastructure::registry`, `dag_engine::infrastructure::sql_port_factory`, `dag_engine::sse_mapper`, `llm::domain`, `llm::infrastructure::persistence`, `llm::infrastructure::persistence::repository_factory`, `storage::domain`, `storage::infrastructure`, `tabular_prepare::ports`, `tabular_run::testkit`
 
 #### `src/libs/colmena/src/dag_engine/frame_redaction.rs`
 - Module: `dag_engine::frame_redaction`
@@ -2368,7 +2368,7 @@
 
 #### `src/libs/colmena/src/tabular_run/testkit.rs`
 - Module: `tabular_run::testkit`
-- **Used by (2)**: `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm/large_run_turn.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm_synthetic_tools/attachment_run_python/large.rs`
+- **Used by (3)**: `src/libs/colmena/src/dag_engine/engine.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm/large_run_turn.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm_synthetic_tools/attachment_run_python/large.rs`
 - Depends on (7): `dag_engine::domain::python_executor`, `storage::domain`, `tabular_prepare`, `tabular_prepare::manifest`, `tabular_prepare::ports`, `tabular_prepare::registry`, `tabular_prepare::sqlite_registry`
 
 #### `src/libs/colmena/src/tabular_run/verify.rs`

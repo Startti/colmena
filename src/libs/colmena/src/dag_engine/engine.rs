@@ -281,6 +281,7 @@ pub(crate) fn node_registry_from_config(
     host_token_port: Option<Arc<dyn HostTokenPort>>,
     prepare: &crate::tabular_prepare::ports::PrepareConfig,
 ) -> Arc<HashMapNodeRegistry> {
+    let large_storage = storage.clone();
     let node_registry = HashMapNodeRegistry::new_with_secure_values(
         conversation_factory,
         sql_port_factory,
@@ -297,7 +298,44 @@ pub(crate) fn node_registry_from_config(
         node_registry.set_host_token_port(port);
     }
     node_registry.set_large_tabular(prepare.large_tabular);
+    if let Some(runtime) = large_runtime(
+        prepare,
+        large_storage,
+        crate::dag_engine::infrastructure::python_exec::mounted_executor(),
+    ) {
+        node_registry.set_large_tabular_runtime(Arc::new(runtime));
+    }
     node_registry
+}
+
+/// The runtime that runs the model's code over prepared large files, when the
+/// switch is on and the host gave the engine the registry and the executor it
+/// needs. Without either, large files can be registered but not analysed: that
+/// is logged once at start, and every call over one is refused with a typed
+/// reason.
+pub(crate) fn large_runtime(
+    prepare: &crate::tabular_prepare::ports::PrepareConfig,
+    storage: Arc<dyn OutputStorageRepository>,
+    executor: Option<Arc<dyn crate::tabular_run::mounted::MountedExecutor>>,
+) -> Option<crate::tabular_run::runtime::LargeTabularRuntime> {
+    if !prepare.large_tabular {
+        return None;
+    }
+    let (Some(registry), Some(executor)) = (prepare.registry.clone(), executor) else {
+        tracing::warn!(
+            target: "colmena::tabular_run",
+            has_registry = prepare.registry.is_some(),
+            "COLMENA_LARGE_TABULAR is on but the engine has no preparation registry or no executor \
+             with run mounts: large files cannot be analysed"
+        );
+        return None;
+    };
+    Some(crate::tabular_run::runtime::LargeTabularRuntime::new(
+        crate::tabular_prepare::TabularPrepare::new(prepare.clone(), registry.clone()),
+        registry,
+        storage,
+        executor,
+    ))
 }
 
 pub struct ColmenaEngine {
@@ -763,6 +801,29 @@ mod node_registry_wiring_tests {
                 .large_tabular_enabled(),
             "off by default"
         );
+    }
+
+    /// The runtime exists only with the switch on AND a registry AND an executor
+    /// with run mounts: each missing piece leaves large files registrable but
+    /// not analysable, never half wired.
+    #[tokio::test]
+    async fn the_large_runtime_needs_the_switch_a_registry_and_an_executor() {
+        use crate::tabular_run::testkit::{sqlite_registry, Recorder};
+        let (registry, _dir) = sqlite_registry().await;
+        let storage: Arc<dyn OutputStorageRepository> = Arc::new(LocalCacheStorageAdapter::new());
+        let executor = || -> Option<Arc<dyn crate::tabular_run::mounted::MountedExecutor>> {
+            Some(Recorder::ok(serde_json::Value::Null))
+        };
+        let config = |on: bool, with_registry: bool| PrepareConfig {
+            large_tabular: on,
+            registry: with_registry.then(|| registry.clone() as Arc<_>),
+            ..PrepareConfig::default()
+        };
+        let made = |c: &PrepareConfig, e| large_runtime(c, storage.clone(), e).is_some();
+        assert!(made(&config(true, true), executor()), "all three");
+        assert!(!made(&config(false, true), executor()), "switch off");
+        assert!(!made(&config(true, false), executor()), "no registry");
+        assert!(!made(&config(true, true), None), "no executor");
     }
 }
 

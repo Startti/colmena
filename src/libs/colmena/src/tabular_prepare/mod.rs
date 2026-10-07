@@ -726,6 +726,7 @@ mod ensure_tests {
             large_tabular: enabled,
             trigger: trigger.clone(),
             progress: progress.clone(),
+            ..PrepareConfig::default()
         };
         let prepare =
             Arc::new(TabularPrepare::new(config, registry.clone()).with_clock(Arc::new(now)));
