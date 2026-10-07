@@ -179,12 +179,24 @@ pub async fn verify_prepared(
     .await?;
     let manifest =
         Manifest::from_json(&bytes).map_err(|_| RunRefusal::Invalid(Invalid::Manifest))?;
+    // The registry and the storage must tell the same story.
+    if manifest.tables_json().ok().as_deref() != row.tables_json.as_deref() {
+        return Err(RunRefusal::Invalid(Invalid::Manifest));
+    }
+    let tracked: HashSet<&str> = row.blob_keys.iter().map(String::as_str).collect();
     let plan = PreparedTables {
         root,
         manifest_key,
         manifest,
         prepared_bytes,
     };
+    for (t, table) in plan.manifest.tables.iter().enumerate() {
+        for p in 0..table.parts as usize {
+            if !tracked.contains(plan.part_key(t, p)?.as_str()) {
+                return Err(RunRefusal::Invalid(Invalid::Parts));
+            }
+        }
+    }
     Ok(plan)
 }
 
@@ -192,6 +204,7 @@ pub async fn verify_prepared(
 mod tests {
     use super::super::testkit::*;
     use super::*;
+    use crate::tabular_prepare::registry::ReadyInfo;
     use chrono::Utc;
 
     fn base_row(status: PrepareStatus) -> PreparedRow {
@@ -373,6 +386,18 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_manifest_that_disagrees_with_the_row_is_invalid() {
+        let p = prepared_with(&[("sales", 1)], 10, FORMAT_VERSION, |info| {
+            info.tables_json = "[]".into();
+        })
+        .await;
+        let err = verify_prepared(&*p.registry, &*p.storage, SOURCE)
+            .await
+            .unwrap_err();
+        assert_eq!(err, RunRefusal::Invalid(Invalid::Manifest));
+    }
+
+    #[tokio::test]
     async fn a_manifest_that_is_not_json_is_invalid_and_its_text_is_not_echoed() {
         let p = prepared(&[("sales", 1)], 10).await;
         p.storage
@@ -397,6 +422,24 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(err, RunRefusal::Invalid(Invalid::Manifest));
+    }
+
+    #[tokio::test]
+    async fn a_part_the_row_does_not_track_is_invalid() {
+        let p = prepared_with(
+            &[("sales", 2)],
+            10,
+            FORMAT_VERSION,
+            |info: &mut ReadyInfo| {
+                info.blob_keys
+                    .retain(|k| !k.ends_with("part-00001.parquet"));
+            },
+        )
+        .await;
+        let err = verify_prepared(&*p.registry, &*p.storage, SOURCE)
+            .await
+            .unwrap_err();
+        assert_eq!(err, RunRefusal::Invalid(Invalid::Parts));
     }
 
     #[tokio::test]
