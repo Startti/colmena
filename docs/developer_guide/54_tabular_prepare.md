@@ -1125,3 +1125,20 @@ so no thread outlives the run. A cell that contradicts its column's type comes b
 row (at most 1 MiB of text over 16,384 cells), a batch (8,192 rows, 1,000,000 cells or 8 MiB of
 text), two batches in the channel, one part in the writer (at most 64 MiB), the shared-strings
 table (at most 168 MiB) and the XML parser's buffer for one event (1 MiB).
+
+### Converting the workbook (`xlsx_convert.rs`)
+
+`convert_xlsx` turns a workbook into one table per sheet that holds a value, in workbook
+order, through the same `PartWriter`, `PartSink`, `ConvertControl` (every part key is recorded
+**before** its put, so a dropped future leaves nothing untracked) and restart policy as a CSV.
+The workbook is spooled (`XlsxSource::spool`), checked and opened once; then each sheet is
+sampled and written (see above).
+
+- A sheet with no value is not a table; a sheet with only a header is a table of no rows; a
+  workbook with no table is refused (`NoData`). The table index is the position among the
+  sheets that are tables, so the parts are `t0/…`, `t1/…`.
+- A late cell that contradicts its column's type makes that column text and **only that
+  sheet** is read again, at most three times, the third making every column text (which cannot
+  conflict). `restarts`, `demoted` and `all_strings` are reported as for a CSV; the
+  `ConvertedTable` of a sheet reports `utf-8`, no replacements and the blank rows it dropped
+  (`blank_dropped`).

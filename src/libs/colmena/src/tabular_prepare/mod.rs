@@ -40,6 +40,7 @@ pub mod scan;
 pub mod sqlite_registry;
 pub mod writer;
 pub mod xlsx_columns;
+pub mod xlsx_convert;
 pub mod xlsx_package;
 pub mod xlsx_run;
 pub mod xlsx_sheet;
