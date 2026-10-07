@@ -1681,6 +1681,8 @@ impl ExecutableNode for LlmNode {
 
         // 2.2 Add User Prompt (system message is pushed after tools are resolved — see below)
         let mut resolved_files = Vec::new();
+        // Why key-only entries were skipped (large tabular switch on only).
+        let mut skipped_notices: Vec<String> = Vec::new();
         // The `files[]` index of the entry each parsed file came from (Step 3).
         let mut parsed_entries = Vec::new();
 
@@ -1690,7 +1692,7 @@ impl ExecutableNode for LlmNode {
         // Check if there are any files passed in the node inputs
         if let Some(files_val) = inputs.get("files").or_else(|| config.get("files")) {
             if let Some(files_arr) = files_val.as_array() {
-                (resolved_files, parsed_entries, _) = parse_file_entries_noting(
+                (resolved_files, parsed_entries, skipped_notices) = parse_file_entries_noting(
                     files_arr,
                     crate::dag_engine::engine::local_mode(),
                     large_tabular,
@@ -3438,6 +3440,16 @@ impl ExecutableNode for LlmNode {
             if let Some(notice) = mcp_notice.as_ref() {
                 volatile.push_str("\n\n");
                 volatile.push_str(notice);
+            }
+            // A key-only attachment the engine did not route says so here, every
+            // turn, for the same reason: it must not just disappear.
+            if !skipped_notices.is_empty() {
+                volatile.push_str("\n\n## Attachments not delivered\n");
+                for notice in &skipped_notices {
+                    volatile.push_str("- ");
+                    volatile.push_str(notice);
+                    volatile.push('\n');
+                }
             }
             llm_config = llm_config.with_volatile_system_suffix(volatile);
         }
@@ -8580,6 +8592,9 @@ mod large_files;
 
 #[cfg(test)]
 mod storage_key_entries;
+
+#[cfg(test)]
+mod node_harness;
 
 #[cfg(test)]
 mod attachment_notices;

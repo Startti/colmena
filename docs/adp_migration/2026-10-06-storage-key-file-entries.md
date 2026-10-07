@@ -26,9 +26,10 @@ el motor se comporta exactamente como antes, para cualquier tamaño.
   `size_bytes` ausente o menor o igual a 50 MiB (exactamente 50 MiB es pequeño). Las
   demás entradas no cambian de índice. Con el interruptor **apagado** se omite en
   silencio, como siempre. Con el interruptor **encendido** el motor escribe en el
-  log (WARN, siempre activo) el motivo concreto, con el nombre del archivo como
-  texto inerte y nunca la llave (hasta 10 avisos por turno); el aviso al modelo llega
-  en el cambio siguiente.
+  log el motivo concreto y avisa al modelo en cada turno, en el sufijo del mensaje de
+  sistema, bajo «Attachments not delivered» (nombre del archivo y motivo, nunca la
+  llave; hasta 10 avisos), para que un archivo mal clasificado por el emisor no
+  desaparezca sin rastro.
 - Si la entrada trae además `data`, `url` o `path`, se interpreta como hasta ahora
   (prioridad `data > url > path`): la llave solo se usa cuando no hay ninguna otra
   fuente. El emisor debe omitir `data` y `url` para los archivos grandes.

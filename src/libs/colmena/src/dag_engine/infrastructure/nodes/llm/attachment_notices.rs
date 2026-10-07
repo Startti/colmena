@@ -4,6 +4,7 @@
 //! means the host sent something the engine does not route: it must say why, in
 //! the log and to the model, instead of the file just disappearing.
 
+use super::node_harness::{registry, run_turn, RecordingModel};
 use super::parse_file_entries_noting;
 use serde_json::{json, Value};
 
@@ -85,6 +86,30 @@ fn the_notice_is_bounded() {
     let n = notices(many, true);
     assert!(n.len() <= 10, "{}", n.len());
     assert!(n.iter().all(|l| l.len() < 600), "bounded line length");
+}
+
+/// The model is told every turn, and only when the engine's switch is on: the
+/// node reads the registry's value.
+#[tokio::test]
+#[serial_test::serial]
+async fn the_model_is_told_about_a_skipped_entry_only_when_the_registry_switch_is_on() {
+    let db = tempfile::NamedTempFile::new().unwrap();
+    let url = format!("sqlite://{}", db.path().display());
+    let entry = key_only("doc-1", "sales.csv", "text/csv", Some(10 * MIB));
+    let reg = registry();
+
+    for (switch, told) in [(false, false), (true, true), (false, false)] {
+        reg.set_large_tabular(switch);
+        let model = RecordingModel::new(1);
+        run_turn(&reg, &url, vec![entry.clone()], &model)
+            .await
+            .unwrap();
+        let seen = model.seen();
+        assert_eq!(seen.contains("sales.csv"), told, "switch {switch}: {seen}");
+        assert_eq!(seen.contains("not delivered"), told, "switch {switch}");
+        assert!(!seen.contains("chat-attachments"), "no key: {seen}");
+        assert_eq!(model.files_seen(), 0);
+    }
 }
 
 #[test]
