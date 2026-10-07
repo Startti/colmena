@@ -31,6 +31,12 @@ pub enum Cap {
     Sheets,
     #[error("the workbook's shared strings are over the limit")]
     SharedStrings,
+    #[error("a sheet has more rows than the limit")]
+    Rows,
+    #[error("a sheet has more columns than the limit")]
+    Columns,
+    #[error("the workbook has more cells than the limit")]
+    Cells,
 }
 
 /// Why a part is not a workbook part, in fixed words.
@@ -48,6 +54,12 @@ pub enum Invalid {
     MissingPart,
     #[error("the workbook has more cell styles than the limit")]
     TooManyStyles,
+    #[error("a cell reference or number is not valid, or rows or columns are out of order")]
+    BadCell,
+    #[error("a cell holds more text than the limit")]
+    CellTooLong,
+    #[error("a row holds more text than the limit")]
+    RowTooLong,
 }
 
 /// What can stop reading an xlsx. The text is fixed: no name, key, cell or

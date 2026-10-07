@@ -5,8 +5,8 @@
 
 **How to use (for the exploration/spec phase):** before opening files to assess a change, look up the target file below. **Used by** is its blast radius — the files that break if you change its public surface. **Depends on** is what it needs. Start by reading only those, not the whole repo.
 
-- Files indexed: **456**
-- Modules with at least one importer: **220**
+- Files indexed: **457**
+- Modules with at least one importer: **222**
 
 ## Blast-radius ranking (change these with the most care)
 
@@ -2251,17 +2251,22 @@
 
 #### `src/libs/colmena/src/tabular_prepare/xlsx_package.rs`
 - Module: `tabular_prepare::xlsx_package`
-- **Used by (3)**: `src/libs/colmena/src/tabular_prepare/xlsx_strings.rs`, `src/libs/colmena/src/tabular_prepare/xlsx_styles.rs`, `src/libs/colmena/src/tabular_prepare/xlsx_workbook.rs`
+- **Used by (4)**: `src/libs/colmena/src/tabular_prepare/xlsx_sheet.rs`, `src/libs/colmena/src/tabular_prepare/xlsx_strings.rs`, `src/libs/colmena/src/tabular_prepare/xlsx_styles.rs`, `src/libs/colmena/src/tabular_prepare/xlsx_workbook.rs`
 - Depends on (4): `storage::domain`, `tabular_prepare::precheck`, `tabular_prepare::xlsx_spool`, `tabular_prepare::zipfix`
+
+#### `src/libs/colmena/src/tabular_prepare/xlsx_sheet.rs`
+- Module: `tabular_prepare::xlsx_sheet`
+- **Used by (0)**: — (leaf / entrypoint / not imported intra-crate)
+- Depends on (5): `tabular_prepare::xlsx_package`, `tabular_prepare::xlsx_spool`, `tabular_prepare::xlsx_strings`, `tabular_prepare::xlsx_workbook`, `tabular_prepare::xlsxfix`
 
 #### `src/libs/colmena/src/tabular_prepare/xlsx_spool.rs`
 - Module: `tabular_prepare::xlsx_spool`
-- **Used by (4)**: `src/libs/colmena/src/tabular_prepare/xlsx_package.rs`, `src/libs/colmena/src/tabular_prepare/xlsx_strings.rs`, `src/libs/colmena/src/tabular_prepare/xlsx_styles.rs`, `src/libs/colmena/src/tabular_prepare/xlsx_workbook.rs`
+- **Used by (5)**: `src/libs/colmena/src/tabular_prepare/xlsx_package.rs`, `src/libs/colmena/src/tabular_prepare/xlsx_sheet.rs`, `src/libs/colmena/src/tabular_prepare/xlsx_strings.rs`, `src/libs/colmena/src/tabular_prepare/xlsx_styles.rs`, `src/libs/colmena/src/tabular_prepare/xlsx_workbook.rs`
 - Depends on (3): `storage::domain`, `tabular_prepare::convert`, `tabular_prepare::precheck`
 
 #### `src/libs/colmena/src/tabular_prepare/xlsx_strings.rs`
 - Module: `tabular_prepare::xlsx_strings`
-- **Used by (0)**: — (leaf / entrypoint / not imported intra-crate)
+- **Used by (1)**: `src/libs/colmena/src/tabular_prepare/xlsx_sheet.rs`
 - Depends on (3): `tabular_prepare::xlsx_package`, `tabular_prepare::xlsx_spool`, `tabular_prepare::zipfix`
 
 #### `src/libs/colmena/src/tabular_prepare/xlsx_styles.rs`
@@ -2271,12 +2276,12 @@
 
 #### `src/libs/colmena/src/tabular_prepare/xlsx_workbook.rs`
 - Module: `tabular_prepare::xlsx_workbook`
-- **Used by (0)**: — (leaf / entrypoint / not imported intra-crate)
+- **Used by (1)**: `src/libs/colmena/src/tabular_prepare/xlsx_sheet.rs`
 - Depends on (4): `tabular_prepare::xlsx_package`, `tabular_prepare::xlsx_spool`, `tabular_prepare::xlsxfix`, `tabular_prepare::zipfix`
 
 #### `src/libs/colmena/src/tabular_prepare/xlsxfix.rs`
 - Module: `tabular_prepare::xlsxfix`
-- **Used by (2)**: `src/libs/colmena/src/tabular_prepare/xlsx_styles.rs`, `src/libs/colmena/src/tabular_prepare/xlsx_workbook.rs`
+- **Used by (3)**: `src/libs/colmena/src/tabular_prepare/xlsx_sheet.rs`, `src/libs/colmena/src/tabular_prepare/xlsx_styles.rs`, `src/libs/colmena/src/tabular_prepare/xlsx_workbook.rs`
 - Depends on (1): `tabular_prepare::zipfix`
 
 #### `src/libs/colmena/src/tabular_prepare/zipfix.rs`

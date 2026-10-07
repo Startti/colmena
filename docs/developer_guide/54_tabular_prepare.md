@@ -1001,3 +1001,17 @@ A string is the concatenation of the text runs of its `si` element (a plain `t`,
 of each rich-text run `r`, whitespace kept); phonetic runs (`rPh`) are not part of the value.
 Entities and CDATA are resolved, and so is Excel's `_xHHHH_` escape (a carriage return is
 `_x000D_`, `_x005F_` is a literal underscore) when it is exactly that.
+
+### Reading a sheet's cells (`xlsx_sheet.rs`)
+
+`read_sheet` parses a worksheet as it is inflated and hands it on **one row at a time**; only
+the current row is ever held, however many rows the sheet has. A row arrives as its non-empty
+cells with their column index (empty cells are not delivered), so a sparse row costs what it
+holds, and the callback can stop the read. Rows with no value (absent, self-closing, or only
+empty cells) are counted in `SheetStats::blank_rows` and not delivered.
+
+**Types.** Shared, inline (rich runs joined, phonetic runs dropped) and formula strings are
+text; a boolean is a boolean; a number is a number (a stored value that is not a number stays
+text); an error (`#DIV/0!`) is its **text**, so it is visible and turns a numeric column into
+text instead of vanishing; an empty string is empty, as in a CSV. Cells are counted as `c`
+elements, empty ones too, because they cost the parser the same.
