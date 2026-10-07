@@ -23,9 +23,10 @@ use crate::tabular_prepare::convert::{
     MAX_RESTARTS,
 };
 use crate::tabular_prepare::csv::Encoding;
+use crate::tabular_prepare::driver::report_of;
 use crate::tabular_prepare::manifest::{
     min_tables_json_len, part_path, unique_table_names, ColumnType, Manifest, ManifestError,
-    SkippedSheet, TableInfo, SKIPPED_HEADER_ROW, TABLES_JSON_MAX_BYTES,
+    SkippedSheet, TableInfo, MANIFEST_MAX_BYTES, SKIPPED_HEADER_ROW, TABLES_JSON_MAX_BYTES,
 };
 use crate::tabular_prepare::part_sink::PartSink;
 use crate::tabular_prepare::writer::WriterConfig;
@@ -78,6 +79,40 @@ pub struct SheetTable {
 pub(crate) struct Limits {
     pub xlsx: XlsxLimits,
     pub sheet: SheetLimits,
+}
+
+/// Whether what the manifest would hold so far fits: the table list in the registry
+/// row (64 KiB), then the whole manifest file (128 KiB), which also carries a conversion
+/// report per table and the skipped sheets. Names are the unique ones the manifest will
+/// use. Checked after every sheet, so 256 sheets fail at the sheet that overflows.
+fn manifest_fits(tables: &[SheetTable], skipped: &[SkippedSheet]) -> Result<(), Cap> {
+    let raw: Vec<&str> = tables.iter().map(|t| t.sheet.as_str()).collect();
+    let names = unique_table_names(&raw);
+    let infos: Vec<TableInfo> = tables
+        .iter()
+        .zip(&names)
+        .map(|(t, name)| TableInfo {
+            name: name.clone(),
+            rows: t.table.written.rows,
+            parts: t.table.written.parts,
+            columns: t.table.written.columns.clone(),
+        })
+        .collect();
+    let reports = tables
+        .iter()
+        .zip(&names)
+        .map(|(t, name)| report_of(name, &t.table))
+        .collect();
+    let manifest = Manifest::new(infos)
+        .with_conversion(reports)
+        .with_skipped(skipped.to_vec());
+    if manifest.tables_json().is_err() {
+        return Err(Cap::TableList);
+    }
+    match serde_json::to_string(&manifest) {
+        Ok(json) if json.len() <= MANIFEST_MAX_BYTES => Ok(()),
+        _ => Err(Cap::Manifest),
+    }
 }
 
 /// Converts the workbook into the parts of one table per sheet that has a value,
@@ -245,19 +280,11 @@ pub(crate) async fn convert_xlsx_limits(
                 stale_paths,
             },
         });
-        // The table lists of all the sheets share one registry row: say so now, with
-        // its own sentence, not after the last sheet.
-        let infos: Vec<TableInfo> = tables
-            .iter()
-            .map(|t| TableInfo {
-                name: t.sheet.clone(),
-                rows: t.table.written.rows,
-                parts: t.table.written.parts,
-                columns: t.table.written.columns.clone(),
-            })
-            .collect();
-        if Manifest::new(infos).tables_json().is_err() {
-            return Err(fail(XlsxError::TooLarge(Cap::TableList).into()));
+        // The table lists of all the sheets share one registry row, and the manifest
+        // (tables, conversion reports, skipped sheets) one file: say so now, with their
+        // own sentences, not after the last sheet.
+        if let Err(cap) = manifest_fits(&tables, &skipped) {
+            return Err(fail(XlsxError::TooLarge(cap).into()));
         }
     }
     if tables.is_empty() {
@@ -811,5 +838,57 @@ mod tests {
             "{} sheets written",
             sink.paths().len()
         );
+    }
+
+    #[test]
+    fn the_whole_manifest_is_checked_after_every_sheet_not_only_the_table_list() {
+        use crate::tabular_prepare::manifest::ColumnInfo;
+        use crate::tabular_prepare::writer::TableWritten;
+        // A table whose conversion report lists 32 demoted columns with 128-character
+        // names: about 4.4 KiB of report for a 200-byte table list.
+        let sheet = |i: usize| SheetTable {
+            sheet: format!("S{i}"),
+            table: ConvertedTable {
+                written: TableWritten {
+                    rows: 1,
+                    parts: 1,
+                    columns: vec![ColumnInfo {
+                        name: "a".into(),
+                        column_type: ColumnType::String,
+                        uncompressed_bytes: 1,
+                        in_memory_bytes: 40,
+                    }],
+                },
+                restarts: 3,
+                demoted: (0..32).map(|c| format!("{c:0>128}")).collect(),
+                all_strings: true,
+                encoding: Encoding::Utf8,
+                replacements: 0,
+                utf8_valid_multibyte: 0,
+                utf8_invalid: 0,
+                blank_rows: 0,
+                blank_dropped: 0,
+                padded_rows: 0,
+                blob_paths: Vec::new(),
+                stale_paths: Vec::new(),
+            },
+        };
+        let tables: Vec<SheetTable> = (0..40).map(sheet).collect();
+        // The table list is tiny: 40 tables do not come near 64 KiB.
+        assert_eq!(manifest_fits(&tables[..20], &[]), Ok(()));
+        // The reports are what overflows the 128 KiB file, between 20 and 40 sheets.
+        assert_eq!(manifest_fits(&tables, &[]), Err(Cap::Manifest));
+        let first_bad = (21..=40)
+            .find(|n| manifest_fits(&tables[..*n], &[]).is_err())
+            .unwrap();
+        assert!(manifest_fits(&tables[..first_bad - 1], &[]).is_ok());
+        // Skipped sheets count too.
+        let skipped: Vec<SkippedSheet> = (0..256)
+            .map(|i| SkippedSheet {
+                sheet: format!("{i:0>60}"),
+                reason: SKIPPED_HEADER_ROW.into(),
+            })
+            .collect();
+        assert!(manifest_fits(&tables[..first_bad - 1], &skipped).is_err());
     }
 }

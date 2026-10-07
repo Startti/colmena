@@ -31,6 +31,8 @@ pub enum Cap {
     Sheets,
     #[error("the table lists of the sheets do not fit the registry row")]
     TableList,
+    #[error("the manifest of the workbook is over its size limit")]
+    Manifest,
     #[error("the workbook's shared strings are over the limit")]
     SharedStrings,
     #[error("a sheet has more rows than the limit")]

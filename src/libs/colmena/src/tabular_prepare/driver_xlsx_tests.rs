@@ -527,6 +527,38 @@ async fn a_restart_overwrites_the_same_keys_and_leaves_nothing_stale() {
     }
 }
 
+#[tokio::test]
+async fn no_path_asks_the_adapter_to_delete_with_an_empty_list() {
+    use crate::tabular_prepare::driver::{delete_best_effort, settle_lost};
+    let (registry, _dir) = sqlite().await;
+    // A source that does not exist: the job releases the row it claimed and has
+    // written nothing, so there is nothing to delete.
+    let gone = source();
+    let inner = Arc::new(PlacedStorage::default());
+    let hook = Hook::new(inner.clone(), registry.clone(), &gone);
+    let env = PrepareEnv::new(registry.clone(), hook.clone());
+    let out = prepare_xlsx(&env, &request(&gone, 100)).await.unwrap();
+    assert!(matches!(out, PrepareOutcome::SourceGone));
+    assert!(hook.cleanups.lock().unwrap().is_empty(), "source_gone");
+    // The row is gone and the job holds no keys: settling it asks for nothing.
+    let other = source();
+    let req = request(&other, 100);
+    let outcome = settle_lost(&env, &req, &[]).await.unwrap();
+    assert!(matches!(outcome, PrepareOutcome::Cancelled));
+    assert!(hook.cleanups.lock().unwrap().is_empty(), "settle_lost");
+    // And the best-effort delete itself, with the keys listed or not.
+    delete_best_effort(&env, &req, &[], true).await;
+    delete_best_effort(&env, &req, &[], false).await;
+    assert!(
+        hook.cleanups.lock().unwrap().is_empty(),
+        "delete_best_effort"
+    );
+    // With keys it does ask, once.
+    let keys = vec![format!("{}/t0/part-00000.parquet", root_of(&other))];
+    delete_best_effort(&env, &req, &keys, true).await;
+    assert_eq!(hook.cleanups.lock().unwrap().len(), 1);
+}
+
 /// A sheet with a title above its table, and a plain one.
 fn titled_workbook() -> Vec<u8> {
     let title = format!(
