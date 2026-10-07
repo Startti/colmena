@@ -24,7 +24,9 @@ use crate::llm::domain::attachments::attachment_registry::MockAttachmentRegistry
 use crate::llm::domain::attachments::{origin, AttachmentError, AttachmentSource};
 use crate::llm::domain::large_tabular::{refusal_text, LARGE_TABULAR_ERROR_CODE};
 use crate::llm::domain::{ConversationAttachment, FunctionCall, ProviderKind, ToolCall};
-use crate::storage::domain::{MockOutputStorageRepository, StoredBytes};
+use crate::storage::domain::{
+    MockOutputStorageRepository, StorageError, StoredBytes, StoredStream,
+};
 use chrono::Utc;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -294,4 +296,62 @@ async fn a_data_run_python_binding_on_a_refused_file_carries_the_code() {
         .await
         .unwrap_err();
     assert_eq!(err["code"], LARGE_TABULAR_ERROR_CODE, "{err}");
+}
+
+/// `fetch_attachment_stream` is allowed for a host row (it never holds the object
+/// whole) but its errors, at the start and in the middle of the stream, must not
+/// carry storage's text (the key, or a local path): they name the document and the
+/// file only. Other rows keep the error they always had.
+#[tokio::test]
+async fn a_host_rows_stream_errors_hide_the_key_and_other_rows_keep_theirs() {
+    use futures::StreamExt;
+    let mut storage = MockOutputStorageRepository::new();
+    storage.expect_read_stream().returning(|k| {
+        if k == "host-key" {
+            Err(StorageError::InvalidInput(format!(
+                "no {k} at /var/data/{k}"
+            )))
+        } else {
+            Err(StorageError::InvalidInput(format!("no {k}")))
+        }
+    });
+    let ex = executor(host_ref("text/csv", Some(60 * MIB)), storage);
+    let err = ex.fetch_attachment_stream("doc-1").await.unwrap_err();
+    assert!(err.contains("doc-1") && err.contains("big.csv"), "{err}");
+    assert!(
+        !err.contains("host-key") && !err.contains("/var/data"),
+        "{err}"
+    );
+
+    let mut storage = MockOutputStorageRepository::new();
+    storage
+        .expect_read_stream()
+        .returning(|k| Err(StorageError::InvalidInput(format!("no {k}"))));
+    let ex = executor(engine_copy("text/csv", Some(8)), storage);
+    assert_eq!(
+        ex.fetch_attachment_stream("doc-1").await.unwrap_err(),
+        "attachment_storage.read_stream failed for 'doc-1': invalid storage input: no copy-key"
+    );
+
+    // A failure in the middle of the stream of a host row.
+    let mut storage = MockOutputStorageRepository::new();
+    storage.expect_read_stream().returning(|k| {
+        let k = k.to_string();
+        Ok(StoredStream {
+            stream: Box::pin(futures::stream::iter(vec![Err(
+                StorageError::InvalidInput(format!("lost {k} at /var/data/{k}")),
+            )])),
+            size_bytes: 1,
+            mime_type: "text/csv".into(),
+            filename: "x".into(),
+        })
+    });
+    let ex = executor(host_ref("text/csv", Some(60 * MIB)), storage);
+    let mut got = ex.fetch_attachment_stream("doc-1").await.unwrap().stream;
+    let err = got.next().await.unwrap().unwrap_err().to_string();
+    assert!(err.contains("doc-1") && err.contains("big.csv"), "{err}");
+    assert!(
+        !err.contains("host-key") && !err.contains("/var/data"),
+        "{err}"
+    );
 }

@@ -60,6 +60,7 @@ pub type ToolDescribeObserver = Arc<
 /// Where an attachment's bytes are and whose they are.
 struct AttachmentLocation {
     key: String,
+    filename: String,
     /// The row references an object the HOST owns (`origin = host_storage_ref`).
     host_owned: bool,
 }
@@ -897,11 +898,40 @@ impl DagToolExecutor {
         let storage = self.attachment_storage.as_ref().ok_or_else(|| {
             "attachment_storage not wired (see fetch_attachment_bytes docs).".to_string()
         })?;
-        let storage_key = self.lookup_storage_key(document_id).await?;
-        storage
-            .read_stream(&storage_key)
-            .await
-            .map_err(|e| format!("attachment_storage.read_stream failed for '{document_id}': {e}"))
+        let location = self.locate_attachment(document_id).await?;
+        // Streaming is allowed for an object the HOST owns (it is never held
+        // whole), but storage's error text carries the key, or a local path, and
+        // reaches the model: for such a row it names the document and the file.
+        let host_error = |_: crate::storage::domain::StorageError| {
+            use crate::llm::domain::large_tabular::inert_text;
+            format!(
+                "the stored file could not be read: document_id={}, file={}",
+                inert_text(document_id, 80),
+                inert_text(&location.filename, 80)
+            )
+        };
+        let mut stream = storage.read_stream(&location.key).await.map_err(|e| {
+            if location.host_owned {
+                host_error(e)
+            } else {
+                format!("attachment_storage.read_stream failed for '{document_id}': {e}")
+            }
+        })?;
+        if location.host_owned {
+            use futures::StreamExt;
+            let (doc, name) = (document_id.to_string(), location.filename.clone());
+            stream.stream = Box::pin(stream.stream.map(move |chunk| {
+                chunk.map_err(|_| {
+                    use crate::llm::domain::large_tabular::inert_text;
+                    crate::storage::domain::StorageError::BackendUnavailable(format!(
+                        "the stored file could not be read: document_id={}, file={}",
+                        inert_text(&doc, 80),
+                        inert_text(&name, 80)
+                    ))
+                })
+            }));
+        }
+        Ok(stream)
     }
 
     /// Persist freshly produced bytes (e.g. a `gdocs_export` PDF, an
@@ -1001,6 +1031,7 @@ impl DagToolExecutor {
                     .clone()
                     .map(|key| AttachmentLocation {
                         key,
+                        filename: entry.filename.clone(),
                         host_owned: entry.is_host_storage_ref(),
                     })
                     .ok_or_else(|| {
@@ -1058,18 +1089,13 @@ impl DagToolExecutor {
                 let _ = reg.touch_last_used(sid, document_id).await;
                 Ok(Some(AttachmentLocation {
                     key,
+                    filename: row.filename.clone(),
                     host_owned: row.is_host_storage_ref(),
                 }))
             }
             Ok(None) => Ok(None),
             Err(e) => Err(format!("attachment registry lookup failed: {e}")),
         }
-    }
-
-    /// The `storage_key` of an attachment (what every caller that only needs the
-    /// key uses; the same lookup as [`locate_attachment`](Self::locate_attachment)).
-    async fn lookup_storage_key(&self, document_id: &str) -> Result<String, String> {
-        self.locate_attachment(document_id).await.map(|l| l.key)
     }
 
     /// Recursively scan fixed_config for all "$DYNAMIC" placeholders.
