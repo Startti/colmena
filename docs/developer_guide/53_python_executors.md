@@ -287,6 +287,27 @@ to the jail, on purpose: dropping the bounding set needs `CAP_SETPCAP`, and a ru
 capability (the mount probe fails, reason `capability_drop_failed`, below) rather than the template. A call without mounts
 keeps today's bounding set; a mounts call whose drop fails ends before any code runs.
 
+### Calls with prepared tables (Linux, dark)
+
+Dark behind `COLMENA_LARGE_TABULAR`. `tabular_run::mounted::MountedExecutor::run_with_mounts(req, call)` is the contract of
+a call over prepared tables: the executor makes the verified tables readable at `/data`, runs the code and answers with the
+result or a refusal. Nothing above the trait knows how the tables get there.
+
+- *Subprocess executor* (`tabular_run::local`). `stage_call(out_mb)` takes the volume through the budgeted path (the
+  unbudgeted `StagedCall::create` and `run_staged` are never used to take a call's volume), then `stage_tables` streams the
+  manifest and parts into the call's `data` directory (see [54_tabular_prepare.md](./54_tabular_prepare.md)), then
+  `run_staged` runs the code with `mounts` in its header. The staged call is dropped (output unmounted, directories removed)
+  on a blocking thread and before `run_with_mounts` returns, so the budget share is back by then. `OUT_MIB` (256) is the size
+  of the output volume asked for; an estimate until the instance is measured (spike item 5).
+- *Refusals.* An executor without a staging root is `Unavailable(NoStagingRoot)`; a budget of volumes in flight that is full
+  is `OverBudget(Volumes)` (retry later); any other failure to stage is `Unavailable(Executor)`; the executor's own text is
+  logged and never shown. The code's own failure (a Python error, a timeout, a crash) comes back as the usual
+  `PythonRunError`.
+- *Remote executor: not built.* The design carries the tables on one streamed HTTP/2 request (`POST /v2/run`). Whether a
+  Cloud Run service accepts a 60 MiB to 1 GiB body that way is spike item 3, which needs the deployed executor and could not
+  be measured here, so `RemoteExecutor` implements the trait by refusing with `Unavailable(Unsupported)` rather than guessing
+  at a wire. The in-process executor has no run mounts and does not implement the trait.
+
 ### Startup self-test (Linux)
 
 Before it binds its socket, the template forks a throwaway child that enters the jail as slot 9999 (uid
