@@ -783,3 +783,9 @@ deletes as no-ops). If the failure cannot be recorded the objects are deleted an
 `complete` errors, whether it was applied is unknown, so nothing is deleted and the objects
 stay listed. If the row is gone and the registry errors when the job asks (`get`), what it
 wrote is left behind with no row to list it: the one case the row cannot cover.
+
+Every terminal path makes the same decision when its write finds the row not ours: a
+budget that ran out, a storage or source failure, a manifest that could not be written, a
+completion and a source found missing all end in "row gone, delete what this job wrote" or
+"row taken, delete nothing and release nothing". A source found missing checks ownership
+before it deletes or releases.
