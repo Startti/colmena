@@ -18,7 +18,7 @@
 //! Bounded: at most [`MAX_XFS`] styles and as many custom formats are read; a
 //! part with more is refused, so the table is never larger than 64 KiB.
 
-use crate::tabular_prepare::xlsx_package::{attribute, next_event, Package, MAX_SMALL_PART_BYTES};
+use crate::tabular_prepare::xlsx_package::{attribute, next_event, Package, MAX_STYLES_PART_BYTES};
 use crate::tabular_prepare::xlsx_spool::{Invalid, XlsxError};
 use chrono::{Datelike, NaiveDate, Timelike};
 use quick_xml::events::Event;
@@ -118,7 +118,7 @@ pub fn read_styles(pkg: &mut Package, part: &str) -> Result<Styles, XlsxError> {
     let mut custom: HashMap<u32, NumFmt> = HashMap::new();
     let mut xfs: Vec<NumFmt> = Vec::new();
     let mut in_cell_xfs = false;
-    let mut reader = pkg.xml(part, MAX_SMALL_PART_BYTES)?;
+    let mut reader = pkg.xml(part, MAX_STYLES_PART_BYTES)?;
     let mut buf = Vec::new();
     loop {
         match next_event(&mut reader, &mut buf)? {
@@ -442,5 +442,18 @@ mod tests {
             styles_of(bytes).await,
             Err(XlsxError::Invalid(Invalid::TooManyStyles))
         );
+    }
+
+    #[tokio::test]
+    async fn a_styles_part_with_style_bloat_over_16_mib_is_read() {
+        // 21 MiB of comments after a valid styles part: over the cap of the other small
+        // parts, within the styles part's own 64 MiB.
+        let mut xml =
+            "<styleSheet><cellXfs><xf numFmtId=\"14\"/></cellXfs></styleSheet>".to_string();
+        xml.push_str(&"<!-- -->".repeat(3 * 1024 * 1024));
+        let bytes = build(&[Entry::stored("xl/styles.xml", xml.as_bytes())]);
+        let styles = styles_of(bytes).await.unwrap();
+        assert_eq!(styles.format(0), NumFmt::Date);
+        assert_eq!(MAX_STYLES_PART_BYTES, 64 * 1024 * 1024);
     }
 }

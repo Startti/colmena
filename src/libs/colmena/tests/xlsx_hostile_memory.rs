@@ -228,11 +228,11 @@ async fn unbounded_nesting_in_any_kind_of_part_is_refused_with_bounded_memory() 
 #[tokio::test]
 async fn a_part_over_its_own_small_cap_is_refused_before_it_is_read() {
     let _one_at_a_time = SERIAL.lock().await;
-    // 17 MiB of whitespace after a valid styles part: over the 16 MiB a styles,
-    // workbook or relationships part may declare.
-    for name in ["xl/styles.xml", "xl/workbook.xml"] {
+    // Whitespace after a valid part, one byte past the cap its kind has: 16 MiB for the
+    // workbook, 64 MiB for the styles.
+    for (name, over) in [("xl/styles.xml", 65), ("xl/workbook.xml", 17)] {
         let mut body = parts().into_iter().find(|(n, _)| *n == name).unwrap().1;
-        body.extend(std::iter::repeat_n(b' ', 17 * MIB));
+        body.extend(std::iter::repeat_n(b' ', over * MIB));
         let (pkg, _) = open(book_with(name, body)).await;
         let mut pkg = pkg.unwrap();
         let base = LIVE.load(Ordering::SeqCst);
