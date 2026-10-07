@@ -1152,40 +1152,6 @@ written (the byte cap) no longer asks the adapter to delete derived objects with
 list, which an adapter could read as "delete by prefix". The spool's guard exists before the file
 is unlinked, so a failed unlink cannot leak it.
 
-### Converting the workbook (`xlsx_convert.rs`)
-
-`convert_xlsx` turns a workbook into one table per sheet that holds a value, through the same
-`PartWriter`, `PartSink`, `ConvertControl` (every part key is recorded **before** its put, so a
-dropped future leaves nothing untracked) and restart policy as a CSV. The workbook is spooled,
-checked and opened once; then each sheet in turn is read twice: a short first read decides the
-column types from the first 10,000 rows, and a second streams every row, typed, into batches.
-Reading and typing run on a blocking thread and the writer on the async side, joined by a
-channel of two batches, as for a CSV, and the read stops at the next row when the conversion is
-cancelled or dropped.
-
-**Memory is bounded by constants, never by the sheet or the workbook** (which is on disk): a
-row (at most 1 MiB of text over 16,384 cells), a batch (8,192 rows, 1,000,000 cells or 8 MiB of
-text), two batches in the channel, one part in the writer (at most 64 MiB), the shared-strings
-table (at most 168 MiB) and the XML parser's buffer for one event (1 MiB).
-
-Rules:
-
-- The first row that holds a value is the header; a sheet with no value is not a table (a
-  workbook with none is refused, `NoData`); a sheet with only a header is a table of no rows.
-  Header names are cleaned like a CSV's (control characters, length, empty, repeats).
-- A value past the last column of the header is refused (`BeyondHeader`), as a CSV row longer
-  than its header is. Cells before it that are empty are null.
-- A late cell that contradicts its column's type makes that column text and the sheet is read
-  again, at most three times, the third making every column text (which cannot conflict). Only
-  the sheet that conflicted is read again; `restarts`, `demoted` and `all_strings` are reported
-  as for a CSV, and a workbook's `ConvertedTable` reports `utf-8`, no replacements and the
-  blank rows it dropped (`blank_dropped`).
-- The 50,000,000-cell cap is the **job's**: every cell any read of the workbook reads counts
-  (sampling, runs, restarts and skipped sheets), so a sheet that restarts three times counts
-  four times (the cap bounds work, not just the size of the file).
-- The table list of a sheet that cannot fit the registry row is refused right after its first
-  read, as for a CSV.
-
 ### Opening the workbook and sampling a sheet (`xlsx_run.rs`)
 
 `open_book` opens a workbook once (pre-check, sheets, shared strings, styles; see above) and
@@ -1205,15 +1171,12 @@ lower a limit to move a boundary.
 
 `run_sheet` is the second read of a sheet: it streams every row, typed, into the part writer.
 Reading and typing run on a blocking thread and the writer on the async side, joined by a
-channel of two batches, as for a CSV. The blocking half stops at the next row when its token
-is cancelled or the receiving side is gone, and a run that fails cancels it and waits for it,
+channel of two batches, as for a CSV. The blocking half stops at the next row, or within 4,096 cells
+whatever they hold, when its token is cancelled, or when the receiving side is gone, and a run that fails cancels it and waits for it,
 so no thread outlives the run. A cell that contradicts its column's type comes back as
 `RunEnd::Conflict` (column, and data row from zero), which the caller turns into a restart.
 
-**Memory is bounded by constants, never by the sheet or the workbook** (which is on disk): a
-row (at most 1 MiB of text over 16,384 cells), a batch (8,192 rows, 1,000,000 cells or 8 MiB of
-text), two batches in the channel, one part in the writer (at most 64 MiB), the shared-strings
-table (at most 168 MiB) and the XML parser's buffer for one event (1 MiB).
+**Memory** is bounded by constants; the worst case is summed under *The memory test* below.
 
 ### Converting the workbook (`xlsx_convert.rs`)
 
@@ -1235,8 +1198,9 @@ sampled and written (see above).
   restarts and skipped sheets), so a sheet that restarts three times counts four times.
 - The table list of a sheet that cannot fit the registry row (64 KiB) is refused right after
   its first read, as for a CSV.
-- Cancelling the control, or dropping the future, stops the read at its next row; the keys put
-  so far are in `ConvertControl::paths()` for the caller to remove.
+- Cancelling the control, or dropping the future, stops the read within 4,096 cells (looked at
+  on every cell, so a sheet of empty cells ends too); the keys put so far are in
+  `ConvertControl::paths()` for the caller to remove.
 
 ### Preparing a workbook (`driver.rs`)
 
@@ -1296,3 +1260,37 @@ row and only then records `failed(storage)`; a row deleted as table 1's first pa
 the job as cancelled with the objects removed and no manifest put; a restart rewrites the same
 keys and leaves none stale (a text run cannot have fewer parts than the typed run it replaces,
 so a stale part cannot arise from a restart of a workbook).
+
+**Worst case of a job, re-derived after the review fixes** (what each part can hold at its
+limits; none of these sizes depends on the workbook):
+
+| Part | Worst case |
+|---|---|
+| the spooled workbook (local file; counts here if the temporary directory is memory-backed) | 400 MiB |
+| shared strings: text up to the 128 MiB declared, 10,000,000 `u32` offsets at most | 168 MiB |
+| styles (65,536 styles, 65,536 custom formats) and the sheet list (256 names) | 4 MiB |
+| the XML parser: one event (1 MiB), open elements (32 deep x 256 bytes), its 16 KiB buffer | 1 MiB |
+| the zip directory kept: at most 10,000 entries | 1 MiB (the 8 MiB read to check it is freed) |
+| one row: at most 16,384 cells and 1 MiB of text, one cell's pieces (128 KiB twice) | 2 MiB |
+| batches alive at once: one being built (its records, then its columns), two in the channel, one written; each at most 8 MiB of text plus 8 MiB of numbers | 80 MiB |
+| the part writer: an encoded row group and its output, at most 64 MiB each, and the slice being added | 136 MiB |
+| arrow, the runtime and the compressor's own buffers (not measured) | 16 MiB |
+| **sum** | **about 810 MiB** |
+
+That is about 40 % of a 2 GiB job (the floor design D11 states for the preparation job; its
+candidate is 4 GiB), with 409 MiB of it being the spool and the shared strings, which only a
+workbook near the caps reaches. Measured heap peaks (above) are 23 to 45 MiB for 33 to 127 MiB
+workbooks, because the worst cases do not coincide and the test data compresses. The first
+version of this unit also held what a library's own directory discovery allocated (up to 65,535
+entries with 64 KiB names) and what the parser kept for unclosed elements (gigabytes); both are
+now bounded and have their own tests (`tests/xlsx_hostile_memory.rs`).
+
+**Bounds in the memory test are derived, not fitted.** `grid_bound`, `wide_bound` and `part_cost`
+are sums of named constants (`BATCH_TEXT`, `BATCHES_IN_FLIGHT_TEXT`, `STRINGS`, `FIXED`), and
+`the_constants_the_bounds_come_from_are_the_production_ones` pins each to the production constant
+(`BATCH_BYTES`, `BATCH_ROWS`, `BATCH_CELLS`, `PART_MAX_BYTES`, `PART_MAX_ROWS`, the token limit):
+a batch twice as large fails that test, which a peak measured on compressible data could not
+promise. The scenarios added after the review: production 64 MiB parts, a workbook of three
+sheets (the peak is one sheet's), a sheet read again after a late conflict, and a sheet of 16,384
+columns, refused after its sample (its table list cannot fit the registry row) at 4 MiB. Tests
+that measure share global counters, so they take one lock and run one at a time.

@@ -59,6 +59,9 @@ static ALLOC: Counting = Counting;
 
 const MIB: usize = 1024 * 1024;
 
+/// The counters are global: one test measures at a time.
+static SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 /// What a generated workbook's sheet holds.
 #[derive(Clone, Copy)]
 enum Shape {
@@ -71,10 +74,23 @@ enum Shape {
         cells: usize,
         width: usize,
     },
+    /// `cols` short numeric cells per row, up to Excel's 16,384 columns.
+    Columns { rows: usize, cols: usize },
+    /// One numeric column with a text cell after the 10,000 rows the types come from:
+    /// the sheet is read again as text.
+    Late { rows: usize },
 }
 
-fn column(i: usize) -> char {
-    (b'A' + i as u8) as char
+/// The name of column `i` (from zero): `A` to `XFD`.
+fn column(i: usize) -> String {
+    let mut n = i + 1;
+    let mut name = Vec::new();
+    while n > 0 {
+        name.push(b'A' + ((n - 1) % 26) as u8);
+        n = (n - 1) / 26;
+    }
+    name.reverse();
+    String::from_utf8(name).unwrap()
 }
 
 /// The sheet XML, row by row, through `emit`.
@@ -150,12 +166,31 @@ fn sheet_rows(shape: Shape, mut emit: impl FnMut(&str)) {
                 emit(&row);
             }
         }
+        Shape::Columns { rows, cols } => {
+            for r in 1..=rows {
+                let cells: String = (0..cols)
+                    .map(|c| format!("<c r=\"{}{r}\"><v>{}</v></c>", column(c), r * 7 + c))
+                    .collect();
+                emit(&format!("<row r=\"{r}\">{cells}</row>"));
+            }
+        }
+        Shape::Late { rows } => {
+            emit("<row r=\"1\"><c r=\"A1\" t=\"inlineStr\"><is><t>n</t></is></c></row>");
+            for r in 2..=rows + 1 {
+                let cell = if r == 10_006 {
+                    format!("<c r=\"A{r}\" t=\"inlineStr\"><is><t>N/A</t></is></c>")
+                } else {
+                    format!("<c r=\"A{r}\"><v>{r}</v></c>")
+                };
+                emit(&format!("<row r=\"{r}\">{cell}</row>"));
+            }
+        }
     }
     emit("</sheetData></worksheet>");
 }
 
-/// Writes a workbook of one sheet to `path`, streaming; returns its size.
-fn write_workbook(path: &Path, shape: Shape, method: CompressionMethod) -> u64 {
+/// Writes a workbook of one sheet per shape to `path`, streaming; returns its size.
+fn write_workbook(path: &Path, shapes: &[Shape], method: CompressionMethod) -> u64 {
     let file = BufWriter::new(File::create(path).unwrap());
     let mut zip = ZipWriter::new(file);
     let stored = FileOptions::default().compression_method(CompressionMethod::Stored);
@@ -168,22 +203,33 @@ fn write_workbook(path: &Path, shape: Shape, method: CompressionMethod) -> u64 {
         "_rels/.rels",
         &format!("<Relationships><Relationship Id=\"r\" Type=\"{ns}/officeDocument\" Target=\"xl/workbook.xml\"/></Relationships>"),
     );
+    let sheets: String = (1..=shapes.len())
+        .map(|i| format!("<sheet name=\"Data{i}\" r:id=\"rId{i}\"/>"))
+        .collect();
     put(
         "xl/workbook.xml",
-        &format!("<workbook xmlns:r=\"{ns}\"><sheets><sheet name=\"Data\" r:id=\"rId1\"/></sheets></workbook>"),
+        &format!("<workbook xmlns:r=\"{ns}\"><sheets>{sheets}</sheets></workbook>"),
     );
+    let mut rels: String = (1..=shapes.len())
+        .map(|i| format!("<Relationship Id=\"rId{i}\" Type=\"{ns}/worksheet\" Target=\"worksheets/sheet{i}.xml\"/>"))
+        .collect();
+    rels.push_str(&format!("<Relationship Id=\"rIdS\" Type=\"{ns}/sharedStrings\" Target=\"sharedStrings.xml\"/><Relationship Id=\"rIdT\" Type=\"{ns}/styles\" Target=\"styles.xml\"/>"));
     put(
         "xl/_rels/workbook.xml.rels",
-        &format!("<Relationships><Relationship Id=\"rId1\" Type=\"{ns}/worksheet\" Target=\"worksheets/sheet1.xml\"/><Relationship Id=\"rId2\" Type=\"{ns}/sharedStrings\" Target=\"sharedStrings.xml\"/><Relationship Id=\"rId3\" Type=\"{ns}/styles\" Target=\"styles.xml\"/></Relationships>"),
+        &format!("<Relationships>{rels}</Relationships>"),
     );
     put(
         "xl/styles.xml",
         "<styleSheet><cellXfs><xf numFmtId=\"0\"/><xf numFmtId=\"14\"/></cellXfs></styleSheet>",
     );
-    let unique = match shape {
-        Shape::Grid { unique_strings, .. } => unique_strings,
-        Shape::Wide { .. } => 0,
-    };
+    let unique = shapes
+        .iter()
+        .map(|s| match s {
+            Shape::Grid { unique_strings, .. } => *unique_strings,
+            _ => 0,
+        })
+        .max()
+        .unwrap_or(0);
     zip.start_file("xl/sharedStrings.xml", stored).unwrap();
     zip.write_all(b"<sst>").unwrap();
     for i in 0..unique {
@@ -193,12 +239,14 @@ fn write_workbook(path: &Path, shape: Shape, method: CompressionMethod) -> u64 {
         .unwrap();
     }
     zip.write_all(b"</sst>").unwrap();
-    zip.start_file(
-        "xl/worksheets/sheet1.xml",
-        FileOptions::default().compression_method(method),
-    )
-    .unwrap();
-    sheet_rows(shape, |chunk| zip.write_all(chunk.as_bytes()).unwrap());
+    for (i, shape) in shapes.iter().enumerate() {
+        zip.start_file(
+            format!("xl/worksheets/sheet{}.xml", i + 1),
+            FileOptions::default().compression_method(method),
+        )
+        .unwrap();
+        sheet_rows(*shape, |chunk| zip.write_all(chunk.as_bytes()).unwrap());
+    }
     zip.finish().unwrap().flush().unwrap();
     std::fs::metadata(path).unwrap().len()
 }
@@ -246,32 +294,51 @@ impl PartSink for Discard {
     }
 }
 
-/// The workbook at `path`: the rows it converted and the peak of live heap bytes
-/// above the starting level while converting it.
-async fn peak_of(path: &Path, rows: usize) -> usize {
-    let sink = Arc::new(Discard::default());
-    let cfg = WriterConfig {
+/// The production writer settings: parts of 500,000 rows or 64 MiB.
+fn production() -> WriterConfig {
+    WriterConfig::default()
+}
+
+/// The 8 MiB parts the first scenarios use, so that their parts close within the file.
+fn small_parts() -> WriterConfig {
+    WriterConfig {
         max_rows: 500_000,
         max_bytes: 8 * MIB,
-    };
+    }
+}
+
+/// Converts the workbook at `path` and returns the result and the peak of live heap
+/// bytes above the starting level.
+async fn measure(path: &Path, cfg: WriterConfig) -> (Result<Vec<u64>, String>, usize) {
+    let sink = Arc::new(Discard::default());
     let base = LIVE.load(Ordering::SeqCst);
     PEAK.store(base, Ordering::SeqCst);
-    let tables = convert_xlsx(
+    let result = convert_xlsx(
         &FileSource(path.to_path_buf()),
         sink.clone(),
         cfg,
         &ConvertControl::new(),
     )
     .await
-    .unwrap_or_else(|f| panic!("conversion failed: {}", f.error));
-    assert_eq!(tables.len(), 1);
-    assert_eq!(tables[0].table.written.rows, rows as u64);
-    assert!(sink.0.load(Ordering::SeqCst) > 0);
-    PEAK.load(Ordering::SeqCst) - base
+    .map(|t| t.iter().map(|t| t.table.written.rows).collect())
+    .map_err(|f| f.error.to_string());
+    (result, PEAK.load(Ordering::SeqCst) - base)
+}
+
+/// The workbook at `path` converted to tables of the given row counts, and the peak.
+async fn peak_of(path: &Path, rows: &[usize], cfg: WriterConfig) -> usize {
+    let (result, peak) = measure(path, cfg).await;
+    let want: Vec<u64> = rows.iter().map(|r| *r as u64).collect();
+    assert_eq!(
+        result.unwrap_or_else(|e| panic!("conversion failed: {e}")),
+        want
+    );
+    peak
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn memory_is_bounded_whatever_the_size_of_the_workbook() {
+    let _one_at_a_time = SERIAL.lock().await;
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("book.xlsx");
 
@@ -280,10 +347,10 @@ async fn memory_is_bounded_whatever_the_size_of_the_workbook() {
         rows,
         unique_strings: 50_000,
     };
-    let small_size = write_workbook(&path, grid(100_000), CompressionMethod::Stored);
-    let small = peak_of(&path, 100_000).await;
-    let large_size = write_workbook(&path, grid(400_000), CompressionMethod::Stored);
-    let large = peak_of(&path, 400_000).await;
+    let small_size = write_workbook(&path, &[grid(100_000)], CompressionMethod::Stored);
+    let small = peak_of(&path, &[100_000], small_parts()).await;
+    let large_size = write_workbook(&path, &[grid(400_000)], CompressionMethod::Stored);
+    let large = peak_of(&path, &[400_000], small_parts()).await;
     eprintln!(
         "grid: {} MiB -> peak {} MiB, {} MiB -> peak {} MiB",
         small_size / MIB as u64,
@@ -293,7 +360,7 @@ async fn memory_is_bounded_whatever_the_size_of_the_workbook() {
     );
     assert!(large_size > 3 * small_size);
     assert!(large <= small + small / 4 + 8 * MIB, "{small} then {large}");
-    assert!(large <= GRID_BOUND, "peak {} MiB", large / MIB);
+    assert!(large <= grid_bound(8 * MIB), "peak {} MiB", large / MIB);
 
     // Wide text cells: four of 16 KiB per row, so a batch is held by its 8 MiB of
     // text and not by its rows.
@@ -302,10 +369,10 @@ async fn memory_is_bounded_whatever_the_size_of_the_workbook() {
         cells: 4,
         width: 16 * 1024,
     };
-    let small_size = write_workbook(&path, wide(300), CompressionMethod::Stored);
-    let small = peak_of(&path, 300).await;
-    let large_size = write_workbook(&path, wide(1200), CompressionMethod::Stored);
-    let large = peak_of(&path, 1200).await;
+    let small_size = write_workbook(&path, &[wide(300)], CompressionMethod::Stored);
+    let small = peak_of(&path, &[300], small_parts()).await;
+    let large_size = write_workbook(&path, &[wide(1200)], CompressionMethod::Stored);
+    let large = peak_of(&path, &[1200], small_parts()).await;
     eprintln!(
         "wide: {} MiB -> peak {} MiB, {} MiB -> peak {} MiB",
         small_size / MIB as u64,
@@ -315,27 +382,137 @@ async fn memory_is_bounded_whatever_the_size_of_the_workbook() {
     );
     assert!(large_size > 3 * small_size);
     assert!(large <= small + small / 4 + 8 * MIB, "{small} then {large}");
-    assert!(large <= WIDE_BOUND, "peak {} MiB", large / MIB);
+    assert!(large <= wide_bound(8 * MIB), "peak {} MiB", large / MIB);
 
     // The same grid deflated, so the inflate path is inside the measurement too.
-    let deflated = write_workbook(&path, grid(150_000), CompressionMethod::Deflated);
-    let peak = peak_of(&path, 150_000).await;
+    let deflated = write_workbook(&path, &[grid(150_000)], CompressionMethod::Deflated);
+    let peak = peak_of(&path, &[150_000], small_parts()).await;
     eprintln!(
         "deflated grid: {} MiB -> peak {} MiB",
         deflated / MIB as u64,
         peak / MIB
     );
-    assert!(peak <= GRID_BOUND, "peak {} MiB", peak / MIB);
+    assert!(peak <= grid_bound(8 * MIB), "peak {} MiB", peak / MIB);
 }
 
-/// Worst case of the grid shape: batches of 8,192 rows of eight short cells (a
-/// few hundred KiB each) in flight, the part writer at its 8 MiB part limit
-/// (encode and output, twice that), the 50,000-string table (about 3 MiB), the
-/// zip central directory and a 64 KiB spool chunk. Debug builds measure well
-/// under this; a slow runner changes only the interleaving.
-const GRID_BOUND: usize = 64 * MIB;
+// The bounds are derived from the constants of the design, named here. Each is
+// pinned to the production constant by `the_constants_the_bounds_come_from_...`, so a
+// batch twice as large changes a constant this test asserts, not only a peak.
 
-/// Worst case of the wide shape: a batch is held by its 8 MiB of text (twice
-/// while its columns are built), up to four of them in flight, and the part
-/// writer at 8 MiB.
-const WIDE_BOUND: usize = 112 * MIB;
+/// Bytes of text one batch holds at most (the reader's byte budget).
+const BATCH_TEXT: usize = 8 * MIB;
+/// Batches alive at once, worst case: one being built (its records, then its
+/// columns, twice the text), two in the channel, one being written.
+const BATCHES_IN_FLIGHT_TEXT: usize = 2 * BATCH_TEXT + 2 * BATCH_TEXT + BATCH_TEXT;
+/// The shared-strings table's reserve for a workbook of this test (50,000 strings of
+/// about 50 bytes), four bytes of offset each, rounded up.
+const STRINGS: usize = 8 * MIB;
+/// What is not a batch, a part or the strings: one XML event (1 MiB), the spool
+/// chunk, the central directory, the cells of one row and the buffers of the runtime.
+const FIXED: usize = 8 * MIB;
+/// The part writer holds an encoded row group and its output: twice the part limit,
+/// plus the slice being added (8 MiB).
+fn part_cost(part_bytes: usize) -> usize {
+    2 * part_bytes + 8 * MIB
+}
+
+/// Worst case of the short-row shape: its batches are a few hundred KiB, so only the
+/// part writer and the strings count; the batches are covered by `FIXED`.
+fn grid_bound(part_bytes: usize) -> usize {
+    part_cost(part_bytes) + STRINGS + FIXED + 8 * MIB
+}
+
+/// Worst case of the wide-text shape: batches held by their text, in flight.
+fn wide_bound(part_bytes: usize) -> usize {
+    BATCHES_IN_FLIGHT_TEXT + part_cost(part_bytes) + FIXED
+}
+
+#[test]
+fn the_constants_the_bounds_come_from_are_the_production_ones() {
+    use colmena::tabular_prepare::csv::{BATCH_BYTES, BATCH_CELLS, BATCH_ROWS};
+    use colmena::tabular_prepare::writer::{PART_MAX_BYTES, PART_MAX_ROWS};
+    use colmena::tabular_prepare::xlsx_package::MAX_TOKEN_BYTES;
+    assert_eq!(BATCH_BYTES, BATCH_TEXT);
+    assert_eq!((BATCH_ROWS, BATCH_CELLS), (8192, 1_000_000));
+    assert_eq!((PART_MAX_BYTES, PART_MAX_ROWS), (64 * MIB, 500_000));
+    assert_eq!(MAX_TOKEN_BYTES as usize, MIB);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_production_part_size_a_workbook_of_sheets_and_a_restart_stay_within_their_bounds() {
+    let _one_at_a_time = SERIAL.lock().await;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("book.xlsx");
+    let grid = |rows| Shape::Grid {
+        rows,
+        unique_strings: 50_000,
+    };
+
+    // Three sheets in one workbook: the peak is one sheet's, not three.
+    let one = {
+        write_workbook(&path, &[grid(100_000)], CompressionMethod::Stored);
+        peak_of(&path, &[100_000], production()).await
+    };
+    write_workbook(
+        &path,
+        &[grid(100_000), grid(100_000), grid(100_000)],
+        CompressionMethod::Stored,
+    );
+    let three = peak_of(&path, &[100_000, 100_000, 100_000], production()).await;
+    eprintln!("sheets: one {} MiB, three {} MiB", one / MIB, three / MIB);
+    assert!(three <= one + one / 4 + 8 * MIB, "{one} then {three}");
+    assert!(three <= grid_bound(64 * MIB), "peak {} MiB", three / MIB);
+
+    // The wide-text shape with the production 64 MiB parts.
+    let wide = Shape::Wide {
+        rows: 1500,
+        cells: 4,
+        width: 16 * 1024,
+    };
+    write_workbook(&path, &[wide], CompressionMethod::Stored);
+    let peak = peak_of(&path, &[1500], production()).await;
+    eprintln!("wide, production parts: {} MiB", peak / MIB);
+    assert!(peak <= wide_bound(64 * MIB), "peak {} MiB", peak / MIB);
+
+    // A sheet read again as text after a late conflict: the second read costs no more.
+    write_workbook(
+        &path,
+        &[Shape::Late { rows: 120_000 }],
+        CompressionMethod::Stored,
+    );
+    let restarted = peak_of(&path, &[120_000], production()).await;
+    eprintln!("restart: {} MiB", restarted / MIB);
+    assert!(
+        restarted <= grid_bound(64 * MIB),
+        "peak {} MiB",
+        restarted / MIB
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_sheet_of_16384_columns_is_refused_after_its_sample_with_bounded_memory() {
+    let _one_at_a_time = SERIAL.lock().await;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("book.xlsx");
+    // 16,384 columns by 200 rows: 3.3 million cells. The table list (64 KiB, about 900
+    // columns) cannot hold it, so it is refused after the header and the sample.
+    write_workbook(
+        &path,
+        &[Shape::Columns {
+            rows: 200,
+            cols: 16_384,
+        }],
+        CompressionMethod::Stored,
+    );
+    let (result, peak) = measure(&path, production()).await;
+    let error = result.unwrap_err();
+    assert!(error.contains("table list"), "{error}");
+    // The sample of 200 rows of 16,384 cells and the names: well under the batch
+    // budget plus the fixed cost.
+    assert!(
+        peak <= BATCHES_IN_FLIGHT_TEXT + FIXED,
+        "peak {} MiB",
+        peak / MIB
+    );
+    eprintln!("16,384 columns: refused at {} MiB", peak / MIB);
+}
