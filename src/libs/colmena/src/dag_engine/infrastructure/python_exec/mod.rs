@@ -31,6 +31,8 @@ pub mod seccomp {
 pub mod selftest;
 #[cfg(target_os = "linux")]
 pub mod server;
+#[cfg(unix)]
+pub mod staging;
 #[cfg(target_os = "linux")]
 pub mod subprocess;
 #[cfg(target_os = "linux")]
