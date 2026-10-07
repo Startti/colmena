@@ -207,6 +207,9 @@ pub(crate) mod fake {
         pub release_hang: tokio::sync::Notify,
         /// The second open of a source finds it deleted.
         pub remove_source_on_second_open: Mutex<bool>,
+        /// `delete` never returns; says so first.
+        pub hang_delete: Mutex<bool>,
+        pub delete_reached: tokio::sync::Notify,
         /// The second open stops until `second_open_go`, after saying so.
         pub pause_second_open: Mutex<bool>,
         pub second_open_reached: tokio::sync::Notify,
@@ -367,6 +370,10 @@ pub(crate) mod fake {
             }
         }
         async fn delete(&self, key: &str) -> Result<(), StorageError> {
+            if *self.hang_delete.lock().unwrap() {
+                self.delete_reached.notify_one();
+                futures::future::pending::<()>().await;
+            }
             self.objects.lock().unwrap().remove(key);
             self.deleted.lock().unwrap().push(key.to_string());
             Ok(())

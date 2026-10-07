@@ -14,6 +14,8 @@ pub(crate) struct Faults {
     pub fail_complete: AtomicBool,
     /// `complete` never returns.
     pub hang_complete: AtomicBool,
+    /// Says when `complete` has been reached (and is about to hang).
+    pub complete_reached: tokio::sync::Notify,
     /// `fail_with_blobs` answers a backend error.
     pub fail_fail: AtomicBool,
     /// `fail_with_blobs` never returns.
@@ -53,6 +55,7 @@ impl PreparationRegistry for FaultyRegistry {
         n: DateTime<Utc>,
     ) -> Result<TerminalOutcome, RegistryError> {
         if self.faults.hang_complete.load(SeqCst) {
+            self.faults.complete_reached.notify_one();
             futures::future::pending::<()>().await;
         }
         if self.faults.fail_complete.load(SeqCst) {

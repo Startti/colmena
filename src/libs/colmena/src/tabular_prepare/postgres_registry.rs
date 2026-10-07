@@ -434,6 +434,26 @@ mod tests {
         tabular_prepare_pg_a_row_taken_before_the_budget_ends_the_run_keeps_the_new_owners_objects,
         a_row_taken_before_the_budget_ends_the_run_keeps_the_new_owners_objects
     );
+    pg_driver_case!(
+        tabular_prepare_pg_a_manifest_put_that_never_completes_is_ended_by_the_same_budget,
+        a_manifest_put_that_never_completes_is_ended_by_the_same_budget
+    );
+    pg_driver_case!(
+        tabular_prepare_pg_a_completion_that_never_returns_is_ended_by_its_own_bound_and_deletes_nothing,
+        a_completion_that_never_returns_is_ended_by_its_own_bound_and_deletes_nothing
+    );
+    pg_driver_case!(
+        tabular_prepare_pg_a_delete_that_never_returns_does_not_hold_the_failure_back,
+        a_delete_that_never_returns_does_not_hold_the_failure_back
+    );
+    pg_driver_case!(
+        tabular_prepare_pg_the_lease_is_the_budget_plus_the_grace_and_outlasts_the_bounded_job,
+        the_lease_is_the_budget_plus_the_grace_and_outlasts_the_bounded_job
+    );
+    pg_driver_case!(
+        tabular_prepare_pg_a_cleanup_of_a_deleted_source_that_does_not_answer_keeps_the_row_and_its_keys,
+        a_cleanup_of_a_deleted_source_that_does_not_answer_keeps_the_row_and_its_keys
+    );
     pg_case!(
         tabular_prepare_pg_a_deleting_row_is_never_taken_by_an_older_format_claim,
         a_deleting_row_is_never_taken_by_an_older_format_claim
