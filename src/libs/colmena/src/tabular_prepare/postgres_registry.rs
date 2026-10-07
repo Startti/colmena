@@ -394,6 +394,26 @@ mod tests {
         tabular_prepare_pg_with_the_switch_off_or_another_mime_the_runner_touches_nothing,
         with_the_switch_off_or_another_mime_the_runner_touches_nothing
     );
+    pg_driver_case!(
+        tabular_prepare_pg_dropping_the_prepare_future_mid_run_leaves_every_stored_object_tracked_in_the_row,
+        dropping_the_prepare_future_mid_run_leaves_every_stored_object_tracked_in_the_row
+    );
+    pg_driver_case!(
+        tabular_prepare_pg_a_registry_error_at_completion_leaves_the_stored_objects_tracked_and_not_deleted,
+        a_registry_error_at_completion_leaves_the_stored_objects_tracked_and_not_deleted
+    );
+    pg_driver_case!(
+        tabular_prepare_pg_a_registry_error_recording_a_failure_still_deletes_the_objects_that_are_tracked,
+        a_registry_error_recording_a_failure_still_deletes_the_objects_that_are_tracked
+    );
+    pg_driver_case!(
+        tabular_prepare_pg_a_part_beyond_the_first_batch_is_tracked_before_its_put_a_batch_ahead,
+        a_part_beyond_the_first_batch_is_tracked_before_its_put_a_batch_ahead
+    );
+    pg_driver_case!(
+        tabular_prepare_pg_a_row_that_vanishes_before_the_first_tracking_write_stops_the_job_before_any_object,
+        a_row_that_vanishes_before_the_first_tracking_write_stops_the_job_before_any_object
+    );
     pg_case!(
         tabular_prepare_pg_a_deleting_row_is_never_taken_by_an_older_format_claim,
         a_deleting_row_is_never_taken_by_an_older_format_claim
