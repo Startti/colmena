@@ -949,6 +949,15 @@ the 2 GiB per-entry limit: 16 MiB for the workbook, its relationships and the st
 reads 3,000,000 unclosed elements as each kind of part and asserts the refusal (`TooDeep`)
 costs under 2 MiB.
 
+**Budgets that cover every read.** A part read again is inflated again (a sample, a run, each
+restart), so the archive's 2.5 GiB "total expanded" limit would be only a claim about the
+headers if it were not also a running count: `Package` adds every byte any read inflates to one
+counter and fails a read that passes the limit (`TotalTooLarge`). A workbook whose `sheet`
+elements name one part more than once (up to 256 of them could, each read as another sheet) is
+refused (`BadRelationship`). The cell cap works the same way: the book counts every cell any
+read of it reads, and the reader looks at the cancel token every 4,096 cells, whatever they
+hold, so a sheet of tens of millions of empty cells ends with the budget instead of outliving it.
+
 **One reading of the archive.** The part is found at the offset the pre-check validated (its
 local header already compared with the central directory) and only its raw bytes go to a
 decoder (`flate2`, or none for a stored part), under `Limited`, which also checks the part's
@@ -1132,8 +1141,9 @@ Rules:
   the sheet that conflicted is read again; `restarts`, `demoted` and `all_strings` are reported
   as for a CSV, and a workbook's `ConvertedTable` reports `utf-8`, no replacements and the
   blank rows it dropped (`blank_dropped`).
-- Cells are capped over the whole workbook: each sheet may use what the sheets before it left
-  of the 50,000,000.
+- The 50,000,000-cell cap is the **job's**: every cell any read of the workbook reads counts
+  (sampling, runs, restarts and skipped sheets), so a sheet that restarts three times counts
+  four times (the cap bounds work, not just the size of the file).
 - The table list of a sheet that cannot fit the registry row is refused right after its first
   read, as for a CSV.
 
@@ -1182,8 +1192,8 @@ sampled and written (see above).
   conflict). `restarts`, `demoted` and `all_strings` are reported as for a CSV; the
   `ConvertedTable` of a sheet reports `utf-8`, no replacements and the blank rows it dropped
   (`blank_dropped`).
-- Cells are capped over the **whole workbook**: each sheet may use what the sheets before it
-  left of the 50,000,000.
+- The 50,000,000-cell cap is the **job's**: every cell any read counts (sampling, runs,
+  restarts and skipped sheets), so a sheet that restarts three times counts four times.
 - The table list of a sheet that cannot fit the registry row (64 KiB) is refused right after
   its first read, as for a CSV.
 - Cancelling the control, or dropping the future, stops the read at its next row; the keys put
