@@ -462,4 +462,37 @@ mod tests {
         assert!(sink.biggest <= mib);
         r.expect_end().await.unwrap();
     }
+
+    #[test]
+    fn the_response_header_round_trips_and_names_no_key() {
+        let h = ResponseHeader {
+            v: WIRE_V2,
+            status: RunStatus::Ok,
+            message: None,
+            output: Some(serde_json::json!({"a": 1})),
+            stdout: "hi".into(),
+            files: vec![OutEntry {
+                name: "a.csv".into(),
+                size: 3,
+            }],
+            dropped: vec![Dropped {
+                name: None,
+                reason: "bad_name".into(),
+            }],
+            too_many_entries: false,
+        };
+        let text = serde_json::to_string(&h).unwrap();
+        let back: ResponseHeader = serde_json::from_str(&text).unwrap();
+        assert_eq!(back.files, h.files);
+        assert_eq!(back.status, RunStatus::Ok);
+        assert!(text.contains("\"status\":\"ok\""));
+        let r = Refusal {
+            refusal: "busy".into(),
+            reason: None,
+        };
+        assert_eq!(
+            serde_json::from_str::<Refusal>(&serde_json::to_string(&r).unwrap()).unwrap(),
+            r
+        );
+    }
 }
