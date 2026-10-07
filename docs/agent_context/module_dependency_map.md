@@ -5,7 +5,7 @@
 
 **How to use (for the exploration/spec phase):** before opening files to assess a change, look up the target file below. **Used by** is its blast radius — the files that break if you change its public surface. **Depends on** is what it needs. Start by reading only those, not the whole repo.
 
-- Files indexed: **463**
+- Files indexed: **464**
 - Modules with at least one importer: **229**
 
 ## Blast-radius ranking (change these with the most care)
@@ -31,10 +31,10 @@
 | 14 | `llm::infrastructure::persistence` | `src/libs/colmena/src/llm/infrastructure/persistence/mod.rs` |
 | 13 | `google_oauth::infrastructure` | `src/libs/colmena/src/google_oauth/infrastructure/mod.rs` |
 | 12 | `dag_engine::application::secure_value_service` | `src/libs/colmena/src/dag_engine/application/secure_value_service.rs` |
+| 12 | `tabular_prepare::manifest` | `src/libs/colmena/src/tabular_prepare/manifest.rs` |
 | 11 | `dag_engine::domain::python_executor` | `src/libs/colmena/src/dag_engine/domain/python_executor.rs` |
 | 11 | `documents::domain::ports` | `src/libs/colmena/src/documents/domain/ports.rs` |
 | 11 | `google_oauth::domain` | `src/libs/colmena/src/google_oauth/domain/mod.rs` |
-| 11 | `tabular_prepare::manifest` | `src/libs/colmena/src/tabular_prepare/manifest.rs` |
 | 11 | `text` | `src/libs/colmena/src/text/mod.rs` |
 | 10 | `dag_engine::domain::events` | `src/libs/colmena/src/dag_engine/domain/events.rs` |
 | 10 | `documents::domain::artifact` | `src/libs/colmena/src/documents/domain/artifact.rs` |
@@ -2191,7 +2191,7 @@
 
 #### `src/libs/colmena/src/tabular_prepare/manifest.rs`
 - Module: `tabular_prepare::manifest`
-- **Used by (11)**: `src/libs/colmena/src/tabular_prepare/convert.rs`, `src/libs/colmena/src/tabular_prepare/csv.rs`, `src/libs/colmena/src/tabular_prepare/driver.rs`, `src/libs/colmena/src/tabular_prepare/driver_xlsx_tests.rs`, `src/libs/colmena/src/tabular_prepare/infer.rs`, `src/libs/colmena/src/tabular_prepare/part_sink.rs`, `src/libs/colmena/src/tabular_prepare/prepare.rs`, `src/libs/colmena/src/tabular_prepare/writer.rs`, `src/libs/colmena/src/tabular_prepare/xlsx_columns.rs`, `src/libs/colmena/src/tabular_prepare/xlsx_convert.rs`, `src/libs/colmena/src/tabular_prepare/xlsx_run.rs`
+- **Used by (12)**: `src/libs/colmena/src/tabular_prepare/convert.rs`, `src/libs/colmena/src/tabular_prepare/csv.rs`, `src/libs/colmena/src/tabular_prepare/driver.rs`, `src/libs/colmena/src/tabular_prepare/driver_xlsx_tests.rs`, `src/libs/colmena/src/tabular_prepare/infer.rs`, `src/libs/colmena/src/tabular_prepare/part_sink.rs`, `src/libs/colmena/src/tabular_prepare/prepare.rs`, `src/libs/colmena/src/tabular_prepare/writer.rs`, `src/libs/colmena/src/tabular_prepare/xlsx_columns.rs`, `src/libs/colmena/src/tabular_prepare/xlsx_convert.rs`, `src/libs/colmena/src/tabular_prepare/xlsx_run.rs`, `src/libs/colmena/src/tabular_run/verify.rs`
 - Depends on (0): — (no intra-crate imports)
 
 #### `src/libs/colmena/src/tabular_prepare/mod.rs`
@@ -2226,7 +2226,7 @@
 
 #### `src/libs/colmena/src/tabular_prepare/registry.rs`
 - Module: `tabular_prepare::registry`
-- **Used by (4)**: `src/libs/colmena/src/tabular_prepare/driver.rs`, `src/libs/colmena/src/tabular_prepare/driver_xlsx_tests.rs`, `src/libs/colmena/src/tabular_prepare/gc.rs`, `src/libs/colmena/src/tabular_prepare/mod.rs`
+- **Used by (5)**: `src/libs/colmena/src/tabular_prepare/driver.rs`, `src/libs/colmena/src/tabular_prepare/driver_xlsx_tests.rs`, `src/libs/colmena/src/tabular_prepare/gc.rs`, `src/libs/colmena/src/tabular_prepare/mod.rs`, `src/libs/colmena/src/tabular_run/verify.rs`
 - Depends on (1): `dag_engine::infrastructure::pool_registry`
 
 #### `src/libs/colmena/src/tabular_prepare/registry_contract.rs`
@@ -2320,6 +2320,11 @@
 - Module: `tabular_run::refusal`
 - **Used by (0)**: — (leaf / entrypoint / not imported intra-crate)
 - Depends on (1): `llm::domain::large_tabular`
+
+#### `src/libs/colmena/src/tabular_run/verify.rs`
+- Module: `tabular_run::verify`
+- **Used by (0)**: — (leaf / entrypoint / not imported intra-crate)
+- Depends on (2): `tabular_prepare::manifest`, `tabular_prepare::registry`
 
 ### text
 
