@@ -156,8 +156,8 @@ default); `no_new_privs` and death with the template; limits on address space (t
 `…_MEMORY_MB`), CPU seconds, file size, descriptors, processes and core files. A failed step ends the child (exit 71)
 before any code runs. The last step is a syscall filter: creating sockets, starting processes or programs (`fork`,
 `clone` without `CLONE_THREAD`, `execve`), tracing, mounts, namespaces, keyrings, BPF, `io_uring`, and module, swap and
-reboot calls return `EPERM`; `clone3` returns `ENOSYS`, so threads are created through `clone`; on x86_64 every x32
-syscall number returns `EPERM`; other architectures have no filter and the jail does not start. Threads work. Code that
+reboot calls return `EPERM`; `clone3` returns `ENOSYS`, so threads are created through `clone`; on x86_64 every number of 512 or
+more (the x32 ABI) returns `EPERM`; other architectures have no filter and the jail does not start. Threads work. Code that
 uses `multiprocessing`, `subprocess`, an `asyncio` event loop (its self-pipe is a socket pair) or a library that probes
 the system with a subprocess gets a `PermissionError` or `OSError`. The template needs root and `CAP_SYS_ADMIN`; without them every
 call ends with the crashed text. The uid range `uid_base..uid_base+slots` must belong to one executor per PID
@@ -263,14 +263,21 @@ second process on the same root gets `PythonExecutorError: the staging root is a
 startup error and sweeps nothing. If the staging volume is persistent, the prepared data of a call that was killed stays on it until the
 next start of an executor with that root; a tmpfs staging volume vanishes with the instance.
 
-For a jail with a staging root, two layers are added so that the read-only guarantee of `/data` does not rest on the empty
-capability sets alone: the capability BOUNDING set is cleared (`PR_CAPBSET_DROP` of every capability, read back, while the
-process is still root and before the uid change; `no_new_privs` was already set and is checked), and the seccomp denylist
-gains the new mount API, `open_tree`, `move_mount`, `fsopen`, `fsconfig`, `fsmount`, `fspick`, `mount_setattr` and
-`open_tree_attr` (428-433, 442 and 467: the same numbers on x86_64 and aarch64, so none is skipped on either), with the same
-action and errno as `mount` (EPERM). The filter matches numbers, not the kernel's table: it loads on a kernel that lacks a
-call (the libc crate does not name `open_tree_attr`, Linux 6.15, so it is listed by number) and answers EPERM where the
-kernel alone would say ENOSYS. A jail without a staging root is today's jail, with neither layer.
+The seccomp denylist of EVERY jail, staged or not, includes the new mount API, `open_tree`, `move_mount`, `fsopen`,
+`fsconfig`, `fsmount`, `fspick`, `mount_setattr` and `open_tree_attr` (428-433, 442, 467), the two calls that read a
+namespace's mount table, `statmount` (457) and `listmount` (458), and `kexec_file_load`, with the same action and errno
+as `mount` (EPERM). The numbers are the same on x86_64 and aarch64, so none is skipped on either; the libc crate names
+only some of them, the rest are listed by number. The filter matches numbers, not the kernel's table, so it loads on a
+kernel that lacks a call. The one observable change for a jail that never staged anything: on a kernel lacking one of
+them the call answers EPERM instead of ENOSYS (with every capability dropped it was already EPERM on a kernel that has
+the call). On x86_64 the x32 guard refuses every number of 512 or more under the native arch value (the x32-only table,
+512 to 547, includes an `execve` and an `execveat`, as well as the numbers with the x32 bit); the native table ends in
+the 470s, so nothing the template or Python needs is affected.
+
+For a jail with a staging root there is one more layer, so that the read-only guarantee of `/data` does not rest on the
+empty capability sets alone: the capability BOUNDING set is cleared (`PR_CAPBSET_DROP` of every capability, read back,
+while the process is still root and before the uid change; `no_new_privs` was already set and is checked). A jail without
+a staging root keeps today's bounding set.
 
 ### Startup self-test (Linux)
 
