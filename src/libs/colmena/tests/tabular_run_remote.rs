@@ -4,19 +4,41 @@
 //! runs only with `COLMENA_PYEXEC_JAIL_TESTS=1`, one test at a time (they share a
 //! staging root and mount tables): `-- --test-threads=1`.
 
+use async_trait::async_trait;
 use bytes::Bytes;
+use chrono::{Duration as ChronoDuration, Utc};
+use colmena::dag_engine::domain::python_executor::{PythonRunError, PythonRunRequest};
 use colmena::dag_engine::infrastructure::python_exec::config::SubprocessConfig;
+use colmena::dag_engine::infrastructure::python_exec::config::{RemoteAuthConfig, RemoteConfig};
+use colmena::dag_engine::infrastructure::python_exec::remote::RemoteExecutor;
 use colmena::dag_engine::infrastructure::python_exec::server::{router, AppState};
 use colmena::dag_engine::infrastructure::python_exec::subprocess::SubprocessExecutor;
+use colmena::storage::domain::{
+    OutputStorageRepository, StorageError, StoreRequest, StoredBytes, StoredOutput, StoredStream,
+};
+use colmena::tabular_prepare::manifest::{
+    part_path, ColumnInfo, ColumnType, Manifest, TableInfo, MANIFEST_PATH,
+};
+use colmena::tabular_prepare::registry::{
+    ClaimRequest, PreparationRegistry, ReadyInfo, FORMAT_VERSION,
+};
+use colmena::tabular_prepare::sqlite_registry::SqlitePreparationRegistry;
+use colmena::tabular_run::collect::OutFile;
+use colmena::tabular_run::mounted::{MountedCall, MountedError, MountedExecutor, OutputSink};
+use colmena::tabular_run::refusal::{Budget, RunRefusal, Unavailable};
+use colmena::tabular_run::stage::StageLimits;
+use colmena::tabular_run::verify::{verify_prepared, PreparedTables};
 use colmena::tabular_run::wire::{
     end_frame, frame, CallHeader, FileEntry, Reader, Refusal, ResponseHeader, RunStatus, WIRE_V2,
 };
 use futures::{stream, StreamExt};
 use serde_json::{json, Map};
+use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
+use std::collections::HashMap;
 use std::os::unix::fs::DirBuilderExt;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 const TOKEN: &str = "remote-test-token-0123456789abcdef";
@@ -426,4 +448,364 @@ async fn a_server_whose_mounts_are_disabled_refuses_before_reading_the_data() {
     let refusal = r.json::<Refusal>().await.unwrap();
     assert_eq!(refusal.refusal, "mounts_disabled");
     assert_eq!(refusal.reason.as_deref(), Some("staging_unusable"));
+}
+
+// ---- the client: `RemoteExecutor` against this server ----
+
+const SOURCE: &str = "chat-attachments/u1/s1/doc-1";
+const ROOT: &str = "chat-attachments/u1/s1/prepared/doc-1";
+
+struct Storage {
+    objects: Mutex<HashMap<String, Vec<u8>>>,
+    /// Keys whose declared size is this many bytes more than the object holds.
+    lie: Mutex<HashMap<String, i64>>,
+    reads: Mutex<Vec<String>>,
+}
+
+#[async_trait]
+impl OutputStorageRepository for Storage {
+    async fn store(&self, _r: StoreRequest) -> Result<StoredOutput, StorageError> {
+        unreachable!()
+    }
+    async fn read(&self, _k: &str) -> Result<StoredBytes, StorageError> {
+        unreachable!()
+    }
+    async fn read_stream(&self, key: &str) -> Result<StoredStream, StorageError> {
+        self.reads.lock().unwrap().push(key.to_string());
+        let bytes = self.objects.lock().unwrap().get(key).cloned().unwrap();
+        let lie = self.lie.lock().unwrap().get(key).copied().unwrap_or(0);
+        let size = (bytes.len() as i64 + lie) as u64;
+        let chunks: Vec<Result<Bytes, StorageError>> = bytes
+            .chunks(64)
+            .map(|c| Ok(Bytes::copy_from_slice(c)))
+            .collect();
+        Ok(StoredStream {
+            stream: Box::pin(stream::iter(chunks)),
+            size_bytes: size,
+            mime_type: "application/octet-stream".into(),
+            filename: "object".into(),
+        })
+    }
+    async fn delete(&self, _k: &str) -> Result<(), StorageError> {
+        unreachable!()
+    }
+    fn derived_root(&self, _s: &str) -> Option<String> {
+        Some(ROOT.to_string())
+    }
+}
+
+async fn prepared(parts: &[Vec<u8>]) -> (Arc<Storage>, PreparedTables, tempfile::TempDir) {
+    let dir = tempfile::tempdir().unwrap();
+    let options = SqliteConnectOptions::new()
+        .filename(dir.path().join("registry.db"))
+        .create_if_missing(true);
+    let pool = SqlitePoolOptions::new()
+        .max_connections(2)
+        .connect_with(options)
+        .await
+        .unwrap();
+    sqlx::migrate!("migrations/sqlite")
+        .run(&pool)
+        .await
+        .unwrap();
+    let registry = SqlitePreparationRegistry::from_pool(Arc::new(pool));
+    let manifest = Manifest::new(vec![TableInfo {
+        name: "sales".into(),
+        rows: parts.len() as u64 * 10,
+        parts: parts.len() as u32,
+        columns: vec![ColumnInfo {
+            name: "a".into(),
+            column_type: ColumnType::Int,
+            uncompressed_bytes: 100,
+            in_memory_bytes: 10_000,
+        }],
+    }]);
+    let storage = Arc::new(Storage {
+        objects: Mutex::new(HashMap::new()),
+        lie: Mutex::new(HashMap::new()),
+        reads: Mutex::new(vec![]),
+    });
+    let (mut keys, mut total) = (vec![], 0);
+    for (p, bytes) in parts.iter().enumerate() {
+        let key = format!("{ROOT}/{}", part_path(0, p).unwrap());
+        storage
+            .objects
+            .lock()
+            .unwrap()
+            .insert(key.clone(), bytes.clone());
+        total += bytes.len();
+        keys.push(key);
+    }
+    let manifest_key = format!("{ROOT}/{MANIFEST_PATH}");
+    let json = manifest.to_json().unwrap();
+    total += json.len();
+    storage
+        .objects
+        .lock()
+        .unwrap()
+        .insert(manifest_key.clone(), json.into_bytes());
+    keys.push(manifest_key.clone());
+    registry
+        .claim(ClaimRequest {
+            source_key: SOURCE.into(),
+            source_bytes: 60_000_000,
+            format_version: FORMAT_VERSION,
+            owner: "job".into(),
+            lease: ChronoDuration::minutes(5),
+            now: Utc::now(),
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    registry
+        .complete(
+            SOURCE,
+            "job",
+            ReadyInfo {
+                manifest_key,
+                blob_keys: keys,
+                tables_json: manifest.tables_json().unwrap(),
+                prepared_bytes: total as i64,
+            },
+            Utc::now(),
+        )
+        .await
+        .unwrap();
+    let plan = verify_prepared(&registry, &*storage, SOURCE).await.unwrap();
+    storage.reads.lock().unwrap().clear();
+    (storage, plan, dir)
+}
+
+fn remote(s: &Server, token: &str, dir: &std::path::Path) -> RemoteExecutor {
+    let file = dir.join(format!("token-{token}"));
+    std::fs::write(&file, token).unwrap();
+    let base = s.url.trim_end_matches("v2/run").to_string();
+    let cfg = RemoteConfig {
+        url: base.parse().unwrap(),
+        auth: RemoteAuthConfig::BearerFile(file),
+        max_request_bytes: 32 << 20,
+        max_response_bytes: 1 << 20,
+        max_wire_bytes: None,
+    };
+    RemoteExecutor::new(cfg, Duration::from_secs(60)).unwrap()
+}
+
+fn py(code: &str) -> PythonRunRequest {
+    PythonRunRequest {
+        code: code.into(),
+        mode: "none".into(),
+        timeout: Some(Duration::from_secs(30)),
+        inputs: Map::new(),
+    }
+}
+
+fn mounted<'a>(
+    storage: &'a Storage,
+    plan: &'a PreparedTables,
+    sink: Option<&'a dyn OutputSink>,
+) -> MountedCall<'a> {
+    MountedCall {
+        storage,
+        plan,
+        tables: &[0],
+        limits: StageLimits::default(),
+        out_mb: 4,
+        sink,
+    }
+}
+
+#[derive(Default)]
+struct Names(Mutex<Vec<(String, Vec<u8>)>>);
+
+#[async_trait]
+impl OutputSink for Names {
+    async fn accept(&self, file: OutFile) -> Result<(), RunRefusal> {
+        use std::io::Read;
+        let name = file.name.clone();
+        let mut bytes = vec![];
+        file.into_file().read_to_end(&mut bytes).unwrap();
+        self.0.lock().unwrap().push((name, bytes));
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn the_remote_client_runs_a_multi_part_call_and_hands_the_good_output_to_the_sink() {
+    if !enabled() {
+        return;
+    }
+    let s = serve(Some(staging_root())).await;
+    let dir = tempfile::tempdir().unwrap();
+    let client = remote(&s, TOKEN, dir.path());
+    let (storage, plan, _d) = prepared(&[vec![b'a'; 3000], vec![b'b'; 500]]).await;
+    let code = r#"
+import os
+sizes = [os.path.getsize('/data/t0/' + p) for p in sorted(os.listdir('/data/t0'))]
+open('/out/result.csv', 'w').write('n\n' + str(sum(sizes)) + '\n')
+try:
+    os.symlink('/etc/hostname', '/out/link.csv')
+except OSError:
+    pass
+open('/out/bad name.csv', 'w').write('x')
+output = sizes
+"#;
+    let sink = Names::default();
+    let done = client
+        .run_with_mounts(py(code), mounted(&storage, &plan, Some(&sink)))
+        .await
+        .unwrap();
+    assert_eq!(done.result.output, Some(json!([3000, 500])));
+    assert_eq!(done.staged.parts, 2);
+    assert_eq!(done.emitted, ["result.csv"]);
+    assert_eq!(
+        *sink.0.lock().unwrap(),
+        [("result.csv".to_string(), b"n\n3500\n".to_vec())]
+    );
+    assert!(
+        done.rejected.iter().any(|r| r.name.is_none()),
+        "{:?}",
+        done.rejected
+    );
+    released(&s).await;
+}
+
+#[tokio::test]
+async fn the_remote_client_maps_the_servers_refusals_to_the_existing_ones() {
+    if !enabled() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let (storage, plan, _d) = prepared(&[vec![b'a'; 100]]).await;
+    // Wrong token: the usual rejected-credentials error.
+    let s = serve(Some(staging_root())).await;
+    let err = remote(&s, "a-token-this-server-does-not-accept", dir.path())
+        .run_with_mounts(py("output = 1"), mounted(&storage, &plan, None))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(&err, MountedError::Run(PythonRunError::Internal(t)) if t.contains("rejected")),
+        "{err:?}"
+    );
+    // Over the executor's budget of volumes.
+    let (a, b) = (s.exec.stage_call(4).unwrap(), s.exec.stage_call(4).unwrap());
+    let err = remote(&s, TOKEN, dir.path())
+        .run_with_mounts(py("output = 1"), mounted(&storage, &plan, None))
+        .await
+        .unwrap_err();
+    assert_eq!(
+        err,
+        MountedError::Refused(RunRefusal::OverBudget(Budget::Volumes))
+    );
+    drop((a, b));
+    // A server with no staging root has no route.
+    let bare = serve(None).await;
+    let err = remote(&bare, TOKEN, dir.path())
+        .run_with_mounts(py("output = 1"), mounted(&storage, &plan, None))
+        .await
+        .unwrap_err();
+    assert_eq!(
+        err,
+        MountedError::Refused(RunRefusal::Unavailable(Unavailable::Unsupported))
+    );
+    // The code's own failure is the usual Python error.
+    let err = remote(&s, TOKEN, dir.path())
+        .run_with_mounts(
+            py("raise ValueError('boom')"),
+            mounted(&storage, &plan, None),
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(&err, MountedError::Run(PythonRunError::Python(t)) if t.contains("boom")),
+        "{err:?}"
+    );
+    released(&s).await;
+}
+
+/// A storage that declares more than it sends: the client aborts the body, the
+/// server never takes a short file for the real one, and nothing is left.
+#[tokio::test]
+async fn a_storage_that_lies_about_a_size_fails_the_call_and_leaves_nothing() {
+    if !enabled() {
+        return;
+    }
+    let s = serve(Some(staging_root())).await;
+    let dir = tempfile::tempdir().unwrap();
+    let (storage, plan, _d) = prepared(&[vec![b'a'; 1000]]).await;
+    storage
+        .lie
+        .lock()
+        .unwrap()
+        .insert(format!("{ROOT}/t0/part-00000.parquet"), 50);
+    let err = remote(&s, TOKEN, dir.path())
+        .run_with_mounts(py("output = 1"), mounted(&storage, &plan, None))
+        .await
+        .unwrap_err();
+    assert_eq!(
+        err,
+        MountedError::Refused(RunRefusal::Invalid(
+            colmena::tabular_run::refusal::Invalid::Parts
+        ))
+    );
+    released(&s).await;
+}
+
+/// Dropping the call while the code runs closes the request: the server drops
+/// the call, which kills the child and gives the volume back.
+#[tokio::test]
+async fn cancelling_a_call_releases_the_servers_volume() {
+    if !enabled() {
+        return;
+    }
+    let s = serve(Some(staging_root())).await;
+    let dir = tempfile::tempdir().unwrap();
+    let client = remote(&s, TOKEN, dir.path());
+    let (storage, plan, _d) = prepared(&[vec![b'a'; 100]]).await;
+    let call = client.run_with_mounts(
+        py("import time\ntime.sleep(25)"),
+        mounted(&storage, &plan, None),
+    );
+    let early = tokio::time::timeout(Duration::from_secs(3), call).await;
+    assert!(early.is_err(), "still running when it was cancelled");
+    released(&s).await;
+}
+
+/// A server whose mounts are off says so before the data is read: the client
+/// reads nothing from storage beyond the header and reports the refusal.
+#[tokio::test]
+async fn a_server_with_mounts_off_is_reported_as_disabled() {
+    if !enabled() {
+        return;
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    let broken = tmp.path().canonicalize().unwrap();
+    let target = std::ffi::CString::new(broken.to_str().unwrap()).unwrap();
+    let rc = unsafe {
+        libc::mount(
+            c"tmpfs".as_ptr(),
+            target.as_ptr(),
+            c"tmpfs".as_ptr(),
+            libc::MS_RDONLY,
+            c"size=1m".as_ptr() as *const libc::c_void,
+        )
+    };
+    assert_eq!(rc, 0, "{}", std::io::Error::last_os_error());
+    struct Unmount(std::ffi::CString);
+    impl Drop for Unmount {
+        fn drop(&mut self) {
+            unsafe { libc::umount2(self.0.as_ptr(), libc::MNT_DETACH) };
+        }
+    }
+    let _guard = Unmount(target);
+    let s = serve(Some(broken)).await;
+    let dir = tempfile::tempdir().unwrap();
+    let (storage, plan, _d) = prepared(&[vec![b'a'; 100]]).await;
+    let err = remote(&s, TOKEN, dir.path())
+        .run_with_mounts(py("output = 1"), mounted(&storage, &plan, None))
+        .await
+        .unwrap_err();
+    assert_eq!(
+        err,
+        MountedError::Refused(RunRefusal::Unavailable(Unavailable::MountsDisabled))
+    );
 }

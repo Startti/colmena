@@ -1705,3 +1705,26 @@ then each kept output is spooled to an anonymous private temporary file (bounded
 sink; its name and size are checked again here. A server that sends more files or bytes than the collector would keep is not
 followed. Dropping the call drops the request, which makes the server release the volume. Nothing of the executor's or the
 server's text reaches the model.
+
+### To measure on the deployed service (spike item 3), and what was proved locally
+
+Proved here, on loopback with HTTP/1.1 (the in-process router and the real jail): the server and client of this section, with
+backpressure, size checks, stalls, cancellation and budgets (`tests/tabular_run_remote.rs`). The framing is ours and does not
+use HTTP/2 features, so it should carry over HTTP/1.1 chunked transfer as well as h2c. NOT verified, and to be measured on the
+deployed executor and its front end before the switch is enabled in dev:
+
+- the largest request body the front end accepts on a streamed (chunked or h2) request without a content length (up to ~1 GiB of
+  parts here), and the largest response;
+- the longest a single request may last (the upload of up to 240 s, plus the run, up to 300 s, plus the download of up to 240 s;
+  the client's whole-call bound is their sum) and whether any idle limit in front cuts a quiet request during the run;
+- whether the front end BUFFERS the request body before forwarding it (which would defeat the one-chunk bound and add latency and
+  memory there) or the response;
+- whether the response can start only after the request body is complete (a front end that does not do full-duplex), which
+  this protocol does not need: the server answers only after the whole upload;
+- how many concurrent streams and connections one instance serves while the volumes budget (2 volumes in flight) is full, and
+  what a client sees when it is refused at the front instead of by the server (a bare 503/429 is read as busy only with
+  `Retry-After`);
+- sustained throughput of a 1 GiB upload (the idle and total limits, 30 s and 240 s, are estimates);
+- on HTTP/2, that a server that answers early (a refusal) while the body is unread resets the stream in a way the client reads
+  as a refusal and not as a dropped connection (locally on HTTP/1.1 a refusal before the body is read can look like a dropped
+  connection; the client therefore checks credentials and readiness first, with `warm`).
