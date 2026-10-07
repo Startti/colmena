@@ -16,8 +16,8 @@
 | 39 | `dag_engine::domain::node` | `src/libs/colmena/src/dag_engine/domain/node.rs` |
 | 33 | `dag_engine::domain::lint` | `src/libs/colmena/src/dag_engine/domain/lint/mod.rs` |
 | 33 | `dag_engine::domain::observer` | `src/libs/colmena/src/dag_engine/domain/observer.rs` |
+| 26 | `storage::domain` | `src/libs/colmena/src/storage/domain/mod.rs` |
 | 25 | `llm::domain::tools` | `src/libs/colmena/src/llm/domain/tools.rs` |
-| 25 | `storage::domain` | `src/libs/colmena/src/storage/domain/mod.rs` |
 | 23 | `documents::domain` | `src/libs/colmena/src/documents/domain/mod.rs` |
 | 22 | `dag_engine::application::ports` | `src/libs/colmena/src/dag_engine/application/ports.rs` |
 | 21 | `gdocs::domain` | `src/libs/colmena/src/gdocs/domain/mod.rs` |
@@ -2119,7 +2119,7 @@
 
 #### `src/libs/colmena/src/storage/domain/mod.rs`
 - Module: `storage::domain`
-- **Used by (25)**: `src/libs/colmena/src/dag_engine/engine.rs`, `src/libs/colmena/src/dag_engine/infrastructure/dag_tool_executor/large_object_guard.rs`, `src/libs/colmena/src/dag_engine/infrastructure/dag_tool_executor.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/http.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/image_edit.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/image_generation.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm/characterisation.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm/load_attachment_redirect.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm/node_harness.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm_synthetic_tools/load_attachment_tool.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/tts.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/util/session_attachment.rs`, `src/libs/colmena/src/dag_engine/infrastructure/registry.rs`, `src/libs/colmena/src/llm/domain/attachments/stream_resolver.rs`, `src/libs/colmena/src/llm/infrastructure/attachments/stream_resolver_impl.rs`, `src/libs/colmena/src/storage/infrastructure/http_callback_adapter.rs`, `src/libs/colmena/src/storage/infrastructure/local_cache_adapter.rs`, `src/libs/colmena/src/storage/infrastructure/local_http_adapter.rs`, `src/libs/colmena/src/tabular_prepare/convert.rs`, `src/libs/colmena/src/tabular_prepare/driver.rs`, `src/libs/colmena/src/tabular_prepare/gc.rs`, `src/libs/colmena/src/tabular_prepare/prepare.rs`, `src/libs/colmena/src/tabular_prepare/xlsx_package.rs`, `src/libs/colmena/src/tabular_prepare/xlsx_spool.rs`
+- **Used by (26)**: `src/libs/colmena/src/dag_engine/engine.rs`, `src/libs/colmena/src/dag_engine/infrastructure/dag_tool_executor/large_object_guard.rs`, `src/libs/colmena/src/dag_engine/infrastructure/dag_tool_executor.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/http.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/image_edit.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/image_generation.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm/characterisation.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm/load_attachment_redirect.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm/node_harness.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm_synthetic_tools/load_attachment_tool.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/tts.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/util/session_attachment.rs`, `src/libs/colmena/src/dag_engine/infrastructure/registry.rs`, `src/libs/colmena/src/llm/domain/attachments/stream_resolver.rs`, `src/libs/colmena/src/llm/infrastructure/attachments/stream_resolver_impl.rs`, `src/libs/colmena/src/storage/infrastructure/http_callback_adapter.rs`, `src/libs/colmena/src/storage/infrastructure/local_cache_adapter.rs`, `src/libs/colmena/src/storage/infrastructure/local_http_adapter.rs`, `src/libs/colmena/src/tabular_prepare/convert.rs`, `src/libs/colmena/src/tabular_prepare/driver.rs`, `src/libs/colmena/src/tabular_prepare/driver_xlsx_tests.rs`, `src/libs/colmena/src/tabular_prepare/gc.rs`, `src/libs/colmena/src/tabular_prepare/prepare.rs`, `src/libs/colmena/src/tabular_prepare/xlsx_package.rs`, `src/libs/colmena/src/tabular_prepare/xlsx_spool.rs`
 - Depends on (0): — (no intra-crate imports)
 
 #### `src/libs/colmena/src/storage/domain/output_storage_repository.rs`
@@ -2177,7 +2177,7 @@
 #### `src/libs/colmena/src/tabular_prepare/driver_xlsx_tests.rs`
 - Module: `tabular_prepare::driver_xlsx_tests`
 - **Used by (0)**: — (leaf / entrypoint / not imported intra-crate)
-- Depends on (9): `tabular_prepare::driver`, `tabular_prepare::manifest`, `tabular_prepare::ports`, `tabular_prepare::prepare`, `tabular_prepare::registry`, `tabular_prepare::sqlite_registry`, `tabular_prepare::writer`, `tabular_prepare::xlsxfix`, `tabular_prepare::zipfix`
+- Depends on (10): `storage::domain`, `tabular_prepare::driver`, `tabular_prepare::manifest`, `tabular_prepare::ports`, `tabular_prepare::prepare`, `tabular_prepare::registry`, `tabular_prepare::sqlite_registry`, `tabular_prepare::writer`, `tabular_prepare::xlsxfix`, `tabular_prepare::zipfix`
 
 #### `src/libs/colmena/src/tabular_prepare/gc.rs`
 - Module: `tabular_prepare::gc`

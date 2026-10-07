@@ -1147,7 +1147,10 @@ are made unique case-sensitively (`a` and `A` are two columns) while table names
 
 **The table list of a workbook** is checked after every sheet against the 64 KiB registry row, so
 many sheets fail early, with their own sentence (`table_too_large`: the table lists of all the
-sheets do not fit the registry row; export fewer sheets or columns).
+sheets do not fit the registry row; export fewer sheets or columns). A refusal before anything is
+written (the byte cap) no longer asks the adapter to delete derived objects with an empty key
+list, which an adapter could read as "delete by prefix". The spool's guard exists before the file
+is unlinked, so a failed unlink cannot leak it.
 
 ### Converting the workbook (`xlsx_convert.rs`)
 
@@ -1284,3 +1287,12 @@ short-row shape and 112 MiB for the wide-text shape. The assertion that proves t
 bounded and not merely small is the other one in each scenario: the peak of a workbook four
 times larger must be within a quarter plus 8 MiB of the smaller one's, which a sheet or a
 shared-strings table held whole would fail by a wide margin.
+
+**What the driver tests of workbooks pin** (`driver_xlsx_tests.rs`, with a storage that records
+the registry's state at each put and each cleanup): every put of every table, the second table's
+first part included, finds its key already listed in the row; a storage failure at table 1's
+first part, after table 0 wrote three, deletes both tables' parts while the job still holds the
+row and only then records `failed(storage)`; a row deleted as table 1's first part is put ends
+the job as cancelled with the objects removed and no manifest put; a restart rewrites the same
+keys and leaves none stale (a text run cannot have fewer parts than the typed run it replaces,
+so a stale part cannot arise from a restart of a workbook).

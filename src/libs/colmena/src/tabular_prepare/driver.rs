@@ -1000,7 +1000,11 @@ async fn fail(
     }
     // Best effort: the keys are listed in the row, so the cleanup pass removes
     // what this could not.
-    delete_best_effort(env, req, &keys, true).await;
+    // With nothing written there is nothing to delete, and an adapter may read an
+    // empty list as "delete everything under the prefix".
+    if !keys.is_empty() {
+        delete_best_effort(env, req, &keys, true).await;
+    }
     let outcome = within(
         env,
         env.registry

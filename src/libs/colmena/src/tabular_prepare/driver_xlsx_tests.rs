@@ -2,6 +2,10 @@
 //! failure paths as a CSV, with the failures a workbook adds. SQLite registry, a
 //! fake storage that honours the placement.
 
+use crate::storage::domain::{
+    OutputStorageRepository, StorageError, StorePlacement, StoreRequest, StoreStreamRequest,
+    StoredBytes, StoredOutput, StoredStream,
+};
 use crate::tabular_prepare::driver::{
     prepare_xlsx, reason, CsvPrepareRunner, PrepareEnv, PrepareOutcome, TRACK_AHEAD_FOR_TESTS,
     XLSX_MIME,
@@ -16,7 +20,7 @@ use crate::tabular_prepare::xlsxfix::Wb;
 use crate::tabular_prepare::zipfix::{build, Entry};
 use chrono::{TimeZone, Utc};
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 async fn sqlite() -> (Arc<dyn PreparationRegistry>, tempfile::TempDir) {
@@ -306,6 +310,221 @@ async fn a_source_that_never_answers_ends_with_the_time_reason_and_one_that_is_g
     let out = prepare_xlsx(&env, &request(&gone, 100)).await.unwrap();
     assert!(matches!(out, PrepareOutcome::SourceGone));
     assert!(registry.get(&gone).await.unwrap().is_none());
+}
+
+/// A storage that records what the registry says at each put and at each cleanup of
+/// the derived objects, and can take the row away at a chosen put.
+struct Hook {
+    inner: Arc<PlacedStorage>,
+    registry: Arc<dyn PreparationRegistry>,
+    source: String,
+    /// Each put: its key, and whether the row listed it before the put.
+    puts: Mutex<Vec<(String, bool)>>,
+    /// Each `delete_derived`: its keys, and the row's status when it was called.
+    cleanups: Mutex<Vec<(Vec<String>, Option<PrepareStatus>)>>,
+    /// Delete the registry row when a key containing this is about to be put.
+    take_row_at: Mutex<Option<String>>,
+}
+
+impl Hook {
+    fn new(
+        inner: Arc<PlacedStorage>,
+        registry: Arc<dyn PreparationRegistry>,
+        source: &str,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            inner,
+            registry,
+            source: source.to_string(),
+            puts: Mutex::new(Vec::new()),
+            cleanups: Mutex::new(Vec::new()),
+            take_row_at: Mutex::new(None),
+        })
+    }
+}
+
+#[async_trait::async_trait]
+impl OutputStorageRepository for Hook {
+    async fn store(&self, r: StoreRequest) -> Result<StoredOutput, StorageError> {
+        self.inner.store(r).await
+    }
+    async fn read(&self, k: &str) -> Result<StoredBytes, StorageError> {
+        self.inner.read(k).await
+    }
+    async fn read_stream(&self, k: &str) -> Result<StoredStream, StorageError> {
+        self.inner.read_stream(k).await
+    }
+    async fn store_stream(&self, req: StoreStreamRequest) -> Result<StoredOutput, StorageError> {
+        if let StorePlacement::DerivedFrom { relative_path, .. } = &req.placement {
+            let key = format!("{}/{relative_path}", root_of(&self.source));
+            let row = self.registry.get(&self.source).await.unwrap();
+            let tracked = row.is_some_and(|r| r.blob_keys.contains(&key));
+            self.puts.lock().unwrap().push((key.clone(), tracked));
+            let take = self.take_row_at.lock().unwrap().clone();
+            if take.is_some_and(|t| key.contains(&t)) {
+                self.registry.delete(&self.source).await.unwrap();
+            }
+        }
+        self.inner.store_stream(req).await
+    }
+    fn derived_root(&self, source: &str) -> Option<String> {
+        self.inner.derived_root(source)
+    }
+    async fn delete_derived(&self, source: &str, keys: &[String]) -> Result<(), StorageError> {
+        let status = self
+            .registry
+            .get(&self.source)
+            .await
+            .unwrap()
+            .map(|r| r.status);
+        self.cleanups.lock().unwrap().push((keys.to_vec(), status));
+        let _ = source;
+        for key in keys {
+            self.inner.delete(key).await?;
+        }
+        Ok(())
+    }
+    async fn delete(&self, k: &str) -> Result<(), StorageError> {
+        self.inner.delete(k).await
+    }
+}
+
+#[tokio::test]
+async fn nothing_written_means_no_cleanup_is_asked_of_the_adapter() {
+    // An adapter may read an empty key list as "delete everything under the
+    // prefix": a refusal before any write must not send one.
+    let (registry, _dir) = sqlite().await;
+    let source = source();
+    let inner = PlacedStorage::with_source(&source, workbook());
+    let hook = Hook::new(inner, registry.clone(), &source);
+    let env = PrepareEnv::new(registry.clone(), hook.clone()).with_xlsx_max_bytes(100);
+    let out = prepare_xlsx(&env, &request(&source, 101)).await.unwrap();
+    assert!(matches!(out, PrepareOutcome::Failed(f) if f.code == reason::XLSX_TOO_LARGE));
+    assert!(hook.cleanups.lock().unwrap().is_empty());
+    let row = registry.get(&source).await.unwrap().unwrap();
+    assert_eq!(row.status, PrepareStatus::Failed);
+}
+
+fn hooked(
+    registry: &Arc<dyn PreparationRegistry>,
+    source: &str,
+) -> (Arc<PlacedStorage>, Arc<Hook>, PrepareEnv) {
+    let inner = PlacedStorage::with_source(source, workbook());
+    let hook = Hook::new(inner.clone(), registry.clone(), source);
+    let env = env(registry.clone(), inner.clone());
+    let env = PrepareEnv {
+        storage: hook.clone(),
+        ..env
+    };
+    (inner, hook, env)
+}
+
+#[tokio::test]
+async fn every_put_of_every_table_is_listed_in_the_row_before_it_happens() {
+    let (registry, _dir) = sqlite().await;
+    let source = source();
+    let (_, hook, env) = hooked(&registry, &source);
+    let size = workbook().len() as u64;
+    let out = prepare_xlsx(&env, &request(&source, size)).await.unwrap();
+    assert!(matches!(out, PrepareOutcome::Ready(_)));
+    let puts = hook.puts.lock().unwrap().clone();
+    // Three parts of table 0, one of table 1, and the manifest.
+    assert_eq!(puts.len(), 5);
+    assert!(puts
+        .iter()
+        .any(|(k, _)| k.ends_with("/t1/part-00000.parquet")));
+    for (key, tracked) in puts {
+        assert!(tracked, "{key} was put before the row listed it");
+    }
+}
+
+#[tokio::test]
+async fn a_failure_after_the_first_sheet_wrote_parts_deletes_them_before_it_is_recorded() {
+    let (registry, _dir) = sqlite().await;
+    let source = source();
+    let (inner, hook, env) = hooked(&registry, &source);
+    // The fourth put (the first part of table 1) fails.
+    *inner.fail_stores_from.lock().unwrap() = Some(3);
+    let size = workbook().len() as u64;
+    let PrepareOutcome::Failed(f) = prepare_xlsx(&env, &request(&source, size)).await.unwrap()
+    else {
+        panic!("expected a recorded failure");
+    };
+    assert_eq!(f.code, reason::STORAGE);
+    // Table 0's three parts are gone with the rest; only the source remains.
+    assert!(objects_but_source(&inner, &source).is_empty());
+    // One cleanup, asked while the job still held the row (running), with the keys of
+    // both tables; the failure was written after it.
+    let cleanups = hook.cleanups.lock().unwrap().clone();
+    assert_eq!(cleanups.len(), 1);
+    assert_eq!(cleanups[0].1, Some(PrepareStatus::Running));
+    assert!(cleanups[0]
+        .0
+        .iter()
+        .any(|k| k.ends_with("/t0/part-00002.parquet")));
+    assert!(cleanups[0]
+        .0
+        .iter()
+        .any(|k| k.ends_with("/t1/part-00000.parquet")));
+    let row = registry.get(&source).await.unwrap().unwrap();
+    assert_eq!(row.status, PrepareStatus::Failed);
+    assert_eq!(row.error_code.as_deref(), Some("storage"));
+}
+
+#[tokio::test]
+async fn losing_the_row_in_the_middle_of_a_workbook_stops_the_job_and_removes_what_it_wrote() {
+    let (registry, _dir) = sqlite().await;
+    let source = source();
+    let (inner, hook, env) = hooked(&registry, &source);
+    // The source is deleted (the row with it) as table 1's first part is put.
+    *hook.take_row_at.lock().unwrap() = Some("/t1/part-00000".into());
+    let size = workbook().len() as u64;
+    let out = prepare_xlsx(&env, &request(&source, size)).await.unwrap();
+    assert!(matches!(out, PrepareOutcome::Cancelled), "{out:?}");
+    assert!(
+        registry.get(&source).await.unwrap().is_none(),
+        "no row comes back"
+    );
+    assert!(
+        objects_but_source(&inner, &source).is_empty(),
+        "what it wrote is removed"
+    );
+    // Nothing was put after the row went: not the manifest.
+    let puts = hook.puts.lock().unwrap().clone();
+    assert!(!puts.iter().any(|(k, _)| k.ends_with("manifest.json")));
+}
+
+#[tokio::test]
+async fn a_restart_overwrites_the_same_keys_and_leaves_nothing_stale() {
+    // The restart reads the local copy again and writes the same deterministic keys: the
+    // text run cannot have fewer parts than the typed run, so no stale part is left.
+    let (registry, _dir) = sqlite().await;
+    let source = source();
+    let mut rows = vec![format!("<row r=\"1\">{}</row>", cell("A", 1, "n"))];
+    for r in 2..=10_011usize {
+        let c = if r == 10_006 {
+            cell("A", r, "N/A")
+        } else {
+            format!("<c r=\"A{r}\"><v>{r}</v></c>")
+        };
+        rows.push(format!("<row r=\"{r}\">{c}</row>"));
+    }
+    let bytes = Wb::new().sheet("Data", &rows.concat()).build();
+    let size = bytes.len() as u64;
+    let storage = PlacedStorage::with_source(&source, bytes);
+    let env = env(registry.clone(), storage.clone());
+    let PrepareOutcome::Ready(table) = prepare_xlsx(&env, &request(&source, size)).await.unwrap()
+    else {
+        panic!("expected a ready workbook");
+    };
+    assert_eq!(table.tables[0].restarts, 1);
+    assert!(table.stale_keys.is_empty());
+    let row = registry.get(&source).await.unwrap().unwrap();
+    let parts = table.manifest.tables[0].parts as usize;
+    assert_eq!(objects_but_source(&storage, &source).len(), parts + 1);
+    for k in objects_but_source(&storage, &source) {
+        assert!(row.blob_keys.contains(&k), "{k} not tracked");
+    }
 }
 
 /// A sheet with a title above its table, and a plain one.
