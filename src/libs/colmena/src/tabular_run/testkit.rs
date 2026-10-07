@@ -1,19 +1,26 @@
 //! Fixtures shared by the tests of this module: a storage that holds the
 //! prepared objects in memory, and a real SQLite registry holding a ready row.
 
+use super::mounted::{MountedCall, MountedError, MountedExecutor, MountedResult};
+use super::runtime::{LargeTabularRuntime, RuntimeConfig};
+use super::stage::Staged;
+use crate::dag_engine::domain::python_executor::{PythonRunRequest, PythonRunResult};
 use crate::storage::domain::{
     OutputStorageRepository, StorageError, StoreRequest, StoredBytes, StoredOutput, StoredStream,
 };
 use crate::tabular_prepare::manifest::{
     part_path, ColumnInfo, ColumnType, Manifest, TableInfo, MANIFEST_PATH,
 };
+use crate::tabular_prepare::ports::PrepareConfig;
 use crate::tabular_prepare::registry::{
     ClaimRequest, PreparationRegistry, ReadyInfo, FORMAT_VERSION,
 };
 use crate::tabular_prepare::sqlite_registry::SqlitePreparationRegistry;
+use crate::tabular_prepare::TabularPrepare;
 use async_trait::async_trait;
 use bytes::Bytes;
 use chrono::{Duration, Utc};
+use serde_json::Value;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -295,4 +302,67 @@ pub(crate) fn generated(
         mime_type: "application/octet-stream".into(),
         filename: "part".into(),
     }
+}
+
+/// A mounted executor that records what it was given and answers as told.
+pub(crate) struct Recorder {
+    pub seen: Mutex<Vec<(PythonRunRequest, Vec<usize>, u64)>>,
+    pub answer: Mutex<Option<Result<MountedResult, MountedError>>>,
+}
+
+impl Recorder {
+    pub fn answering(answer: Result<MountedResult, MountedError>) -> Arc<Self> {
+        Arc::new(Self {
+            seen: Mutex::new(vec![]),
+            answer: Mutex::new(Some(answer)),
+        })
+    }
+    pub fn ok(output: Value) -> Arc<Self> {
+        Self::answering(Ok(MountedResult {
+            result: PythonRunResult {
+                output: Some(output),
+                stdout: "hi\n".into(),
+            },
+            staged: Staged {
+                tables: vec![],
+                parts: 0,
+                bytes: 0,
+            },
+        }))
+    }
+    pub fn calls(&self) -> usize {
+        self.seen.lock().unwrap().len()
+    }
+}
+
+#[async_trait]
+impl MountedExecutor for Recorder {
+    async fn run_with_mounts(
+        &self,
+        req: PythonRunRequest,
+        call: MountedCall<'_>,
+    ) -> Result<MountedResult, MountedError> {
+        self.seen
+            .lock()
+            .unwrap()
+            .push((req, call.tables.to_vec(), call.out_mb));
+        self.answer.lock().unwrap().take().expect("answered once")
+    }
+}
+
+pub(crate) fn runtime(p: &Prepared, exec: Arc<Recorder>, on: bool) -> LargeTabularRuntime {
+    let config = PrepareConfig {
+        large_tabular: on,
+        ..PrepareConfig::default()
+    };
+    LargeTabularRuntime::new(
+        TabularPrepare::new(config, p.registry.clone()),
+        p.registry.clone(),
+        p.storage.clone(),
+        exec,
+    )
+    .with_config(RuntimeConfig {
+        prepare_wait: std::time::Duration::from_millis(50),
+        ..RuntimeConfig::default()
+    })
 }
