@@ -25,6 +25,7 @@
 use crate::tabular_prepare::xlsx_package::{attribute, next_event, text_of, Package};
 use crate::tabular_prepare::xlsx_spool::{Cap, Invalid, XlsxError};
 use crate::tabular_prepare::xlsx_strings::{unescape_ooxml, SharedStrings};
+use crate::tabular_prepare::xlsx_styles::{temporal, Styles, Temporal};
 use quick_xml::events::Event;
 
 /// Rows of a sheet (Excel's own limit).
@@ -68,6 +69,7 @@ pub enum Cell {
     Text(Box<str>),
     Number(f64),
     Bool(bool),
+    Temporal(Temporal),
 }
 
 /// The non-empty cells of a row, by column index.
@@ -91,6 +93,8 @@ pub struct SheetStats {
 /// What a read of a workbook's cells needs besides the sheet itself.
 pub struct SheetContext<'a> {
     pub strings: &'a SharedStrings,
+    pub styles: &'a Styles,
+    pub date1904: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -101,6 +105,7 @@ enum Kind {
     Inline,
     Bool,
     Error,
+    IsoDate,
 }
 
 /// The column index (from zero) of a cell reference such as `AB12`; `None` when
@@ -117,9 +122,24 @@ fn column_of(reference: &str) -> Option<usize> {
     (letters > 0).then(|| column - 1)
 }
 
+/// An ISO 8601 date or date and time without a zone, as a value.
+fn iso_date(text: &str) -> Option<Temporal> {
+    use chrono::{NaiveDate, NaiveDateTime};
+    let epoch = NaiveDate::from_ymd_opt(1970, 1, 1)?;
+    if let Ok(d) = NaiveDate::parse_from_str(text, "%Y-%m-%d") {
+        return i32::try_from(d.signed_duration_since(epoch).num_days())
+            .ok()
+            .map(Temporal::Date);
+    }
+    NaiveDateTime::parse_from_str(text, "%Y-%m-%dT%H:%M:%S%.f")
+        .ok()
+        .map(|t| Temporal::Timestamp(t.and_utc().timestamp_micros()))
+}
+
 struct Pending {
     column: usize,
     kind: Kind,
+    style: usize,
     value: String,
     inline: String,
 }
@@ -147,12 +167,19 @@ fn finish(p: Pending, ctx: &SheetContext<'_>) -> Result<Option<Cell>, XlsxError>
         Kind::Bool => {
             (!p.value.is_empty()).then(|| Cell::Bool(matches!(p.value.trim(), "1" | "true")))
         }
+        Kind::IsoDate => match iso_date(p.value.trim()) {
+            Some(t) => Some(Cell::Temporal(t)),
+            None => text(&p.value),
+        },
         Kind::Number => {
             if p.value.trim().is_empty() {
                 return Ok(None);
             }
             match p.value.trim().parse::<f64>() {
-                Ok(n) => Some(Cell::Number(n)),
+                Ok(n) => match temporal(n, ctx.date1904, ctx.styles.format(p.style)) {
+                    Some(t) => Some(Cell::Temporal(t)),
+                    None => Some(Cell::Number(n)),
+                },
                 Err(_) => text(&p.value),
             }
         }
@@ -229,11 +256,16 @@ impl Reading<'_> {
             Some("inlineStr") => Kind::Inline,
             Some("b") => Kind::Bool,
             Some("e") => Kind::Error,
+            Some("d") => Kind::IsoDate,
             _ => Kind::Number,
         };
+        let style = attribute(e, b"s")?
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
         Ok(Pending {
             column,
             kind,
+            style,
             value: String::new(),
             inline: String::new(),
         })
@@ -339,6 +371,7 @@ mod tests {
     use crate::tabular_prepare::xlsx_package::XlsxLimits;
     use crate::tabular_prepare::xlsx_spool::spool_stream;
     use crate::tabular_prepare::xlsx_strings::read_shared_strings;
+    use crate::tabular_prepare::xlsx_styles::read_styles;
     use crate::tabular_prepare::xlsx_workbook::read_workbook;
     use crate::tabular_prepare::xlsxfix::Wb;
     use bytes::Bytes;
@@ -370,7 +403,15 @@ mod tests {
             Some(part) => read_shared_strings(&mut pkg, part)?,
             None => SharedStrings::none(),
         };
-        let ctx = SheetContext { strings: &strings };
+        let styles = match &wb.styles {
+            Some(part) => read_styles(&mut pkg, part)?,
+            None => Styles::none(),
+        };
+        let ctx = SheetContext {
+            strings: &strings,
+            styles: &styles,
+            date1904: wb.date1904,
+        };
         let mut rows: Rows = Vec::new();
         let stats = read_sheet_with(
             &mut pkg,
@@ -431,6 +472,243 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn formulas_use_the_cached_value_and_are_never_evaluated() {
+        let rows = concat!(
+            "<row r=\"1\">",
+            "<c r=\"A1\"><f>1+1</f><v>42</v></c>",
+            "<c r=\"B1\"><f>SUM(A:A)</f></c>",
+            "<c r=\"C1\" t=\"str\"><f>HYPERLINK(\"http://evil\",\"x\")</f><v>cached</v></c>",
+            "<c r=\"D1\"><f t=\"shared\" si=\"0\"/><v>7</v></c>",
+            "<c r=\"E1\"><f>1/0</f><v>not a number</v></c>",
+            "</row>"
+        );
+        let (got, _) = read(Wb::new().sheet("A", rows).build()).await.unwrap();
+        assert_eq!(
+            got[0].1,
+            vec![
+                (0, Cell::Number(42.0)),
+                // No cached value: empty, not computed.
+                (2, text("cached")),
+                (3, Cell::Number(7.0)),
+                // A cached value that is not a number stays what it says.
+                (4, text("not a number")),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_merged_range_keeps_its_value_in_the_top_left_cell_only() {
+        let sheet = concat!(
+            "<worksheet><sheetData>",
+            "<row r=\"1\"><c r=\"A1\" t=\"inlineStr\"><is><t>merged</t></is></c><c r=\"B1\"/></row>",
+            "<row r=\"2\"><c r=\"A2\"/><c r=\"B2\"/></row>",
+            "</sheetData><mergeCells count=\"1\"><mergeCell ref=\"A1:B2\"/></mergeCells></worksheet>"
+        );
+        let (got, stats) = read(Wb::new().sheet("A", sheet).build()).await.unwrap();
+        assert_eq!(got, vec![(1, vec![(0, text("merged"))])]);
+        assert_eq!((stats.cells, stats.rows, stats.blank_rows), (4, 1, 1));
+    }
+
+    #[tokio::test]
+    async fn sparse_rows_and_columns_are_read_and_blank_rows_are_counted() {
+        let rows = concat!(
+            "<row r=\"2\"><c r=\"C2\"><v>1</v></c><c><v>2</v></c><c r=\"F2\"><v>3</v></c></row>",
+            "<row r=\"3\"/>",
+            "<row r=\"4\"><c r=\"A4\"/></row>",
+            "<row r=\"9\"><c r=\"AB9\"><v>4</v></c></row>"
+        );
+        let (got, stats) = read(Wb::new().sheet("A", rows).build()).await.unwrap();
+        assert_eq!(
+            got,
+            vec![
+                (
+                    2,
+                    vec![
+                        (2, Cell::Number(1.0)),
+                        (3, Cell::Number(2.0)),
+                        (5, Cell::Number(3.0))
+                    ]
+                ),
+                (9, vec![(27, Cell::Number(4.0))]),
+            ]
+        );
+        // Row 1 absent, row 3 empty, row 4 only an empty cell, rows 5 to 8 absent.
+        assert_eq!((stats.rows, stats.blank_rows), (2, 1 + 1 + 1 + 4));
+    }
+
+    #[tokio::test]
+    async fn rows_or_columns_out_of_order_and_bad_references_are_a_corrupt_part() {
+        let bad = |rows: &str| read(Wb::new().sheet("A", rows).shared(&["a"]).build());
+        let cases = [
+            "<row r=\"3\"/><row r=\"2\"/>",
+            "<row r=\"2\"/><row r=\"2\"/>",
+            "<row r=\"x\"/>",
+            "<row r=\"1\"><c r=\"B1\"><v>1</v></c><c r=\"A1\"><v>1</v></c></row>",
+            "<row r=\"1\"><c r=\"12\"><v>1</v></c></row>",
+            "<row r=\"1\"><c r=\"A1\" t=\"s\"><v>7</v></c></row>",
+            "<row r=\"1\"><c r=\"A1\" t=\"s\"><v>x</v></c></row>",
+        ];
+        for rows in cases {
+            let r = bad(rows).await;
+            assert_eq!(
+                r.unwrap_err(),
+                XlsxError::Invalid(Invalid::BadCell),
+                "{rows}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn the_caller_can_stop_the_read() {
+        let rows: String = (1..=100)
+            .map(|i| format!("<row r=\"{i}\"><c r=\"A{i}\"><v>{i}</v></c></row>"))
+            .collect();
+        let mut pkg = open_with(Wb::new().sheet("A", &rows).build(), &XlsxLimits::default()).await;
+        let wb = read_workbook(&mut pkg).unwrap();
+        let strings = SharedStrings::none();
+        let styles = Styles::none();
+        let ctx = SheetContext {
+            strings: &strings,
+            styles: &styles,
+            date1904: false,
+        };
+        let mut seen = 0;
+        let stats = read_sheet(&mut pkg, &wb.sheets[0].part, &ctx, |_, _| {
+            seen += 1;
+            Ok(seen < 3)
+        })
+        .unwrap();
+        assert_eq!((seen, stats.rows), (3, 3));
+    }
+
+    #[tokio::test]
+    async fn a_number_is_a_date_only_when_its_style_says_so() {
+        // Styles: 0 general, 1 a built-in date, 2 a custom date-time, 3 plain custom.
+        let rows = concat!(
+            "<row r=\"1\">",
+            "<c r=\"A1\" s=\"1\"><v>44197</v></c>",
+            "<c r=\"B1\" s=\"2\"><v>44197.5</v></c>",
+            "<c r=\"C1\" s=\"0\"><v>44197</v></c>",
+            "<c r=\"D1\" s=\"3\"><v>44197</v></c>",
+            "<c r=\"E1\" s=\"9\"><v>44197</v></c>",
+            "<c r=\"F1\" s=\"1\"><v>60</v></c>",
+            "<c r=\"G1\" t=\"d\"><v>2021-01-01T12:30:00</v></c>",
+            "<c r=\"H1\" t=\"d\"><v>2021-01-01</v></c>",
+            "<c r=\"I1\" t=\"d\"><v>not a date</v></c>",
+            "</row>"
+        );
+        let bytes = Wb::new()
+            .sheet("A", rows)
+            .styles(
+                &[0, 14, 164, 165],
+                &[(164, "yyyy-mm-dd hh:mm"), (165, "0.00")],
+            )
+            .build();
+        let (got, _) = read(bytes).await.unwrap();
+        let cells = &got[0].1;
+        let at = |i: usize| cells.iter().find(|(c, _)| *c == i).map(|(_, v)| v.clone());
+        let day = |t: Temporal| Some(Cell::Temporal(t));
+        assert_eq!(at(0), day(Temporal::Date(18_628)));
+        assert_eq!(at(1), day(Temporal::Timestamp(1_609_502_400_000_000)));
+        assert_eq!(at(2), Some(Cell::Number(44_197.0)));
+        assert_eq!(at(3), Some(Cell::Number(44_197.0)));
+        assert_eq!(
+            at(4),
+            Some(Cell::Number(44_197.0)),
+            "a style that does not exist"
+        );
+        assert_eq!(
+            at(5),
+            Some(Cell::Number(60.0)),
+            "the day that never existed"
+        );
+        assert_eq!(at(6), day(Temporal::Timestamp(1_609_504_200_000_000)));
+        assert_eq!(at(7), day(Temporal::Date(18_628)));
+        assert_eq!(at(8), Some(text("not a date")));
+    }
+
+    #[tokio::test]
+    async fn the_1904_system_moves_every_date() {
+        let rows = "<row r=\"1\"><c r=\"A1\" s=\"1\"><v>42735</v></c></row>";
+        let bytes = Wb::new()
+            .sheet("A", rows)
+            .styles(&[0, 14], &[])
+            .date1904()
+            .build();
+        let (got, _) = read(bytes).await.unwrap();
+        assert_eq!(got[0].1, vec![(0, Cell::Temporal(Temporal::Date(18_628)))]);
+    }
+
+    fn limited(f: impl FnOnce(&mut SheetLimits)) -> SheetLimits {
+        let mut l = SheetLimits::default();
+        f(&mut l);
+        l
+    }
+
+    async fn read_limited(rows: &str, sheet: SheetLimits) -> Result<(Rows, SheetStats), XlsxError> {
+        read_with(
+            Wb::new().sheet("A", rows).build(),
+            &XlsxLimits::default(),
+            &sheet,
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn rows_columns_cells_and_text_are_capped_and_the_cap_is_inclusive() {
+        let grid = "<row r=\"1\"><c r=\"A1\"><v>1</v></c><c r=\"B1\"><v>2</v></c></row><row r=\"2\"><c r=\"A2\"><v>3</v></c></row>";
+        let ok = |l| read_limited(grid, l);
+        assert!(ok(limited(|l| l.max_rows = 2)).await.is_ok());
+        let r = ok(limited(|l| l.max_rows = 1)).await;
+        assert_eq!(r.unwrap_err(), XlsxError::TooLarge(Cap::Rows));
+        assert!(ok(limited(|l| l.max_columns = 2)).await.is_ok());
+        let r = ok(limited(|l| l.max_columns = 1)).await;
+        assert_eq!(r.unwrap_err(), XlsxError::TooLarge(Cap::Columns));
+        assert!(ok(limited(|l| l.max_cells = 3)).await.is_ok());
+        let r = ok(limited(|l| l.max_cells = 2)).await;
+        assert_eq!(r.unwrap_err(), XlsxError::TooLarge(Cap::Cells));
+        // Empty cells count: they cost the parser the same.
+        let empties = "<row r=\"1\"><c r=\"A1\"/><c r=\"B1\"/><c r=\"C1\"/></row>";
+        let r = read_limited(empties, limited(|l| l.max_cells = 2)).await;
+        assert_eq!(r.unwrap_err(), XlsxError::TooLarge(Cap::Cells));
+        // The defaults are Excel's own limits.
+        let excel = SheetLimits::default();
+        assert_eq!((excel.max_rows, excel.max_columns), (1_048_576, 16_384));
+        let beyond = "<row r=\"1048577\"/>";
+        let r = read_limited(beyond, SheetLimits::default()).await;
+        assert_eq!(r.unwrap_err(), XlsxError::TooLarge(Cap::Rows));
+        let beyond = "<row r=\"1\"><c r=\"XFE1\"><v>1</v></c></row>";
+        let r = read_limited(beyond, SheetLimits::default()).await;
+        assert_eq!(r.unwrap_err(), XlsxError::TooLarge(Cap::Columns));
+    }
+
+    #[tokio::test]
+    async fn a_cell_or_a_row_with_too_much_text_is_refused() {
+        let row = |n: usize| {
+            let cells: String = (0..n)
+                .map(|i| {
+                    format!(
+                        "<c r=\"{}1\" t=\"inlineStr\"><is><t>abcdefghij</t></is></c>",
+                        (b'A' + i as u8) as char
+                    )
+                })
+                .collect();
+            format!("<row r=\"1\">{cells}</row>")
+        };
+        let r = read_limited(&row(1), limited(|l| l.max_cell_bytes = 9)).await;
+        assert_eq!(r.unwrap_err(), XlsxError::Invalid(Invalid::CellTooLong));
+        assert!(read_limited(&row(1), limited(|l| l.max_cell_bytes = 10))
+            .await
+            .is_ok());
+        let r = read_limited(&row(3), limited(|l| l.max_row_bytes = 29)).await;
+        assert_eq!(r.unwrap_err(), XlsxError::Invalid(Invalid::RowTooLong));
+        assert!(read_limited(&row(3), limited(|l| l.max_row_bytes = 30))
+            .await
+            .is_ok());
+        assert_eq!((MAX_CELL_BYTES, MAX_ROW_BYTES), (131_072, 1_048_576));
+    }
+
+    #[tokio::test]
     async fn one_giant_text_node_is_stopped_by_the_xml_guard_before_it_is_buffered() {
         let big = "x".repeat(50_000);
         let rows =
@@ -446,5 +724,41 @@ mod tests {
         )
         .await;
         assert_eq!(r.unwrap_err(), XlsxError::Invalid(Invalid::TokenTooLong));
+    }
+
+    #[tokio::test]
+    async fn a_workbook_written_by_a_real_library_reads_end_to_end() {
+        use rust_xlsxwriter::{ExcelDateTime, Format, Formula, Workbook};
+        let mut book = Workbook::new();
+        let sheet = book.add_worksheet();
+        sheet.set_name("Data").unwrap();
+        sheet.write_number(0, 0, 1.5).unwrap();
+        sheet.write_string(0, 1, "héllo & <co>").unwrap();
+        sheet.write_boolean(0, 2, true).unwrap();
+        let date = ExcelDateTime::from_ymd(2021, 1, 1).unwrap();
+        let format = Format::new().set_num_format("yyyy-mm-dd");
+        sheet
+            .write_datetime_with_format(0, 3, &date, &format)
+            .unwrap();
+        sheet
+            .write_formula(0, 4, Formula::new("=1+2").set_result("3"))
+            .unwrap();
+        sheet
+            .merge_range(1, 0, 2, 1, "merged", &Format::new())
+            .unwrap();
+        let (got, _) = read(book.save_to_buffer().unwrap()).await.unwrap();
+        assert_eq!(
+            got[0].1,
+            vec![
+                (0, Cell::Number(1.5)),
+                (1, text("héllo & <co>")),
+                (2, Cell::Bool(true)),
+                (3, Cell::Temporal(Temporal::Date(18_628))),
+                (4, Cell::Number(3.0)),
+            ]
+        );
+        // The merged value sits in its top-left cell; nothing is filled in.
+        assert_eq!(got[1], (2, vec![(0, text("merged"))]));
+        assert_eq!(got.len(), 2);
     }
 }

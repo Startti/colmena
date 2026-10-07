@@ -91,9 +91,15 @@ impl Wb {
                 i + 1,
                 i + 1
             ));
+            // A whole `worksheet` element is used as it is; anything else is rows.
+            let xml = if rows.starts_with("<worksheet") {
+                rows.clone()
+            } else {
+                format!("<worksheet><sheetData>{rows}</sheetData></worksheet>")
+            };
             entries.push(Entry::stored(
                 &format!("xl/worksheets/sheet{}.xml", i + 1),
-                format!("<worksheet><sheetData>{rows}</sheetData></worksheet>").as_bytes(),
+                xml.as_bytes(),
             ));
         }
         if self.chartsheet {
