@@ -1402,3 +1402,31 @@ an `.expected.json` that is the converter's output after `compare.py` checked it
 against what openpyxl reads back from the same file. `committed_fixtures_convert_to_the_values_recorded_with_them`
 converts them all and compares; the ignored `dump_a_directory` (`XLSX_REAL_DIR`, `XLSX_REAL_OUT`)
 does it for any directory of workbooks.
+
+The first versions of this unit were tested with workbooks this crate or `rust_xlsxwriter`
+wrote. The fixtures here come from other writers: **openpyxl 3.1.5** (`generate.py`, which also
+post-processes a few files to carry what openpyxl cannot write) and **LibreOffice 7.4** (Debian
+bookworm container, `soffice --headless --convert-to xlsx`), which also gives every formula a
+cached value and writes shared strings (openpyxl here writes inline strings). `compare.py` reads
+each workbook back with openpyxl and compares it with what the converter made, cell by cell; the
+`.expected.json` beside each fixture is the converter's output after that comparison passed, and
+`committed_fixtures_convert_to_the_values_recorded_with_them` keeps it so. The harness for any
+directory of workbooks is the ignored `dump_a_directory` (`XLSX_REAL_DIR`, `XLSX_REAL_OUT`).
+
+| File | Writer | What it has | Result |
+|---|---|---|---|
+| `multi.xlsx` | openpyxl | four sheets with data, a hidden one, an empty one, a title-row one, a chart sheet; strings with markup, accents, tabs; dates and datetimes; a boolean; a formula (no cached value); merged cells; frozen panes; an Excel table | tables `Sales`, `Lookup`, `Data`; `Report` skipped (`header_row`); the empty and chart sheets are no table; every cell equal; the formula cell null |
+| `multi_lo.xlsx` | LibreOffice | the same, converted | same tables; the formula's cached value `37.7500001` read |
+| `rich.xlsx`, `_lo` | both | rich text, an empty string, padded spaces | equal (rich runs joined; the empty string is null; spaces kept) |
+| `dates1904.xlsx`, `_lo` | both | the 1904 date system, a timestamp with a second | equal (`timestamp` columns) |
+| `wide_styled.xlsx`, `_lo` | both | 120 columns; 60 distinct number formats, fonts and fills; conditional formatting (cell rule, data bar) | equal |
+| `ids_persian.xlsx`, `_lo` | both | a 17-digit id column, a Persian header with a zero-width non-joiner, mixed numbers and text | equal; the header keeps its joiner. Neither writer keeps the 17 digits (openpyxl writes `1.234567890123457e+16`, LibreOffice 15 significant digits): the converter reads what the file holds |
+| `extlst.xlsx`, `_lo` | openpyxl + injected | an `extLst` as Excel writes it (x14 conditional formatting and sparklines, elements in other namespaces) | accepted, equal |
+| `prefixed.xlsx`, `_lo` | openpyxl + rewritten | every worksheet element in the `x:` prefix | accepted, equal |
+| `descriptor.xlsx` | Python `zipfile`, unseekable output | a data descriptor after each part (bit 3 set, local sizes zero), as Java and streaming writers produce | accepted, equal |
+| `zip64_local.xlsx` | Python `zipfile`, `force_zip64` | zip64 extra fields in the local headers | accepted, equal |
+
+No refusal and no mismatch was found, so no converter change came out of it. Not covered, for want of
+the writer: files written by Excel itself (the container has none), and a zip64 end-of-central-directory
+record (a streaming writer produces one only past 4 GiB or 65,535 entries, both over this reader's
+limits, which refuses it as `Unsupported`).
