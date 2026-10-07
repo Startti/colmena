@@ -1063,3 +1063,51 @@ keeps every value as it would be shown: a number is its shortest exact decimal f
 `YYYY-MM-DD HH:MM:SS`, a time `HH:MM:SS`. `Batcher` builds the Arrow batches of a sheet from
 its rows and closes one at the CSV reader's bounds (8,192 rows, 1,000,000 cells or 8 MiB of
 text), so a wide or text-heavy sheet gets shorter batches.
+
+### Converting the workbook (`xlsx_convert.rs`)
+
+`convert_xlsx` turns a workbook into one table per sheet that holds a value, through the same
+`PartWriter`, `PartSink`, `ConvertControl` (every part key is recorded **before** its put, so a
+dropped future leaves nothing untracked) and restart policy as a CSV. The workbook is spooled,
+checked and opened once; then each sheet in turn is read twice: a short first read decides the
+column types from the first 10,000 rows, and a second streams every row, typed, into batches.
+Reading and typing run on a blocking thread and the writer on the async side, joined by a
+channel of two batches, as for a CSV, and the read stops at the next row when the conversion is
+cancelled or dropped.
+
+**Memory is bounded by constants, never by the sheet or the workbook** (which is on disk): a
+row (at most 1 MiB of text over 16,384 cells), a batch (8,192 rows, 1,000,000 cells or 8 MiB of
+text), two batches in the channel, one part in the writer (at most 64 MiB), the shared-strings
+table (at most 168 MiB) and the XML parser's buffer for one event (1 MiB).
+
+Rules:
+
+- The first row that holds a value is the header; a sheet with no value is not a table (a
+  workbook with none is refused, `NoData`); a sheet with only a header is a table of no rows.
+  Header names are cleaned like a CSV's (control characters, length, empty, repeats).
+- A value past the last column of the header is refused (`BeyondHeader`), as a CSV row longer
+  than its header is. Cells before it that are empty are null.
+- A late cell that contradicts its column's type makes that column text and the sheet is read
+  again, at most three times, the third making every column text (which cannot conflict). Only
+  the sheet that conflicted is read again; `restarts`, `demoted` and `all_strings` are reported
+  as for a CSV, and a workbook's `ConvertedTable` reports `utf-8`, no replacements and the
+  blank rows it dropped (`blank_dropped`).
+- Cells are capped over the whole workbook: each sheet may use what the sheets before it left
+  of the 50,000,000.
+- The table list of a sheet that cannot fit the registry row is refused right after its first
+  read, as for a CSV.
+
+### Opening the workbook and sampling a sheet (`xlsx_run.rs`)
+
+`open_book` opens a workbook once (pre-check, sheets, shared strings, styles; see above) and
+`Book` keeps it for the reads that follow. A sheet is read twice. `sample_sheet` is the first
+read: the first row that holds a value is the header (so blank rows before it are dropped;
+names are cleaned like a CSV's: control characters, length, empty, repeats), and the first
+10,000 data rows decide the column types from the kinds of their cells (a later row is never
+examined; the read stops there). It returns `None` for a sheet with no value, and a table with
+no rows for one with only a header. A value past the last column of the header is refused
+(`BeyondHeader`) and, like every failure here, the message carries no cell, sheet name or key.
+
+The limits structures (`XlsxLimits`, `SheetLimits`, `ArchiveLimits`) are public types whose
+fields are crate-private, so a host can only use the defaults and a test inside the crate can
+lower a limit to move a boundary.

@@ -60,6 +60,10 @@ pub enum Invalid {
     CellTooLong,
     #[error("a row holds more text than the limit")]
     RowTooLong,
+    #[error("a row has a value past the last column of the header")]
+    BeyondHeader,
+    #[error("the workbook has no sheet with data")]
+    NoData,
 }
 
 /// What can stop reading an xlsx. The text is fixed: no name, key, cell or
