@@ -23,7 +23,7 @@ pub mod seccomp;
     not(any(target_arch = "x86_64", target_arch = "aarch64"))
 ))]
 pub mod seccomp {
-    pub fn apply() -> std::io::Result<()> {
+    pub fn apply(_mount_api: bool) -> std::io::Result<()> {
         Err(std::io::Error::from_raw_os_error(libc::ENOSYS))
     }
 }

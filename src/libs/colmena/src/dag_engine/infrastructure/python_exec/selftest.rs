@@ -32,6 +32,7 @@ pub const MOUNT_LAYERS: &[&str] = &[
     "mount_data_readonly",
     "mount_out_bounded",
     "staging_root_hidden",
+    "capabilities_empty",
 ];
 /// The output volume of the probe's call, in MiB, and the files its data
 /// directory holds: one world-writable file and one world-writable directory,
@@ -612,6 +613,42 @@ fn probe(spec: &JailSpec, before: &Before) -> Vec<LayerCheck> {
     out
 }
 
+/// Every capability set is empty, the bounding set included, `no_new_privs` is
+/// set, and each call of the new mount API is refused with EPERM (by the filter,
+/// which the jail adds for a staged jail). Reads the process's own status.
+fn capabilities_empty() -> LayerCheck {
+    let layer = "capabilities_empty";
+    let Ok(status) = std::fs::read_to_string("/proc/self/status") else {
+        return outcome(layer, "unreadable", "empty");
+    };
+    if !caps_all_zero(&status) {
+        return outcome(layer, "capabilities_held", "empty");
+    }
+    if !status.lines().any(|l| l.trim_end() == "NoNewPrivs:\t1") {
+        return outcome(layer, "new_privs_allowed", "empty");
+    }
+    let refused = super::seccomp::MOUNT_API.iter().all(|&nr| {
+        let rc = unsafe { libc::syscall(nr, 0, 0, 0, 0, 0, 0) };
+        rc == -1 && io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+    });
+    outcome(
+        layer,
+        if refused { "empty" } else { "mount_api_open" },
+        "empty",
+    )
+}
+
+/// Whether the five capability lines of a `/proc/<pid>/status` text are all zero.
+fn caps_all_zero(status: &str) -> bool {
+    let keys = ["CapInh:", "CapPrm:", "CapEff:", "CapBnd:", "CapAmb:"];
+    keys.iter().all(|k| {
+        status
+            .lines()
+            .find_map(|l| l.strip_prefix(k))
+            .is_some_and(|v| v.trim().bytes().all(|b| b == b'0'))
+    })
+}
+
 /// What a call that asks for mounts finds: `/data`, `/out` and the covered root.
 fn probe_mounts(spec: &JailSpec) -> Vec<LayerCheck> {
     let root = spec
@@ -624,6 +661,7 @@ fn probe_mounts(spec: &JailSpec) -> Vec<LayerCheck> {
         data_mount(Path::new("/data")),
         out_mount(Path::new("/out")),
         staging_hidden(root, &covers),
+        capabilities_empty(),
     ]
 }
 
@@ -1016,7 +1054,74 @@ mod tests {
         assert_eq!(staging_hidden(&root, &other).reason, "unreadable");
     }
 
-    /// The plain report is the 26 layers; the mount probe adds its own three.
+    #[test]
+    fn the_capability_lines_must_all_be_zero() {
+        let text = |bnd: &str| {
+            format!("Name:\tx\nCapInh:\t0000000000000000\nCapPrm:\t0000000000000000\nCapEff:\t0000000000000000\nCapBnd:\t{bnd}\nCapAmb:\t0000000000000000\n")
+        };
+        assert!(caps_all_zero(&text("0000000000000000")));
+        assert!(
+            !caps_all_zero(&text("00000000a80425fb")),
+            "a bounding set that is not empty"
+        );
+        assert!(!caps_all_zero("Name:\tx\n"), "missing lines prove nothing");
+        let held = text("0").replace("CapEff:\t0000000000000000", "CapEff:\t0000000000000001");
+        assert!(!caps_all_zero(&held));
+    }
+
+    /// The capability layer, in this process as root (every capability held: it
+    /// must fail and name why) and in a throwaway child that has dropped every set,
+    /// set `no_new_privs` and installed the filter with the mount API (it must hold).
+    #[test]
+    fn the_capability_layer_fails_with_capabilities_and_holds_without_them() {
+        if !enabled() {
+            return;
+        }
+        assert_eq!(capabilities_empty().reason, "capabilities_held");
+        let code = match unsafe { libc::fork() } {
+            0 => {
+                unsafe { libc::alarm(30) };
+                let result = std::panic::catch_unwind(|| {
+                    let zero: libc::c_ulong = 0;
+                    super::super::jail::drop_bounding_set().unwrap();
+                    // Empty effective, permitted and inheritable sets (capset, v3).
+                    let header = [0x2008_0522u32, 0];
+                    let data = [0u32; 6];
+                    let rc =
+                        unsafe { libc::syscall(libc::SYS_capset, header.as_ptr(), data.as_ptr()) };
+                    assert_eq!(rc, 0);
+                    unsafe {
+                        libc::prctl(
+                            libc::PR_SET_NO_NEW_PRIVS,
+                            1 as libc::c_ulong,
+                            zero,
+                            zero,
+                            zero,
+                        )
+                    };
+                    super::super::seccomp::apply(true).unwrap();
+                    let held = capabilities_empty();
+                    i32::from(!held.ok)
+                });
+                unsafe { libc::_exit(result.unwrap_or(2)) }
+            }
+            pid => {
+                let mut status = 0;
+                assert_eq!(unsafe { libc::waitpid(pid, &mut status, 0) }, pid);
+                if libc::WIFEXITED(status) {
+                    libc::WEXITSTATUS(status)
+                } else {
+                    99
+                }
+            }
+        };
+        assert_eq!(
+            code, 0,
+            "the layer did not hold in a child with nothing left"
+        );
+    }
+
+    /// The plain report is the 26 layers; the mount probe adds its own four.
     #[test]
     fn the_plain_report_is_the_26_layers_and_the_mount_probe_adds_its_own_three() {
         let spec = |staging_root| JailSpec {

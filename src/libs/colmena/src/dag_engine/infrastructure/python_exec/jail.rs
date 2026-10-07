@@ -293,6 +293,40 @@ fn bind_dir(fd: &std::os::fd::OwnedFd, target: &str, read_only: bool) -> io::Res
     }
 }
 
+/// A jail that stages run mounts, which gets the extra layers that keep the
+/// read-only guarantee of `/data` from resting on the empty capability sets
+/// alone: the bounding set is cleared and the filter denies the new mount API. A
+/// jail without a staging root is today's, with neither (it cannot be told from
+/// inside whether the filter is extended: the capability checks answer the same).
+pub(crate) fn staged_jail(spec: &JailSpec) -> bool {
+    spec.staging_root.is_some()
+}
+
+/// Drops every capability from the bounding set, then reads it back: a set that
+/// is not empty is an error, not a weaker jail. The last capability number is not
+/// assumed: the loop ends at the first one the kernel does not know (EINVAL).
+pub(crate) fn drop_bounding_set() -> io::Result<()> {
+    let zero: libc::c_ulong = 0;
+    for cap in 0..64 as libc::c_ulong {
+        let held = unsafe { libc::prctl(libc::PR_CAPBSET_READ, cap, zero, zero, zero) };
+        if held < 0 {
+            let e = io::Error::last_os_error();
+            if e.raw_os_error() == Some(libc::EINVAL) {
+                break;
+            }
+            return Err(e);
+        }
+        if held == 1 {
+            check(unsafe { libc::prctl(libc::PR_CAPBSET_DROP, cap, zero, zero, zero) })?;
+            let still = unsafe { libc::prctl(libc::PR_CAPBSET_READ, cap, zero, zero, zero) };
+            if still != 0 {
+                return Err(io::Error::other("a capability stayed in the bounding set"));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// The uid and gid of `slot`: `u32::MAX`, which [`enter`] refuses, when the
 /// sum does not fit.
 pub fn uid_for(spec: &JailSpec, slot: u32) -> u32 {
@@ -399,6 +433,16 @@ pub fn enter(spec: &JailSpec, hdr: &CallHeader, conn: UnixStream) -> Result<Unix
     }
     std::env::set_current_dir("/tmp").map_err(at("mounts"))?;
 
+    // 3b. Capability bounding set, cleared for a jail that stages run mounts: it
+    //     needs CAP_SETPCAP, so it is done while the process is still root. The
+    //     permitted and effective sets are cleared by the uid change below; with
+    //     the bounding set empty and no_new_privs set, nothing the program runs
+    //     can regain a capability (it cannot run a program at all: execve is
+    //     refused by the filter).
+    if staged_jail(spec) {
+        drop_bounding_set().map_err(at("privileges"))?;
+    }
+
     // 4. Identity: one unprivileged uid/gid per slot.
     check(unsafe { libc::setgroups(0, ptr::null()) }).map_err(at("identity"))?;
     check(unsafe { libc::setresgid(id, id, id) }).map_err(at("identity"))?;
@@ -438,7 +482,7 @@ pub fn enter(spec: &JailSpec, hdr: &CallHeader, conn: UnixStream) -> Result<Unix
 
     // 7. Syscall filter, last: it refuses calls the steps above make, and
     //    no_new_privs lets a process without privileges install it.
-    super::seccomp::apply().map_err(at("syscall_filter"))?;
+    super::seccomp::apply(staged_jail(spec)).map_err(at("syscall_filter"))?;
 
     Ok(unsafe { UnixStream::from_raw_fd(CHANNEL_FD) })
 }
@@ -446,6 +490,20 @@ pub fn enter(spec: &JailSpec, hdr: &CallHeader, conn: UnixStream) -> Result<Unix
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Only a jail with a staging root gets the extra layers (the bounding set
+    /// cleared, the mount API denied); one without is today's jail.
+    #[test]
+    fn the_extra_layers_belong_to_a_staged_jail_only() {
+        let spec = |staging_root| JailSpec {
+            uid_base: 1,
+            tmp_mb: 1,
+            hide_paths: vec![],
+            staging_root,
+        };
+        assert!(!staged_jail(&spec(None)));
+        assert!(staged_jail(&spec(Some("/x".into()))));
+    }
 
     /// Without a staging root the spec is the bytes it always was.
     #[test]

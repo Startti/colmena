@@ -463,6 +463,10 @@ res = {
   'open_tree': err(lambda: sc(428, -100, b'/data', 1)),
   'mount_setattr': err(lambda: sc(442, -100, b'/data', 0, ctypes.byref((ctypes.c_uint64 * 4)(0, 1, 0, 0)), 32)),
   'move_mount': err(lambda: sc(429, -100, b'/data', -100, b'/tmp', 0)),
+  'fsconfig': err(lambda: sc(431, 0, 0, 0, 0, 0)),
+  'fsmount': err(lambda: sc(432, 0, 0, 0)),
+  'fspick': err(lambda: sc(433, -100, b'/data', 0)),
+  'open_tree_attr': err(lambda: sc(467, -100, b'/data', 0, 0, 0)),
 }
 status = dict(l.split(':', 1) for l in open('/proc/self/status').read().splitlines() if ':' in l)
 res['caps'] = [status[k].strip() for k in ('CapInh', 'CapPrm', 'CapEff', 'CapBnd', 'CapAmb')]
@@ -470,27 +474,49 @@ res['still_read_only'] = os.statvfs('/data').f_flag & os.ST_RDONLY != 0
 output = res
 "#;
     let out = run_staged(&ex, staged.mounts(), code).await.unwrap();
-    // Inheritable, permitted, effective and ambient are empty. The bounding
-    // set (index 3) is not touched by the jail, today or with mounts.
+    // All five capability sets are empty, the bounding set included.
     let zero = json!("0000000000000000");
     let caps = out["caps"].as_array().unwrap();
-    assert_eq!([&caps[0], &caps[1], &caps[2], &caps[4]], [&zero; 4]);
+    assert_eq!(caps.iter().collect::<Vec<_>>(), [&zero; 5]);
     assert_eq!(out["still_read_only"], json!(true));
+    // Every mount call is refused with EPERM, ENOSYS never accepted: for the
+    // eight new-API calls the FILTER answers (EPERM) even on a kernel that lacks
+    // the call (see `seccomp::tests` for the proof with the capability present).
     for (name, result) in out.as_object().unwrap() {
         if name == "caps" || name == "still_read_only" {
             continue;
         }
-        // Only the new mount API may be ENOSYS (a kernel without it); the empty
-        // capability sets asserted above are what make the others EPERM.
-        let code = result.as_str().unwrap();
-        let new_api = ["fsopen", "open_tree", "mount_setattr", "move_mount"];
-        let allowed: &[&str] = if new_api.contains(&name.as_str()) {
-            &["EPERM", "ENOSYS"]
-        } else {
-            &["EPERM"]
-        };
-        assert!(allowed.contains(&code), "{name}: {code}");
+        assert_eq!(result.as_str().unwrap(), "EPERM", "{name}");
     }
+}
+
+/// With a staging root the bounding set is empty inside the jail, for a call
+/// with mounts and a call without; without one the jail is today's, with the
+/// bounding set untouched.
+#[tokio::test]
+async fn the_bounding_set_is_empty_inside_a_staged_jail_and_untouched_otherwise() {
+    let Some(root) = Root::exclusive() else {
+        return;
+    };
+    let code = "status = dict(l.split(':', 1) for l in open('/proc/self/status').read().splitlines() if ':' in l)\n\
+        output = {'bnd': status['CapBnd'].strip(), 'nnp': status['NoNewPrivs'].strip()}";
+    let staged_ex = executor(Some(&root));
+    let staged = StagedCall::create(&root.path, 1).unwrap();
+    let empty = json!({"bnd": "0000000000000000", "nnp": "1"});
+    assert_eq!(
+        run_staged(&staged_ex, staged.mounts(), code).await.unwrap(),
+        empty
+    );
+    assert_eq!(run_plain(&staged_ex, code).await.unwrap(), empty);
+    let today = run_plain(&executor_without_root(&root), code)
+        .await
+        .unwrap();
+    assert_ne!(
+        today["bnd"],
+        json!("0000000000000000"),
+        "today's jail never cleared it"
+    );
+    assert_eq!(today["nnp"], json!("1"));
 }
 
 /// What the program is, has and can do is the same with or without mounts: user,
@@ -878,7 +904,7 @@ fn the_self_test_reports_the_mount_layers_only_with_a_staging_root() {
             "{layer} in {names:?}"
         );
     }
-    assert_eq!(staged.len(), 29);
+    assert_eq!(staged.len(), 30);
     assert_eq!(mounts_under(&root.path), 0, "the probe left a mount behind");
 }
 
@@ -1451,7 +1477,7 @@ fn an_executor_about_to_serve_sweeps_its_root() {
 /// A Cloud Run volume normally mounts under `/mnt`, which the jail covers, and a
 /// test root under `/tmp` is below the jail's own fresh `/tmp`: inside the jail
 /// such a root does not exist, and that is hidden. Mounts must still work and the
-/// self-test must pass with all 29 layers, not report "unreadable".
+/// self-test must pass with all 30 layers, not report "unreadable".
 #[tokio::test]
 async fn a_staging_root_below_a_covered_path_enables_mounts() {
     let Some(_alone) = Root::exclusive() else {
@@ -1471,7 +1497,7 @@ async fn a_staging_root_below_a_covered_path_enables_mounts() {
     for root in [&under_mnt, &under_tmp] {
         let (ok, checks) = self_test_at(Some(root));
         assert!(ok, "{root:?}: {checks:?}");
-        assert_eq!(checks.len(), 29, "{root:?}");
+        assert_eq!(checks.len(), 30, "{root:?}");
         let hidden = checks
             .iter()
             .find(|c| c["layer"] == "staging_root_hidden")
