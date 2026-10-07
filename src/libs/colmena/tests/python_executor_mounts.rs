@@ -993,10 +993,10 @@ async fn pandas_reads_a_parquet_part_through_data_when_pyarrow_is_installed() {
         .output()
         .unwrap();
     if !made.status.success() {
-        // CI's job does not install pyarrow (a decision for the sandbox owner), so
-        // by default this is a visible note, not a failure. Where pyarrow is
-        // expected (the Docker run sets the opt-in) the skip line the isolated
-        // job's step fails on is printed, and the test fails.
+        // The isolated CI job installs pyarrow and sets the opt-in, so there a missing
+        // pyarrow fails the step (the skip line below is the one it greps for). Where
+        // the opt-in is not set (a local run without pyarrow) this is a visible note,
+        // not a failure.
         if std::env::var("COLMENA_PYEXEC_EXPECT_PYARROW").as_deref() == Ok("1") {
             eprintln!("skipped: set COLMENA_PYEXEC_JAIL_TESTS=1 (Linux, root, CAP_SYS_ADMIN) and install pyarrow: it is expected here and python3 cannot import it");
             panic!(

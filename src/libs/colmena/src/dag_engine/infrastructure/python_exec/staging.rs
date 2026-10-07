@@ -631,6 +631,10 @@ pub fn sweep_staging_root(root: &Path) -> io::Result<SweepReport> {
                 continue;
             }
         };
+        // The executor's own lock file is not an entry of anyone's: not counted.
+        if name == LOCK_NAME {
+            continue;
+        }
         let Some(id) = name.to_str().filter(|n| is_generated_id(n)) else {
             report.skipped += 1;
             continue;
@@ -781,6 +785,25 @@ mod tests {
             assert!(matches!(fails(code), Err(LockError::Io(_))), "{code}");
         }
         assert!(StagingLock::acquire_with(&root, |_| Ok(())).is_ok());
+    }
+
+    /// The lock file is neither swept nor counted: a root that holds only it was
+    /// swept of nothing (so nothing is logged as swept).
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_lock_file_is_neither_swept_nor_counted() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        let _lock = StagingLock::acquire(&root).unwrap();
+        assert!(root.join(LOCK_NAME).exists());
+        assert_eq!(sweep_staging_root(&root).unwrap(), SweepReport::default());
+        assert!(root.join(LOCK_NAME).exists());
+        std::fs::write(root.join("notes.txt"), "mine").unwrap();
+        let report = sweep_staging_root(&root).unwrap();
+        assert_eq!(
+            report.skipped, 1,
+            "{report:?}: only the stranger is skipped"
+        );
     }
 
     /// The size is refused before the root is even opened or anything is made.
