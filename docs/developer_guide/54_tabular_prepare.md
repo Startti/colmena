@@ -1037,3 +1037,29 @@ index that does not exist, is a corrupt part (`BadCell`).
   The 1904 system moves every date. A test reads a workbook written by `rust_xlsxwriter`
   (numbers, text with markup characters, a boolean, a date, a cached formula, a merged range)
   through the whole stack.
+
+### Typing the columns (`xlsx_columns.rs`)
+
+An xlsx cell already has a type, so a sheet's columns are typed **from the kinds of their
+cells**, never by re-reading text. Two things follow. A number stays a number however many
+digits it has (the CSV rules keep a value of more than 15 digits as text, which would turn
+every computed column of a workbook, `0.1 + 0.2`, into text); and a text cell that looks like
+a number stays text, as it is in Excel (a zip code `00501` or `01234` is never a number).
+
+The rules are as conservative as the CSV's: a column whose cells disagree is text.
+
+| The column's cells | Type |
+|---|---|
+| numbers, all whole and at most 2^53 in absolute value | `int` |
+| numbers, any other finite one | `float` |
+| booleans | `bool` |
+| dates | `date`; dates with timestamps: `timestamp` |
+| anything else: any mix, times of day, errors, numbers that are not finite, or no value at all | `string` |
+
+A cell that contradicts the type of its column is a conflict (`Batcher::push` returns its
+column) and the converter makes that column text and reads the sheet again. A text column
+keeps every value as it would be shown: a number is its shortest exact decimal form (`42`,
+`1.5`, `0.30000000000000004`), a boolean `TRUE` or `FALSE`, a date `YYYY-MM-DD` or
+`YYYY-MM-DD HH:MM:SS`, a time `HH:MM:SS`. `Batcher` builds the Arrow batches of a sheet from
+its rows and closes one at the CSV reader's bounds (8,192 rows, 1,000,000 cells or 8 MiB of
+text), so a wide or text-heavy sheet gets shorter batches.
