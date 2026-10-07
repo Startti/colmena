@@ -5,7 +5,7 @@
 
 **How to use (for the exploration/spec phase):** before opening files to assess a change, look up the target file below. **Used by** is its blast radius — the files that break if you change its public surface. **Depends on** is what it needs. Start by reading only those, not the whole repo.
 
-- Files indexed: **469**
+- Files indexed: **470**
 - Modules with at least one importer: **231**
 
 ## Blast-radius ranking (change these with the most care)
@@ -25,12 +25,12 @@
 | 20 | `documents::domain::ids` | `src/libs/colmena/src/documents/domain/ids.rs` |
 | 17 | `crdt_documents` | `src/libs/colmena/src/crdt_documents/mod.rs` |
 | 17 | `llm::infrastructure` | `src/libs/colmena/src/llm/infrastructure/mod.rs` |
+| 15 | `tabular_prepare::manifest` | `src/libs/colmena/src/tabular_prepare/manifest.rs` |
 | 14 | `dag_engine::domain::error` | `src/libs/colmena/src/dag_engine/domain/error.rs` |
 | 14 | `dag_engine::domain::python_executor` | `src/libs/colmena/src/dag_engine/domain/python_executor.rs` |
 | 14 | `dag_engine::domain::tool_configuration` | `src/libs/colmena/src/dag_engine/domain/tool_configuration.rs` |
 | 14 | `dag_engine::infrastructure::pool_registry` | `src/libs/colmena/src/dag_engine/infrastructure/pool_registry/mod.rs` |
 | 14 | `llm::infrastructure::persistence` | `src/libs/colmena/src/llm/infrastructure/persistence/mod.rs` |
-| 14 | `tabular_prepare::manifest` | `src/libs/colmena/src/tabular_prepare/manifest.rs` |
 | 13 | `google_oauth::infrastructure` | `src/libs/colmena/src/google_oauth/infrastructure/mod.rs` |
 | 12 | `dag_engine::application::secure_value_service` | `src/libs/colmena/src/dag_engine/application/secure_value_service.rs` |
 | 11 | `documents::domain::ports` | `src/libs/colmena/src/documents/domain/ports.rs` |
@@ -520,7 +520,7 @@
 
 #### `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm_synthetic_tools/attachment_run_python.rs`
 - Module: `dag_engine::infrastructure::nodes::llm_synthetic_tools::attachment_run_python`
-- **Used by (3)**: `src/libs/colmena/src/dag_engine/infrastructure/dag_tool_executor/large_object_guard.rs`, `src/libs/colmena/src/dag_engine/infrastructure/dag_tool_executor.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm.rs`
+- **Used by (4)**: `src/libs/colmena/src/dag_engine/infrastructure/dag_tool_executor/large_object_guard.rs`, `src/libs/colmena/src/dag_engine/infrastructure/dag_tool_executor.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm.rs`, `src/libs/colmena/src/tabular_run/prelude.rs`
 - Depends on (2): `dag_engine::domain::python_executor`, `llm::domain`
 
 #### `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm_synthetic_tools/attachment_writer.rs`
@@ -735,7 +735,7 @@
 
 #### `src/libs/colmena/src/dag_engine/infrastructure/nodes/python_node.rs`
 - Module: `dag_engine::infrastructure::nodes::python_node`
-- **Used by (2)**: `src/libs/colmena/src/dag_engine/infrastructure/python_exec/child.rs`, `src/libs/colmena/src/dag_engine/infrastructure/python_exec/inprocess.rs`
+- **Used by (3)**: `src/libs/colmena/src/dag_engine/infrastructure/python_exec/child.rs`, `src/libs/colmena/src/dag_engine/infrastructure/python_exec/inprocess.rs`, `src/libs/colmena/src/tabular_run/prelude.rs`
 - Depends on (6): `dag_engine::domain::lint`, `dag_engine::domain::node`, `dag_engine::domain::python_executor`, `dag_engine::infrastructure::env_provenance`, `dag_engine::infrastructure::python_exec`, `dag_engine::log_policy`
 
 #### `src/libs/colmena/src/dag_engine/infrastructure/nodes/qa_response_parser.rs`
@@ -2191,7 +2191,7 @@
 
 #### `src/libs/colmena/src/tabular_prepare/manifest.rs`
 - Module: `tabular_prepare::manifest`
-- **Used by (14)**: `src/libs/colmena/src/tabular_prepare/convert.rs`, `src/libs/colmena/src/tabular_prepare/csv.rs`, `src/libs/colmena/src/tabular_prepare/driver.rs`, `src/libs/colmena/src/tabular_prepare/driver_xlsx_tests.rs`, `src/libs/colmena/src/tabular_prepare/infer.rs`, `src/libs/colmena/src/tabular_prepare/part_sink.rs`, `src/libs/colmena/src/tabular_prepare/prepare.rs`, `src/libs/colmena/src/tabular_prepare/writer.rs`, `src/libs/colmena/src/tabular_prepare/xlsx_columns.rs`, `src/libs/colmena/src/tabular_prepare/xlsx_convert.rs`, `src/libs/colmena/src/tabular_prepare/xlsx_run.rs`, `src/libs/colmena/src/tabular_run/stage.rs`, `src/libs/colmena/src/tabular_run/testkit.rs`, `src/libs/colmena/src/tabular_run/verify.rs`
+- **Used by (15)**: `src/libs/colmena/src/tabular_prepare/convert.rs`, `src/libs/colmena/src/tabular_prepare/csv.rs`, `src/libs/colmena/src/tabular_prepare/driver.rs`, `src/libs/colmena/src/tabular_prepare/driver_xlsx_tests.rs`, `src/libs/colmena/src/tabular_prepare/infer.rs`, `src/libs/colmena/src/tabular_prepare/part_sink.rs`, `src/libs/colmena/src/tabular_prepare/prepare.rs`, `src/libs/colmena/src/tabular_prepare/writer.rs`, `src/libs/colmena/src/tabular_prepare/xlsx_columns.rs`, `src/libs/colmena/src/tabular_prepare/xlsx_convert.rs`, `src/libs/colmena/src/tabular_prepare/xlsx_run.rs`, `src/libs/colmena/src/tabular_run/prelude.rs`, `src/libs/colmena/src/tabular_run/stage.rs`, `src/libs/colmena/src/tabular_run/testkit.rs`, `src/libs/colmena/src/tabular_run/verify.rs`
 - Depends on (0): — (no intra-crate imports)
 
 #### `src/libs/colmena/src/tabular_prepare/mod.rs`
@@ -2325,6 +2325,11 @@
 - Module: `tabular_run::mounted`
 - **Used by (0)**: — (leaf / entrypoint / not imported intra-crate)
 - Depends on (2): `dag_engine::domain::python_executor`, `storage::domain`
+
+#### `src/libs/colmena/src/tabular_run/prelude.rs`
+- Module: `tabular_run::prelude`
+- **Used by (0)**: — (leaf / entrypoint / not imported intra-crate)
+- Depends on (3): `dag_engine::infrastructure::nodes::llm_synthetic_tools::attachment_run_python`, `dag_engine::infrastructure::nodes::python_node`, `tabular_prepare::manifest`
 
 #### `src/libs/colmena/src/tabular_run/refusal.rs`
 - Module: `tabular_run::refusal`

@@ -1511,3 +1511,26 @@ and never ends is cut off at the limit (at most one chunk past it); the call tot
 that differ from the declared size are refused; a storage failure mid-part hides the adapter's text; staging 64 MiB in
 1 MiB chunks never has more than two chunks alive (a guard counts the live bytes of each chunk); a link in the directory is
 never followed. They run on any Unix (no jail is involved).
+
+### The Python the model's code finds (`prelude.py`, `prelude.rs`)
+
+The prelude is trusted code that runs before the model's code in the same `restricted` sandbox (the validator checks the
+wrapped code, prelude included, so the prelude imports only what the allowlist allows: pandas reads the Parquet, pyarrow is
+loaded by pandas and never imported). It gets its metadata from inputs the trusted side injects from the VERIFIED manifest
+(`_ct_tables`, `_ct_data_dir`, `_ct_read_max`), never from a file the sandbox could have changed. `wrap_large_code(code)`
+wraps the model's code like the small path (`pd`, `np`, `stats`, `result = None`, and the SAME postlude, taken from
+`wrap_user_code` itself so the two cannot drift) with the prelude in place of `df = pd.DataFrame(...)`.
+
+| Name | Behaviour |
+|---|---|
+| `tables.names` | the table names (sheet names, or one name for a CSV) |
+| `tables.schema(name)` | `{name, rows, parts, columns: [{name, type}]}`; no sizes, no paths |
+| `tables[name]` | a lazy handle; holds no data and is NOT a DataFrame; matched ignoring case when unambiguous |
+| `t.name`, `t.rows`, `t.n_parts`, `t.columns`, `t.dtypes` | metadata |
+| `t.head(n=5, columns=None)` | the first `n` rows (1 to 1000) of the first part |
+| `t.read(columns, filters=None)` | `columns` is REQUIRED and must be known names in a list; the memory is estimated from the manifest and a read estimated over the limit raises the guidance error and reads nothing |
+| `t.parts(columns=None, filters=None)` | a generator, one DataFrame per part (at most 500,000 rows); the only path with no size limit and the only one that may omit `columns` |
+| `df` | not loaded: any use raises the guidance error |
+
+Using a handle as a DataFrame (`groupby`, `[...]`, `len`, iteration, any other attribute) raises `LargeTableError` (a
+`ValueError`) saying how to read the table. There is no method that loads a whole table.
