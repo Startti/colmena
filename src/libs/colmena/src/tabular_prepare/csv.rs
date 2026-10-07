@@ -6,7 +6,7 @@
 //! far larger than memory.
 
 use crate::tabular_prepare::infer::{InferredSchema, SchemaInferer, INFERENCE_ROWS};
-use crate::tabular_prepare::manifest::{is_clean_char, MAX_COLUMNS, MAX_COLUMN_NAME_CHARS};
+use crate::tabular_prepare::manifest::{clean_name, MAX_COLUMNS, MAX_COLUMN_NAME_CHARS};
 use crate::tabular_prepare::scan::{RecordScanner, ScanStats, MAX_RECORD_BYTES};
 use arrow_array::builder::StringBuilder;
 use arrow_array::{ArrayRef, RecordBatch};
@@ -567,9 +567,8 @@ fn column_names_counted(raw: &[String]) -> (Vec<String>, usize) {
     let mut tried = 0;
     let mut out = Vec::with_capacity(raw.len());
     for (i, name) in raw.iter().enumerate() {
-        let cleaned: String = name
+        let cleaned: String = clean_name(name)
             .chars()
-            .map(|c| if is_clean_char(c) { c } else { '_' })
             .take(MAX_COLUMN_NAME_CHARS)
             .collect();
         let base = if cleaned.trim().is_empty() {
@@ -1126,7 +1125,9 @@ mod tests {
             .collect();
         assert_eq!(
             column_names(&raw),
-            vec!["id", "column2", "id_2", " name ", "ID", "_x", "column7"]
+            // A name is trimmed, as a table's is (a deliberate change with the invisible-
+            // character rules: " name " used to keep its spaces).
+            vec!["id", "column2", "id_2", "name", "ID", "_x", "column7"]
         );
         // Deterministic.
         assert_eq!(column_names(&raw), column_names(&raw));
@@ -1901,18 +1902,27 @@ mod tests {
     }
 
     #[test]
-    fn format_characters_in_a_header_become_underscores() {
+    fn invisible_characters_in_a_header_are_removed_and_a_blank_name_is_named() {
         let raw = vec![
             "id\u{202E}".to_string(),
             "\u{200B}".to_string(),
             "ok".to_string(),
         ];
-        assert_eq!(column_names(&raw), ["id_", "_", "ok"]);
+        assert_eq!(column_names(&raw), ["id", "column2", "ok"]);
     }
 
     #[test]
     fn a_persian_header_keeps_its_zero_width_non_joiner() {
         let name = "\u{645}\u{6CC}\u{200C}\u{62E}\u{648}\u{627}\u{647}\u{645}".to_string();
         assert_eq!(column_names(std::slice::from_ref(&name)), [name.as_str()]);
+    }
+
+    #[test]
+    fn headers_that_differ_only_by_invisible_characters_get_the_suffix() {
+        let raw: Vec<String> = ["name", "na\u{200B}me", "name\u{A0}", "\u{2800}"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert_eq!(column_names(&raw), ["name", "name_2", "name_3", "column4"]);
     }
 }

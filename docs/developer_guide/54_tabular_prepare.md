@@ -752,6 +752,7 @@ maps it to what the user sees:
 | `unreadable_file` | the file cannot be read as CSV: empty, UTF-16 or binary, a row longer than the header, a record over 1 MiB, more than 16,384 columns, or text that does not parse; or as xlsx: not a zip at all (also a truncated one), no workbook part, a bad relationship, XML that does not parse, a cell, row or XML element over its limit, a value past the last column of the header, or no sheet with data |
 | `table_too_large` | the table list does not fit the 64 KiB registry row (too many or too long column names) |
 | `internal` | anything else (a reader that panicked, a conversion that stopped unexpectedly, the registry unable to list keys or confirm the row): a defect or an outage on our side, never the file's fault |
+| `output_too_large` | the parts stored passed 1 GiB in all (see below); the detail says to export fewer rows or columns |
 | `xlsx_too_large` | a workbook over a size limit: more bytes than `PrepareEnv::xlsx_max_bytes` (400 MiB; checked against the size the host declared **before a byte is read**, and again against the bytes as they arrive), more than 256 sheets, 1,048,576 rows or 16,384 columns in a sheet, 50,000,000 cells, or more shared-strings text than 128 MiB. The detail says to export as CSV |
 | `archive_limit` | a workbook whose zip archive is over a safety limit or inconsistent: a zip bomb (an entry or the whole over its expanded size, a compression ratio under 1 %, sizes deflate cannot produce), too many entries, an unacceptable or repeated entry name, zip64 or encryption, headers that disagree, or a part that inflates past the size its header declares |
 
@@ -1360,6 +1361,33 @@ that measure share global counters, so they take one lock and run one at a time.
   the string) are refused.
 - A sheet whose XML ends inside `row`, `c`, `sheetData` or `worksheet` is truncated and refused
   (`BadCell`), not accepted as complete.
+
+**Names, again.** The name filter is no longer only a deny-list of format characters. `clean_name`
+(shared with the CSV, for table, column and skipped-sheet names) turns control characters into `_`,
+**removes** every character that shows nothing (the bidirectional controls and isolates, zero-width
+and other format characters, the combining grapheme joiner, Hangul and Braille fillers, Khmer
+inherent vowels, Mongolian and other variation selectors, tag characters, U+2028/2029), turns the
+non-ASCII spaces (no-break, the en/em family, narrow no-break, medium mathematical, ideographic)
+into a plain space, keeps the zero-width non-joiner and joiner **only between two visible
+characters** (so a Persian or emoji name is unchanged), and trims. A name that is empty afterwards
+(a header of only invisible characters, or only joiners) is named `columnN` or `sheetN` as an empty
+one is, and two names that differ only by what was removed or normalised are the same name, so the
+usual `_2`, `_3` suffix tells them apart. The manifest refuses a blank name and any name with a
+character `clean_name` would have removed. For a CSV this also **trims** a header (`" name "`
+used to keep its spaces).
+
+**The size of what a job stores is capped.** A 128 KiB shared string referenced by 8 cells of each
+row of a million rows decodes to about a terabyte of text from a small upload. Memory stays bounded
+and the 300 s budget ends it, but only after hours of work have been paid for. The parts a
+preparation stores are therefore capped in all at 1 GiB (`MAX_PREPARED_BYTES`,
+`PrepareEnv::max_prepared_bytes`): the largest source the product accepts, so a legitimate source
+never comes near it (a prepared copy is smaller than its source; the spike prepared a 1 GiB CSV to
+297 MB). A part stored again by a restart counts once, as last stored; the manifest does not count.
+Passing it fails with reason `output_too_large` ("the prepared tables are larger than the limit;
+export fewer rows or columns"), the parts already stored are deleted and listed as for any failure.
+Compressible text stores little (a repeated string compresses a thousand-fold), so for that input the
+time budget remains the bound; the cap is what stops input that does not compress. It applies to a
+CSV as well, through the same sink.
 
 **No empty list to the adapter, anywhere.** A host adapter may read an empty key list in
 `delete_derived` as "delete everything under the prefix", so no path sends one: `fail` (nothing
