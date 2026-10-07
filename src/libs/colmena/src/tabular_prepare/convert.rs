@@ -342,6 +342,12 @@ impl ConvertControl {
         )
     }
 
+    /// The token the conversion's reader is cancelled with (a child of it is what a
+    /// conversion hands its reader).
+    pub(crate) fn token(&self) -> &CancellationToken {
+        &self.cancel
+    }
+
     /// Stops the conversion: its reader fails at its next read (or at once if it
     /// is waiting on a stalled stream) and the run ends with
     /// [`CsvError::Cancelled`].
@@ -360,7 +366,7 @@ impl ConvertControl {
             .collect()
     }
 
-    fn note(&self, path: &str) {
+    pub(crate) fn note(&self, path: &str) {
         match self.paths.lock() {
             Ok(mut p) => p.insert(path.to_string()),
             Err(poisoned) => poisoned.into_inner().insert(path.to_string()),
@@ -369,9 +375,9 @@ impl ConvertControl {
 }
 
 /// Records each path before the put it is for.
-struct TrackingSink {
-    inner: Arc<dyn PartSink>,
-    control: Arc<ConvertControl>,
+pub(crate) struct TrackingSink {
+    pub(crate) inner: Arc<dyn PartSink>,
+    pub(crate) control: Arc<ConvertControl>,
 }
 
 #[async_trait]
