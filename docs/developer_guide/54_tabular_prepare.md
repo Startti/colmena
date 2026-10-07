@@ -1633,3 +1633,7 @@ Nothing is executed and nothing is read here: the result holds open, checked des
 within the call's lifetime. The tests make every hostile case on a real directory (links to files, directories and nothing,
 pipes, directories, hard links, a 2 GiB sparse file, names outside the charset including bytes that are not UTF-8, counts and
 sizes at and past each limit, a name swapped after the check) and on the real jail in `tests/tabular_run_mounts.rs`.
+
+A trigger error from `ensure_prepared` is terminal: the host's trigger answers it for a file it will never prepare (the ADP
+side defines this), so it is `NeverPrepared` (`large_tabular_failed`, "cannot be prepared ... will not be retried"), not a
+retry-later and not an executor problem; the adapter's text is dropped.

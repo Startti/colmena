@@ -146,7 +146,9 @@ impl LargeTabularRuntime {
                 final_failure,
             }),
             Err(PrepareError::Registry(_)) => Err(RunRefusal::Unavailable(Unavailable::Registry)),
-            Err(PrepareError::Trigger(_)) => Err(RunRefusal::Unavailable(Unavailable::Executor)),
+            // The host's trigger answers an error for a file it will never prepare:
+            // terminal, and said so, not a retry-later.
+            Err(PrepareError::Trigger(_)) => Err(RunRefusal::NeverPrepared),
         }
     }
 
@@ -407,6 +409,44 @@ mod tests {
                 .unwrap_err();
             assert_eq!(err, expected);
         }
+    }
+
+    /// The trigger refusing a file (it will never be prepared) is a clear,
+    /// terminal refusal naming no key and no adapter text, and nothing runs.
+    #[tokio::test]
+    async fn a_trigger_that_refuses_the_file_is_a_terminal_refusal() {
+        use crate::tabular_prepare::ports::{PrepareRequest, PrepareTrigger, PrepareTriggerError};
+        struct Refusing;
+        #[async_trait::async_trait]
+        impl PrepareTrigger for Refusing {
+            async fn request(&self, _: PrepareRequest) -> Result<(), PrepareTriggerError> {
+                Err(PrepareTriggerError::Unavailable(
+                    "gs://secret/key: unsupported".into(),
+                ))
+            }
+        }
+        let (registry, _dir) = sqlite_registry().await;
+        let exec = Recorder::ok(Value::Null);
+        let config = PrepareConfig {
+            large_tabular: true,
+            trigger: Arc::new(Refusing),
+            ..PrepareConfig::default()
+        };
+        let rt = LargeTabularRuntime::new(
+            TabularPrepare::new(config, registry.clone()),
+            registry,
+            FakeStorage::new(),
+            exec.clone(),
+        );
+        let err = rt.run(request("pass", &[])).await.unwrap_err();
+        assert_eq!(err, LargeRunError::Refused(RunRefusal::NeverPrepared));
+        let LargeRunError::Refused(r) = err else {
+            unreachable!()
+        };
+        assert_eq!(r.code(), "large_tabular_failed");
+        assert!(r.message().contains("will not be retried"));
+        assert!(!r.message().contains("secret"));
+        assert_eq!(exec.calls(), 0);
     }
 
     #[test]
