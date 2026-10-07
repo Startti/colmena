@@ -623,4 +623,32 @@ mod tests {
             ))
         ));
     }
+
+    #[tokio::test]
+    async fn a_17_digit_id_is_stored_exactly_and_never_as_a_rounded_float() {
+        let rows = [
+            row(1, &[text("A", 1, "id"), text("B", 1, "mixed")]),
+            row(
+                2,
+                &[
+                    num("A", 2, "12345678901234567"),
+                    num("B", 2, "12345678901234567"),
+                ],
+            ),
+            row(3, &[num("A", 3, "12345678901234568"), num("B", 3, "1.5")]),
+        ]
+        .concat();
+        let (result, sink) = convert(Wb::new().sheet("Data", &rows).build()).await;
+        let tables = result.unwrap();
+        // The id column is 64-bit integers; the column that also has a fraction is
+        // text, because a float would have rounded the id.
+        assert_eq!(types(&tables[0]), [ColumnType::Int, ColumnType::String]);
+        assert_eq!(
+            rows_of(&sink, 0, 1),
+            [
+                ["12345678901234567", "12345678901234567"],
+                ["12345678901234568", "1.5"]
+            ]
+        );
+    }
 }
