@@ -5,8 +5,8 @@
 
 **How to use (for the exploration/spec phase):** before opening files to assess a change, look up the target file below. **Used by** is its blast radius — the files that break if you change its public surface. **Depends on** is what it needs. Start by reading only those, not the whole repo.
 
-- Files indexed: **448**
-- Modules with at least one importer: **215**
+- Files indexed: **450**
+- Modules with at least one importer: **216**
 
 ## Blast-radius ranking (change these with the most care)
 
@@ -2209,6 +2209,11 @@
 - **Used by (0)**: — (leaf / entrypoint / not imported intra-crate)
 - Depends on (2): `dag_engine::infrastructure::pool_registry`, `tabular_prepare::registry_contract`
 
+#### `src/libs/colmena/src/tabular_prepare/precheck.rs`
+- Module: `tabular_prepare::precheck`
+- **Used by (0)**: — (leaf / entrypoint / not imported intra-crate)
+- Depends on (1): `tabular_prepare::zipfix`
+
 #### `src/libs/colmena/src/tabular_prepare/prepare.rs`
 - Module: `tabular_prepare::prepare`
 - **Used by (1)**: `src/libs/colmena/src/tabular_prepare/driver.rs`
@@ -2243,6 +2248,11 @@
 - Module: `tabular_prepare::writer`
 - **Used by (2)**: `src/libs/colmena/src/tabular_prepare/convert.rs`, `src/libs/colmena/src/tabular_prepare/driver.rs`
 - Depends on (2): `tabular_prepare::manifest`, `tabular_prepare::part_sink`
+
+#### `src/libs/colmena/src/tabular_prepare/zipfix.rs`
+- Module: `tabular_prepare::zipfix`
+- **Used by (1)**: `src/libs/colmena/src/tabular_prepare/precheck.rs`
+- Depends on (0): — (no intra-crate imports)
 
 ### text
 
