@@ -30,10 +30,10 @@ pub const MAX_TOKEN_BYTES: u64 = 1024 * 1024;
 /// The limits of the xlsx reader. The defaults are the constants of this
 /// module and of [`crate::tabular_prepare::precheck`]; tests lower them.
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct XlsxLimits {
-    pub archive: ArchiveLimits,
-    pub max_token_bytes: u64,
-    pub max_sheets: usize,
+pub struct XlsxLimits {
+    pub(crate) archive: ArchiveLimits,
+    pub(crate) max_token_bytes: u64,
+    pub(crate) max_sheets: usize,
 }
 
 impl Default for XlsxLimits {

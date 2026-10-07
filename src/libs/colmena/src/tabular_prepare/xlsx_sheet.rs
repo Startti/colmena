@@ -41,14 +41,14 @@ pub const MAX_CELL_BYTES: usize = 131_072;
 pub const MAX_ROW_BYTES: usize = crate::tabular_prepare::scan::MAX_RECORD_BYTES;
 
 /// The limits of a sheet read. The defaults are the constants above; tests lower
-/// them, nothing outside the crate can.
+/// them, nothing outside the crate can (the fields are crate-private).
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct SheetLimits {
-    pub max_rows: u32,
-    pub max_columns: usize,
-    pub max_cells: u64,
-    pub max_cell_bytes: usize,
-    pub max_row_bytes: usize,
+pub struct SheetLimits {
+    pub(crate) max_rows: u32,
+    pub(crate) max_columns: usize,
+    pub(crate) max_cells: u64,
+    pub(crate) max_cell_bytes: usize,
+    pub(crate) max_row_bytes: usize,
 }
 
 impl Default for SheetLimits {

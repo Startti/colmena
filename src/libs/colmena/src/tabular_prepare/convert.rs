@@ -390,7 +390,7 @@ pub const MAX_RESTARTS: usize = 3;
 
 /// Batches in flight between reading and writing. Together with the batch
 /// bounds of the reader this keeps memory fixed whatever the file.
-const CHANNEL_BATCHES: usize = 2;
+pub(crate) const CHANNEL_BATCHES: usize = 2;
 
 /// A CSV that can be opened from the start, once per run.
 #[async_trait]
@@ -407,6 +407,9 @@ pub enum TableError {
     Convert(#[from] ConvertError),
     #[error(transparent)]
     Writer(#[from] WriterError),
+    /// A workbook could not be read (see `xlsx_convert`).
+    #[error(transparent)]
+    Xlsx(#[from] crate::tabular_prepare::xlsx_spool::XlsxError),
 }
 
 /// A finished table.

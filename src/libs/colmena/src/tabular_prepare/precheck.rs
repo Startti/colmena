@@ -50,11 +50,11 @@ const LOCAL_LEN: usize = 30;
 /// The limits of the check. The defaults are the constants above; tests lower
 /// them, nothing outside the crate can.
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct ArchiveLimits {
-    pub max_entries: usize,
-    pub max_central_dir_bytes: u64,
-    pub max_entry_bytes: u64,
-    pub max_total_bytes: u64,
+pub struct ArchiveLimits {
+    pub(crate) max_entries: usize,
+    pub(crate) max_central_dir_bytes: u64,
+    pub(crate) max_entry_bytes: u64,
+    pub(crate) max_total_bytes: u64,
 }
 
 impl Default for ArchiveLimits {
