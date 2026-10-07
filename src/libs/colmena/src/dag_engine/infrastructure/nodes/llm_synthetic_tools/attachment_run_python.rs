@@ -36,6 +36,8 @@
 //! source types — inline `data:` base64 uploads AND signed-URL pulls. The
 //! dispatcher does not need to know the source type.
 
+mod large;
+
 use crate::llm::domain::{LlmError, ToolCall, ToolResult};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -86,6 +88,13 @@ pub struct AttachmentRunPythonArgs {
     /// 1-indexed row where the headers live. Default 1.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub header_row: Option<u32>,
+
+    /// Tables to make readable for a large file (default: all). Only the large
+    /// path reads it, and only a switch that is on shows it to the model, so it
+    /// is left out of the schema every call sees today.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[schemars(skip)]
+    pub tables: Vec<String>,
 }
 
 /// Response shape returned by `attachment_run_python`.
@@ -218,6 +227,12 @@ pub async fn dispatch_attachment_run_python_via_executor(
 
     if args.code.trim().is_empty() {
         return Ok(err_envelope(call_id, "code must be non-empty".to_string()));
+    }
+
+    // A large file (dark behind COLMENA_LARGE_TABULAR) never reaches the code
+    // below: it runs over its prepared tables, or is refused with a typed reason.
+    if let Some(target) = executor.large_target(&args.attachment_id) {
+        return Ok(large::dispatch(call_id, &args, target).await);
     }
 
     // 2. Fetch attachment bytes via the shared plumbing (Bulk T0).
