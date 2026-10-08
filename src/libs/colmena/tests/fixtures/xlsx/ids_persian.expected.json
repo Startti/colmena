@@ -1,0 +1,1 @@
+{"tables":[{"sheet":"ids","name":"ids","columns":[{"name":"id","type":"float"},{"name":"می‌خواهم","type":"string"},{"name":"mixed","type":"string"}],"rows":[["1.234567890123457e16","الف","1"],["1.234567890123457e16","ب","2.5"],["-9007199254740992.0","پ","text"]]}],"skipped":[]}

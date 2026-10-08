@@ -1,0 +1,1 @@
+{"tables":[{"sheet":"Rich","name":"Rich","columns":[{"name":"plain","type":"string"},{"name":"rich","type":"string"},{"name":"empty string","type":"string"},{"name":"spaces","type":"string"}],"rows":[["a","bold BOLD tail",null,"  padded  "]]}],"skipped":[]}

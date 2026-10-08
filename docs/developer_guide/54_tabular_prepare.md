@@ -1394,3 +1394,11 @@ CSV as well, through the same sink.
 written), `source_gone`, `settle_lost` and `delete_best_effort` skip the call when they hold no key,
 and the cleanup pass (`attachment_gc`) settles a row that tracks nothing without asking the adapter.
 Each has a test with an adapter that records its calls, and each fails without the guard.
+
+### Workbooks from real writers (`tests/xlsx_real_files.rs`, `tests/fixtures/xlsx/`)
+
+Fixtures written by openpyxl and LibreOffice (not by this crate or `rust_xlsxwriter`), each with
+an `.expected.json` that is the converter's output after `compare.py` checked it, cell by cell,
+against what openpyxl reads back from the same file. `committed_fixtures_convert_to_the_values_recorded_with_them`
+converts them all and compares; the ignored `dump_a_directory` (`XLSX_REAL_DIR`, `XLSX_REAL_OUT`)
+does it for any directory of workbooks.
