@@ -23,6 +23,15 @@ pub const TEMPLATE_ENV: &[(&str, &str)] = &[
     ("MKL_NUM_THREADS", "1"),
 ];
 
+/// Added to the template's environment, and so to every call's, only when the
+/// executor stages prepared data: pyarrow's default allocator reserves about a
+/// gibibyte of address space under `RLIMIT_AS`, so its system pool is required,
+/// and one I/O thread keeps the template able to fork.
+pub const ARROW_ENV: &[(&str, &str)] = &[
+    ("ARROW_DEFAULT_MEMORY_POOL", "system"),
+    ("ARROW_IO_THREADS", "1"),
+];
+
 const WARM_IMPORTS: &CStr = c"import pandas, numpy, scipy.stats, json, math, re, datetime, collections, itertools, functools, string, decimal, statistics, hmac, hashlib, base64, secrets, io, csv, ast\n";
 
 pub struct ZygoteArgs {
@@ -101,6 +110,24 @@ fn adopt_orphans() -> Result<(), Value> {
         return Err(json!({"event": "subreaper_failed", "errno": errno}));
     }
     Ok(())
+}
+
+/// With pyarrow installed (pandas loads it in the warm imports), its default
+/// memory pool must be the system one: a template that would let calls reserve
+/// a gibibyte of address space each does not start. pyarrow absent is fine.
+pub(crate) fn check_arrow(py: Python<'_>) -> Result<(), Value> {
+    let Ok(arrow) = py.import("pyarrow") else {
+        return Ok(());
+    };
+    let backend = arrow
+        .call_method0("default_memory_pool")
+        .and_then(|pool| pool.getattr("backend_name"))
+        .and_then(|name| name.extract::<String>());
+    match backend.as_deref() {
+        Ok("system") => Ok(()),
+        Ok(other) => Err(json!({"event": "arrow_pool_not_system", "backend": other})),
+        Err(_) => Err(json!({"event": "arrow_pool_unreadable"})),
+    }
 }
 
 /// `os.fork()` copies only the calling thread, so it is safe only while the
@@ -193,6 +220,10 @@ fn start(args: &ZygoteArgs) -> Result<UnixListener, Value> {
     adopt_orphans()?;
     pyo3::Python::initialize();
     warm_imports()?;
+    // Before the thread count: pyarrow's import may start a thread.
+    if args.jail.staging_root.is_some() {
+        Python::attach(check_arrow)?;
+    }
     check_single_threaded()?;
     prove_jail(&args.jail)?;
     bind_private(&args.socket)
@@ -232,6 +263,58 @@ pub fn run(args: ZygoteArgs) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A stand-in `pyarrow` under the name the check looks up, so no real one is needed.
+    fn with_fake_pyarrow(backend: Option<&str>, body: impl FnOnce(Python<'_>)) {
+        pyo3::Python::initialize();
+        Python::attach(|py| {
+            let sys_modules = py.import("sys").unwrap().getattr("modules").unwrap();
+            let saved = sys_modules.get_item("pyarrow").ok();
+            if let Some(backend) = backend {
+                let code = format!(
+                    "import types\nm = types.ModuleType('pyarrow')\nm.default_memory_pool = lambda: types.SimpleNamespace(backend_name={backend:?})\n"
+                );
+                let ns = pyo3::types::PyDict::new(py);
+                py.run(&std::ffi::CString::new(code).unwrap(), Some(&ns), None)
+                    .unwrap();
+                sys_modules
+                    .set_item("pyarrow", ns.get_item("m").unwrap())
+                    .unwrap();
+            }
+            body(py);
+            match saved {
+                Some(m) => sys_modules.set_item("pyarrow", m).unwrap(),
+                None => {
+                    let _ = sys_modules.del_item("pyarrow");
+                }
+            }
+        });
+    }
+
+    /// The template refuses to start when pyarrow is loaded and its default
+    /// memory pool is anything but the system one (the default pool reserves
+    /// about a gibibyte of address space under `RLIMIT_AS`).
+    #[test]
+    fn a_loaded_pyarrow_must_use_the_system_pool() {
+        with_fake_pyarrow(Some("system"), |py| assert!(check_arrow(py).is_ok()));
+        for backend in ["mimalloc", "jemalloc", ""] {
+            with_fake_pyarrow(Some(backend), |py| {
+                let e = check_arrow(py).unwrap_err();
+                assert_eq!(e["event"], "arrow_pool_not_system", "{backend}");
+                assert_eq!(e["backend"], backend);
+            });
+        }
+    }
+
+    #[test]
+    fn without_pyarrow_there_is_nothing_to_check() {
+        with_fake_pyarrow(None, |py| {
+            let installed = py.import("pyarrow").is_ok();
+            if !installed {
+                assert!(check_arrow(py).is_ok());
+            }
+        });
+    }
 
     /// Only a forked child is single-threaded under the multi-threaded test
     /// harness: there one thread passes the check and a second is reported.

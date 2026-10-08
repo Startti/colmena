@@ -876,3 +876,57 @@ fn the_self_test_ignores_mounts_of_calls_in_flight() {
         t.join().unwrap();
     }
 }
+
+// ---------------------------------------------------------------------------
+// The template's Arrow settings.
+// ---------------------------------------------------------------------------
+
+/// A staged executor's calls see the two Arrow variables on top of the fixed
+/// environment, and nothing else changes in it.
+#[tokio::test]
+async fn a_staged_executor_adds_exactly_the_arrow_variables() {
+    let Some(root) = Root::new() else { return };
+    let ex = executor(Some(&root));
+    let out = run_plain(&ex, "import os\noutput = dict(os.environ)").await;
+    let mut expected = json!({
+        "PATH": "/usr/local/bin:/usr/bin:/bin",
+        "OPENBLAS_NUM_THREADS": "1",
+        "OMP_NUM_THREADS": "1",
+        "MKL_NUM_THREADS": "1",
+        "ARROW_DEFAULT_MEMORY_POOL": "system",
+        "ARROW_IO_THREADS": "1",
+    });
+    for k in ["LANG", "LC_ALL", "LC_CTYPE"] {
+        if let Ok(v) = std::env::var(k) {
+            expected[k] = v.into();
+        }
+    }
+    assert_eq!(out.unwrap(), expected);
+}
+
+/// Where pyarrow is installed for the system Python: pandas reads a Parquet
+/// part from `/data` inside the jail, user code never imports pyarrow, the
+/// template has one thread and its pool is the system one (its start would
+/// have been refused otherwise). Skipped, loudly, where pyarrow is absent.
+#[tokio::test]
+async fn pandas_reads_a_parquet_part_through_data_when_pyarrow_is_installed() {
+    let Some(root) = Root::new() else { return };
+    let make = "import pandas as pd, sys\n\
+        pd.DataFrame({'k': ['a', 'b', 'a'], 'v': [1, 2, 3]}).to_parquet(sys.argv[1] + '/p.parquet')";
+    let ex = executor(Some(&root));
+    let staged = StagedCall::create(&root.path, 1).unwrap();
+    let made = std::process::Command::new("python3")
+        .args(["-c", make])
+        .arg(staged.data_dir())
+        .output()
+        .unwrap();
+    if !made.status.success() {
+        eprintln!("skipped: pyarrow is not installed for python3");
+        return;
+    }
+    let code = "import pandas as pd\n\
+        df = pd.read_parquet('/data/p.parquet', columns=['k', 'v'], use_threads=False)\n\
+        output = df.groupby('k')['v'].sum().to_dict()";
+    let out = run_staged(&ex, staged.mounts(), code).await.unwrap();
+    assert_eq!(out, json!({"a": 4, "b": 2}));
+}

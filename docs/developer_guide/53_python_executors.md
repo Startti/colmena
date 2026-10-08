@@ -214,6 +214,15 @@ before any code runs. Its size and inode count are what bound the output. What t
 included, is never followed on the trusted side: the volume is unmounted before anything is removed. `/out` is created
 like `/data` when missing.
 
+With a staging root configured the template's fixed environment gains two variables, `ARROW_DEFAULT_MEMORY_POOL=system`
+and `ARROW_IO_THREADS=1`, and every call inherits them; without one the environment is exactly the four variables above.
+The system pool is required under the address-space limit: with pyarrow's default allocator, versions 21 and later
+reserve about 1 GiB of address space per process. pandas 1.5.3 imports pyarrow inside `import pandas` when it is
+installed, so a template of such an image loads it. After the warm imports a template with a staging root checks that
+a loaded pyarrow's default pool is the system one (`arrow_pool_not_system` otherwise, exit 3), then, as always, that it
+still has a single thread. An image without pyarrow starts as before. User code still cannot import pyarrow; pandas
+reads Parquet for it (`pd.read_parquet(..., use_threads=False)`).
+
 ### Startup self-test (Linux)
 
 Before it binds its socket, the template forks a throwaway child that enters the jail as slot 9999 (uid
