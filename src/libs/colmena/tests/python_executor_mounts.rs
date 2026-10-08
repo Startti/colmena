@@ -1008,3 +1008,68 @@ async fn a_header_with_an_invalid_output_size_ends_the_call() {
         assert_eq!(err.to_string(), CRASHED_MESSAGE, "{bad}");
     }
 }
+
+/// Real mounts, one fact at a time: a tmpfs without an inode bound, a plain
+/// directory that is not a mount root, and a different filesystem type.
+#[test]
+fn real_volumes_that_miss_one_fact_are_refused() {
+    let Some(_alone) = Root::exclusive() else {
+        return;
+    };
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().canonicalize().unwrap();
+    let flags = libc::MS_NOSUID | libc::MS_NODEV | libc::MS_NOEXEC;
+    let mount_at = |dir: &Path, fstype: &str, data: &str| {
+        let (t, d) = (
+            std::ffi::CString::new(fstype).unwrap(),
+            std::ffi::CString::new(data).unwrap(),
+        );
+        let target = std::ffi::CString::new(dir.to_str().unwrap()).unwrap();
+        let rc = unsafe {
+            libc::mount(
+                t.as_ptr(),
+                target.as_ptr(),
+                t.as_ptr(),
+                flags,
+                d.as_ptr() as *const libc::c_void,
+            )
+        };
+        assert_eq!(rc, 0, "{fstype}: {}", std::io::Error::last_os_error());
+    };
+    let call = |name: &str| {
+        let dir = root.join(name);
+        for d in ["", "data", "out"] {
+            std::fs::create_dir_all(dir.join(d)).unwrap();
+        }
+        std::fs::set_permissions(&dir, Permissions::from_mode(0o700)).unwrap();
+        dir
+    };
+    let mut mounted = Vec::new();
+    // tmpfs of the right size, no inode bound.
+    let no_inodes = call("no-inodes");
+    mount_at(&no_inodes.join("out"), "tmpfs", "size=2m");
+    mounted.push(no_inodes.join("out"));
+    let dirs = open_call_dirs(&root, "no-inodes").unwrap();
+    let e = check_out_volume(&dirs, 2).unwrap_err();
+    assert!(e.to_string().contains("inode"), "{e}");
+    // The same tmpfs with the bound is accepted.
+    let bounded = call("bounded");
+    mount_at(
+        &bounded.join("out"),
+        "tmpfs",
+        &format!("size=2m,nr_inodes={OUT_MAX_INODES}"),
+    );
+    mounted.push(bounded.join("out"));
+    let dirs = open_call_dirs(&root, "bounded").unwrap();
+    assert_eq!(check_out_volume(&dirs, 2).unwrap(), 2 << 20);
+    // Another filesystem type (ramfs has no size at all).
+    let other = call("ramfs");
+    mount_at(&other.join("out"), "ramfs", "");
+    mounted.push(other.join("out"));
+    let dirs = open_call_dirs(&root, "ramfs").unwrap();
+    assert!(check_out_volume(&dirs, 2).is_err());
+    for m in mounted.iter().rev() {
+        let c = std::ffi::CString::new(m.to_str().unwrap()).unwrap();
+        unsafe { libc::umount2(c.as_ptr(), libc::MNT_DETACH) };
+    }
+}
