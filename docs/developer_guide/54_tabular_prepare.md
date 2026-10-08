@@ -943,8 +943,11 @@ for open elements is at most 32 x 256 bytes. `attribute()` caps **the attributes
 64** and turns off the parser's duplicate-attribute check, which compares each attribute with
 every earlier one (about 2 x 10^8 comparisons for 20,000 attributes in one 1 MiB tag, repeatable
 for every tag of a part). Each kind of part has a **declared-size cap of its own** instead of
-the 2 GiB per-entry limit: 16 MiB for the workbook, its relationships and the styles
-(`MAX_SMALL_PART_BYTES`), 128 MiB for the shared strings, and for a sheet the per-entry limit,
+the 2 GiB per-entry limit: 16 MiB for the workbook and its relationships
+(`MAX_SMALL_PART_BYTES`; what is kept of them is a few strings), 64 MiB for the styles
+(`MAX_STYLES_PART_BYTES`: real workbooks with style bloat have tens of megabytes, the part is
+parsed as a stream and what is kept is one byte for each of at most 65,536 styles and a map of at
+most 65,536 custom formats, about 4 MiB, so the cap bounds only time), 128 MiB for the shared strings, and for a sheet the per-entry limit,
 2 GiB (`MAX_SHEET_PART_BYTES`), inside the job's running budget. `tests/xlsx_hostile_memory.rs`
 reads 3,000,000 unclosed elements as each kind of part and asserts the refusal (`TooDeep`)
 costs under 2 MiB.
@@ -967,13 +970,17 @@ looks at the cancel token every 4,096 events, so a part of millions of comments 
 that are not cells stops within a bounded number of events.
 
 **Budgets that cover every read.** A part read again is inflated again (a sample, a run, each
-restart), so the archive's 2.5 GiB "total expanded" limit would be only a claim about the
-headers if it were not also a running count: `Package` adds every byte any read inflates to one
-counter and fails a read that passes the limit (`TotalTooLarge`). A workbook whose `sheet`
-elements name one part more than once (up to 256 of them could, each read as another sheet) is
-refused (`BadRelationship`). The cell cap works the same way: the book counts every cell any
-read of it reads, and the reader looks at the cancel token every 4,096 cells, whatever they
-hold, so a sheet of tens of millions of empty cells ends with the budget instead of outliving it.
+restart). A flat running total of inflated bytes would refuse a legitimate sheet of over 1.25 GiB
+of XML that needs one restart, so the limit is on **reads**: a part may be opened at most five
+times in a job (`MAX_READS_PER_PART`: the sample, the run and the three restarts of
+`MAX_RESTARTS`), each read bounded by the size its header declared (`Limited`) and the archive by
+the pre-check's 2.5 GiB. Worst-case CPU: five reads of a part, so at most 5 x 2.5 GiB of XML to
+parse in all (a few minutes at 100 MB/s), which the job's 300 s budget ends first, because every
+cell and every 4,096 events look at the cancel token. A workbook whose `sheet` elements name one
+part more than once (up to 256 of them could, each read as another sheet) is refused
+(`BadRelationship`). The cell cap works the same way: the book counts every cell any read of it
+reads, and the reader looks at the cancel token every 4,096 cells, whatever they hold, so a sheet
+of tens of millions of empty cells ends with the budget instead of outliving it.
 
 **One reading of the archive.** The part is found at the offset the pre-check validated (its
 local header already compared with the central directory) and only its raw bytes go to a
@@ -1120,6 +1127,18 @@ index that does not exist, is a corrupt part (`BadCell`).
   `23:59:59` of its own day instead of rolling over (in the 1900 system to the day that never
   existed).
 - A batch that cannot be built is an error (`a batch could not be built`), never a batch dropped.
+
+**Strings and names, after the second review.** A shared string is capped at 128 KiB
+(`MAX_SHARED_STRING_BYTES`, a cell's cap) **as it is built**, on every push, so a string made of
+many small tokens is cut as it grows; a workbook with one longer string is refused (`CellTooLong`,
+an unreadable file), as an over-long inline cell is. A cell that points at a shared string checks
+its length against the cell cap **before** it copies it into the cell. A whole number with a
+leading `+` or a fraction of zeros (`12345678901234567.0`) is read exactly like the same number
+without them. The zero-width non-joiner and joiner (U+200C, U+200D) are **not** stripped from
+names: Persian, Indic scripts and emoji sequences need them. Still stripped: the bidirectional
+controls, overrides and isolates, the other zero-width and invisible format characters, the
+byte order mark, tag characters, U+2028 and U+2029, and the added ranges U+0890 to U+0891, U+110CD,
+U+13430 to U+1343F and U+1BCA0 to U+1BCA3.
 
 ### Typing the columns (`xlsx_columns.rs`)
 

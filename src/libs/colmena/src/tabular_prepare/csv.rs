@@ -1909,4 +1909,10 @@ mod tests {
         ];
         assert_eq!(column_names(&raw), ["id_", "_", "ok"]);
     }
+
+    #[test]
+    fn a_persian_header_keeps_its_zero_width_non_joiner() {
+        let name = "\u{645}\u{6CC}\u{200C}\u{62E}\u{648}\u{627}\u{647}\u{645}".to_string();
+        assert_eq!(column_names(std::slice::from_ref(&name)), [name.as_str()]);
+    }
 }

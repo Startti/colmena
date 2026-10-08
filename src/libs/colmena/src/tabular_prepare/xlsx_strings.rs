@@ -31,6 +31,10 @@ use std::borrow::Cow;
 /// Declared size of the shared-strings part, at most.
 pub const MAX_SHARED_STRINGS_XML_BYTES: u64 = 128 * 1024 * 1024;
 
+/// Bytes of one string, at most: a cell's cap (Excel's 32,767 characters at four bytes),
+/// so no string the table holds could not be put in a cell.
+pub const MAX_SHARED_STRING_BYTES: usize = 131_072;
+
 /// Entries of the table, at most.
 pub const MAX_SHARED_STRINGS: usize = 10_000_000;
 
@@ -153,18 +157,30 @@ pub(crate) fn read_shared_strings_with(
                 _ => {}
             },
             Event::Text(t) if in_si && in_t && !in_phonetic => {
-                table.text.push_str(&unescape_ooxml(&text_of(&t)?));
+                push_string_text(&mut table, &unescape_ooxml(&text_of(&t)?))?;
             }
             Event::CData(c) if in_si && in_t && !in_phonetic => {
                 let raw = std::str::from_utf8(&c).map_err(|_| {
                     XlsxError::Invalid(crate::tabular_prepare::xlsx_spool::Invalid::Xml)
                 })?;
-                table.text.push_str(&unescape_ooxml(raw));
+                push_string_text(&mut table, &unescape_ooxml(raw))?;
             }
             _ => {}
         }
     }
     Ok(table)
+}
+
+/// Adds text to the string being built, refusing it once the string is over the cap: the
+/// check runs on every push, as for a cell, so a string made of many small tokens is cut
+/// as it grows and not after it is whole.
+fn push_string_text(table: &mut SharedStrings, more: &str) -> Result<(), XlsxError> {
+    let start = table.ends.last().map_or(0, |e| *e as usize);
+    if table.text.len() - start + more.len() > MAX_SHARED_STRING_BYTES {
+        return Err(XlsxError::Invalid(Invalid::CellTooLong));
+    }
+    table.text.push_str(more);
+    Ok(())
 }
 
 fn push_end(table: &mut SharedStrings, max_count: usize) -> Result<(), XlsxError> {
@@ -286,5 +302,38 @@ mod tests {
         // Exactly at the count it passes.
         let t = read_shared_strings_with(&mut pkg, "xl/sharedStrings.xml", 1 << 20, 100).unwrap();
         assert_eq!(t.len(), 100);
+    }
+
+    #[tokio::test]
+    async fn one_string_over_the_cell_cap_is_refused_as_it_grows_not_when_it_is_whole() {
+        assert_eq!(MAX_SHARED_STRING_BYTES, 131_072);
+        let exact = "x".repeat(MAX_SHARED_STRING_BYTES);
+        let mut pkg = package_with(&format!("<sst><si><t>{exact}</t></si></sst>")).await;
+        let t = read_shared_strings(&mut pkg, "xl/sharedStrings.xml").unwrap();
+        assert_eq!(t.get(0).map(str::len), Some(131_072));
+        // One byte more, in pieces (a run, a CDATA section, a text): each is small.
+        let pieces = format!(
+            "<sst><si><r><t>{}</t></r><r><t><![CDATA[{}]]></t></r><r><t>yy</t></r></si></sst>",
+            "x".repeat(65_536),
+            "x".repeat(65_535)
+        );
+        let mut pkg = package_with(&pieces).await;
+        let r = read_shared_strings(&mut pkg, "xl/sharedStrings.xml");
+        assert!(matches!(r, Err(XlsxError::Invalid(Invalid::CellTooLong))));
+        // The cap is per string: many strings at the cap are fine.
+        let many = format!(
+            "<sst>{}</sst>",
+            format!("<si><t>{exact}</t></si>").repeat(3)
+        );
+        let mut pkg = package_with(&many).await;
+        assert_eq!(
+            read_shared_strings(&mut pkg, "xl/sharedStrings.xml")
+                .unwrap()
+                .len(),
+            3
+        );
+        // A `si` inside a `si` is refused.
+        let mut pkg = package_with("<sst><si><t>a</t><si><t>b</t></si></si></sst>").await;
+        assert!(read_shared_strings(&mut pkg, "xl/sharedStrings.xml").is_err());
     }
 }

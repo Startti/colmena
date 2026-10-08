@@ -159,15 +159,21 @@ pub struct SkippedSheet {
 
 /// Whether a character may be part of a table or column name: not a control
 /// character and not a Unicode format character (category Cf: bidirectional
-/// overrides, zero-width characters, the byte order mark), which can make a name
-/// read as something else.
+/// overrides and isolates, zero-width spaces, the byte order mark, tag characters,
+/// and the line and paragraph separators), which can make a name read as something
+/// else. The zero-width non-joiner and joiner stay: they are part of the spelling of
+/// Persian, Indic scripts and emoji sequences.
 pub fn is_clean_char(c: char) -> bool {
     !c.is_control()
         && !matches!(c,
-            '\u{AD}' | '\u{600}'..='\u{605}' | '\u{61C}' | '\u{6DD}' | '\u{70F}' | '\u{8E2}'
-            | '\u{180E}' | '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}'
+            '\u{AD}' | '\u{600}'..='\u{605}' | '\u{61C}' | '\u{6DD}' | '\u{70F}'
+            | '\u{890}'..='\u{891}' | '\u{8E2}'
+            // 200C and 200D (the zero-width non-joiner and joiner) are not here: Persian,
+            // Indic scripts and emoji sequences need them to be spelled correctly.
+            | '\u{180E}' | '\u{200B}' | '\u{200E}'..='\u{200F}' | '\u{2028}'..='\u{202E}'
             | '\u{2060}'..='\u{2064}' | '\u{2066}'..='\u{206F}' | '\u{FEFF}'
-            | '\u{FFF9}'..='\u{FFFB}' | '\u{110BD}' | '\u{1D173}'..='\u{1D17A}'
+            | '\u{FFF9}'..='\u{FFFB}' | '\u{110BD}' | '\u{110CD}'
+            | '\u{13430}'..='\u{1343F}' | '\u{1BCA0}'..='\u{1BCA3}' | '\u{1D173}'..='\u{1D17A}'
             | '\u{E0001}' | '\u{E0020}'..='\u{E007F}')
 }
 
@@ -1136,6 +1142,33 @@ mod tests {
         ] {
             let m = Manifest::new(vec![table.clone()]).with_skipped(vec![bad]);
             assert!(m.to_json().is_err());
+        }
+    }
+
+    #[test]
+    fn the_joiners_that_spell_persian_and_emoji_survive_and_the_rest_of_the_format_characters_do_not(
+    ) {
+        // A Persian header with the zero-width non-joiner, and an emoji sequence with joiners.
+        let persian = "\u{645}\u{6CC}\u{200C}\u{62E}\u{648}\u{627}\u{647}\u{645}";
+        let family = "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}";
+        assert!(is_clean_char('\u{200C}') && is_clean_char('\u{200D}'));
+        assert_eq!(unique_table_names(&[persian, family]), [persian, family]);
+        for c in [
+            '\u{890}',
+            '\u{891}',
+            '\u{110CD}',
+            '\u{13430}',
+            '\u{1BCA0}',
+            '\u{2028}',
+            '\u{2029}',
+            '\u{200B}',
+            '\u{200E}',
+            '\u{202E}',
+            '\u{2066}',
+            '\u{FEFF}',
+            '\u{E0041}',
+        ] {
+            assert!(!is_clean_char(c), "{c:?}");
         }
     }
 }

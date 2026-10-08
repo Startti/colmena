@@ -142,6 +142,13 @@ fn column_of(reference: &str) -> Option<usize> {
 /// exactly (beyond 2^53), as an integer; text when it does not fit 64 bits. `None`
 /// for every other literal, which is a number as a double holds it.
 fn big_integer(raw: &str) -> Option<Cell> {
+    // A plus sign and a fraction of zeros (`+123...`, `123....0`) are the same whole
+    // number: read exactly, never through a double.
+    let raw = raw.strip_prefix('+').unwrap_or(raw);
+    let raw = match raw.split_once('.') {
+        Some((whole, zeros)) if !zeros.is_empty() && zeros.bytes().all(|b| b == b'0') => whole,
+        _ => raw,
+    };
     let digits = raw.strip_prefix('-').unwrap_or(raw);
     if digits.len() < 16 || !digits.bytes().all(|b| b.is_ascii_digit()) {
         return None;
@@ -185,7 +192,7 @@ struct Pending {
     inline: String,
 }
 
-fn finish(p: Pending, ctx: &SheetContext<'_>) -> Result<Option<Cell>, XlsxError> {
+fn finish(p: Pending, ctx: &SheetContext<'_>, cap: usize) -> Result<Option<Cell>, XlsxError> {
     let text = |s: &str| -> Option<Cell> { (!s.is_empty()).then(|| Cell::Text(s.into())) };
     Ok(match p.kind {
         Kind::Inline => text(&p.inline),
@@ -203,6 +210,11 @@ fn finish(p: Pending, ctx: &SheetContext<'_>) -> Result<Option<Cell>, XlsxError>
                 .strings
                 .get(index)
                 .ok_or(XlsxError::Invalid(Invalid::BadCell))?;
+            // Before the copy: a string over the cell cap is refused as an over-long inline
+            // cell is, and never copied.
+            if s.len() > cap {
+                return Err(XlsxError::Invalid(Invalid::CellTooLong));
+            }
             text(s)
         }
         Kind::Bool => (!p.value.is_empty()).then(|| {
@@ -434,7 +446,7 @@ pub(crate) fn read_sheet_with(
                 at_level = Level::Row;
                 if let Some(p) = pending.take() {
                     let column = p.column;
-                    if let Some(cell) = finish(p, ctx)? {
+                    if let Some(cell) = finish(p, ctx, limits.max_cell_bytes)? {
                         if let Cell::Text(t) = &cell {
                             if t.len() > limits.max_cell_bytes {
                                 return Err(XlsxError::Invalid(Invalid::CellTooLong));
@@ -988,5 +1000,56 @@ mod tests {
                 (8, Cell::Bool(true)),
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn a_shared_string_over_the_cell_cap_is_refused_before_it_is_copied() {
+        let long = "y".repeat(200);
+        let rows = "<row r=\"1\"><c r=\"A1\" t=\"s\"><v>0</v></c></row>";
+        let bytes = Wb::new().sheet("A", rows).shared(&[long.as_str()]).build();
+        let r = read_with(
+            bytes.clone(),
+            &XlsxLimits::default(),
+            &limited(|l| l.max_cell_bytes = 199),
+        )
+        .await;
+        assert_eq!(r.unwrap_err(), XlsxError::Invalid(Invalid::CellTooLong));
+        let (got, _) = read_with(
+            bytes,
+            &XlsxLimits::default(),
+            &limited(|l| l.max_cell_bytes = 200),
+        )
+        .await
+        .unwrap();
+        assert_eq!(got[0].1.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_big_whole_number_is_exact_with_a_plus_sign_or_a_zero_fraction() {
+        let cells: String = [
+            "+12345678901234567",
+            "12345678901234567.0",
+            "-12345678901234567.000",
+            "12345678901234567.5",
+            "1234567890123456.0",
+        ]
+        .iter()
+        .enumerate()
+        .map(|(i, v)| format!("<c r=\"{}1\"><v>{v}</v></c>", (b'A' + i as u8) as char))
+        .collect();
+        let (got, _) = read(
+            Wb::new()
+                .sheet("A", &format!("<row r=\"1\">{cells}</row>"))
+                .build(),
+        )
+        .await
+        .unwrap();
+        let c: Vec<_> = got[0].1.iter().map(|(_, c)| c.clone()).collect();
+        assert_eq!(c[0], Cell::Integer(12_345_678_901_234_567));
+        assert_eq!(c[1], Cell::Integer(12_345_678_901_234_567));
+        assert_eq!(c[2], Cell::Integer(-12_345_678_901_234_567));
+        // A real fraction is a double, as the file stored it; 16 digits fit a double.
+        assert!(matches!(c[3], Cell::Number(_)));
+        assert_eq!(c[4], Cell::Number(1_234_567_890_123_456.0));
     }
 }

@@ -17,14 +17,21 @@ use crate::tabular_prepare::precheck::{
 use crate::tabular_prepare::xlsx_spool::{Invalid, Spooled, XlsxError};
 use quick_xml::events::{BytesStart, Event};
 use quick_xml::Reader;
+use std::collections::HashMap;
 use std::io::{self, BufRead, Read, Seek, SeekFrom};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
 use thiserror::Error;
 use tokio_util::sync::CancellationToken;
 
 /// Sheets a workbook may have. It is the number of tables a manifest holds.
 pub const MAX_SHEETS: usize = crate::tabular_prepare::manifest::MAX_TABLES;
+
+/// Times one part may be opened in a job: the sample, the run and at most three
+/// restarts (`MAX_RESTARTS`). A sheet that restarts is inflated again each time, and a
+/// legitimate sheet may be over a gigabyte of XML, so the limit is on reads, not on a
+/// flat total of bytes that its own restarts would use up. The worst case is therefore
+/// five reads of each part: at most 5 x 2.5 GiB of XML to parse in all, which the job's
+/// 300 s budget (checked every 4,096 events) ends long before at any real speed.
+pub const MAX_READS_PER_PART: u32 = 5;
 
 /// Events between two looks at the cancel token, in any part.
 pub const CANCEL_CHECK_EVENTS: u64 = 4096;
@@ -39,10 +46,15 @@ pub const MAX_NAME_BYTES: usize = 256;
 /// Attributes of a tag this reader will look through.
 pub const MAX_ATTRIBUTES: usize = 64;
 
-/// Declared size of a part other than the sheets and the shared strings: the
-/// workbook, its relationships and the styles (at most 65,536 styles of a few
-/// dozen bytes each and as many custom formats).
+/// Declared size of the workbook part and its relationships. What is kept of them is a
+/// few strings (at most 256 sheets), whatever their size; the cap bounds the time.
 pub const MAX_SMALL_PART_BYTES: u64 = 16 * 1024 * 1024;
+
+/// Declared size of the styles part. Real workbooks with style bloat have tens of
+/// megabytes of it; it is parsed as a stream and what is kept is one byte for each of at
+/// most 65,536 styles and a map of at most 65,536 custom formats (about 4 MiB), so the
+/// cap bounds only the time.
+pub const MAX_STYLES_PART_BYTES: u64 = 64 * 1024 * 1024;
 
 /// Declared size of a worksheet part: the pre-check's per-entry limit (2 GiB),
 /// within the job's running budget of inflated bytes.
@@ -79,10 +91,6 @@ struct ExpandsPastDeclared;
 struct TokenTooLong;
 
 #[derive(Debug, Error)]
-#[error("the workbook's parts inflated past the job's total limit")]
-struct BudgetSpent;
-
-#[derive(Debug, Error)]
 #[error("a part is shorter than declared or its checksum is wrong")]
 struct BadChecksum;
 
@@ -94,8 +102,6 @@ pub struct Limited<R> {
     left: u64,
     crc: flate2::Crc,
     expected: u32,
-    /// The job's running count of inflated bytes and its limit.
-    budget: Option<(Arc<AtomicU64>, u64)>,
 }
 
 impl<R> Limited<R> {
@@ -105,7 +111,6 @@ impl<R> Limited<R> {
             left: declared,
             crc: flate2::Crc::new(),
             expected: crc,
-            budget: None,
         }
     }
 }
@@ -127,11 +132,6 @@ impl<R: Read> Read for Limited<R> {
         if n == 0 {
             // Shorter than declared.
             return Err(io::Error::other(BadChecksum));
-        }
-        if let Some((used, max)) = &self.budget {
-            if used.fetch_add(n as u64, Ordering::Relaxed) + n as u64 > *max {
-                return Err(io::Error::other(BudgetSpent));
-            }
         }
         self.crc.update(&buf[..n]);
         self.left -= n as u64;
@@ -212,7 +212,6 @@ pub fn io_failure(e: &io::Error) -> XlsxError {
         Some(inner) if inner.is::<ExpandsPastDeclared>() => {
             XlsxError::Archive(ArchiveError::EntryTooLarge)
         }
-        Some(inner) if inner.is::<BudgetSpent>() => XlsxError::Archive(ArchiveError::TotalTooLarge),
         Some(inner) if inner.is::<TokenTooLong>() => XlsxError::Invalid(Invalid::TokenTooLong),
         _ => XlsxError::Invalid(Invalid::Xml),
     }
@@ -228,10 +227,9 @@ pub fn xml_failure(e: &quick_xml::Error) -> XlsxError {
 /// An opened workbook archive: what it declares and a way to read its parts.
 pub struct Package {
     file: Spooled,
-    /// Bytes inflated by every read of any part so far, against the archive's total
-    /// limit: the same part read again (a sample, a run, a restart) is read again.
-    inflated: Arc<AtomicU64>,
-    max_inflated: u64,
+    /// Times each part has been opened. A part is inflated once per read, so what
+    /// bounds the work is how many reads of one part are allowed.
+    reads: HashMap<String, u32>,
     /// Cancelled when the job is: every part read looks at it.
     cancel: CancellationToken,
     summary: ArchiveSummary,
@@ -252,8 +250,7 @@ impl Package {
         })?;
         Ok(Self {
             file: spooled,
-            inflated: Arc::new(AtomicU64::new(0)),
-            max_inflated: limits.archive.max_total_bytes,
+            reads: HashMap::new(),
             cancel: CancellationToken::new(),
             summary,
             max_token_bytes: limits.max_token_bytes,
@@ -294,6 +291,11 @@ impl Package {
         if entry.uncompressed > max_declared {
             return Err(XlsxError::Archive(ArchiveError::EntryTooLarge));
         }
+        let reads = self.reads.entry(name.to_string()).or_insert(0);
+        *reads += 1;
+        if *reads > MAX_READS_PER_PART {
+            return Err(XlsxError::Archive(ArchiveError::TotalTooLarge));
+        }
         self.file
             .seek(SeekFrom::Start(entry.data_offset))
             .map_err(|_| XlsxError::Local)?;
@@ -303,8 +305,7 @@ impl Package {
         } else {
             Box::new(flate2::read::DeflateDecoder::new(raw))
         };
-        let mut limited = Limited::new(inner, entry.uncompressed, entry.crc);
-        limited.budget = Some((self.inflated.clone(), self.max_inflated));
+        let limited = Limited::new(inner, entry.uncompressed, entry.crc);
         let mut guarded = Guarded::new(limited, self.max_token_bytes);
         guarded.cancel = Some(self.cancel.clone());
         Ok(Reader::from_reader(guarded))
@@ -537,26 +538,30 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_same_part_read_again_counts_again_against_the_jobs_total() {
-        let mut limits = XlsxLimits::default();
-        limits.archive.max_total_bytes = 1500;
-        let body = format!("<a>{}</a>", "x".repeat(993));
-        let bytes = build(&[Entry::stored("a.xml", body.as_bytes())]);
-        let mut pkg = package_of(bytes, &limits).await.unwrap();
-        let drain = |pkg: &mut Package| -> Result<(), XlsxError> {
-            let mut part = pkg.xml("a.xml", MAX_SMALL_PART_BYTES)?;
-            let mut buf = Vec::new();
-            loop {
-                if matches!(next_event(&mut part, &mut buf)?, Event::Eof) {
-                    return Ok(());
-                }
-            }
-        };
-        // 1,000 bytes declared, 1,500 allowed in all: once is fine, twice is not.
-        drain(&mut pkg).unwrap();
+    async fn a_part_may_be_read_five_times_the_sample_the_run_and_three_restarts() {
+        let bytes = build(&[Entry::stored("a.xml", b"<a/>")]);
+        let mut pkg = package_of(bytes, &XlsxLimits::default()).await.unwrap();
+        for _ in 0..MAX_READS_PER_PART {
+            assert!(pkg.xml("a.xml", MAX_SMALL_PART_BYTES).is_ok());
+        }
         assert_eq!(
-            drain(&mut pkg),
-            Err(XlsxError::Archive(ArchiveError::TotalTooLarge))
+            pkg.xml("a.xml", MAX_SMALL_PART_BYTES).err(),
+            Some(XlsxError::Archive(ArchiveError::TotalTooLarge))
+        );
+        // Another part has reads of its own.
+        let bytes = build(&[
+            Entry::stored("a.xml", b"<a/>"),
+            Entry::stored("b.xml", b"<b/>"),
+        ]);
+        let mut pkg = package_of(bytes, &XlsxLimits::default()).await.unwrap();
+        for _ in 0..MAX_READS_PER_PART {
+            pkg.xml("a.xml", MAX_SMALL_PART_BYTES).unwrap();
+        }
+        assert!(pkg.xml("b.xml", MAX_SMALL_PART_BYTES).is_ok());
+        // The reads a conversion makes of one sheet (a sample, a run, three restarts) fit.
+        assert_eq!(
+            MAX_READS_PER_PART as usize,
+            2 + crate::tabular_prepare::convert::MAX_RESTARTS
         );
     }
 
