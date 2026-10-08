@@ -29,6 +29,8 @@ pub enum Cap {
     Bytes,
     #[error("the workbook has more sheets than the limit")]
     Sheets,
+    #[error("the table lists of the sheets do not fit the registry row")]
+    TableList,
     #[error("the workbook's shared strings are over the limit")]
     SharedStrings,
     #[error("a sheet has more rows than the limit")]
@@ -128,7 +130,8 @@ impl Seek for Spooled {
     }
 }
 
-fn temp_file(dir: &Path) -> io::Result<(File, Option<PathBuf>)> {
+/// A new file in `dir`, readable and writable by its owner only, and its path.
+fn temp_file(dir: &Path) -> io::Result<(File, PathBuf)> {
     let path = dir.join(format!("colmena-xlsx-{}.tmp", uuid::Uuid::new_v4()));
     let mut options = OpenOptions::new();
     options.read(true).write(true).create_new(true);
@@ -138,13 +141,7 @@ fn temp_file(dir: &Path) -> io::Result<(File, Option<PathBuf>)> {
         options.mode(0o600);
     }
     let file = options.open(&path)?;
-    #[cfg(unix)]
-    {
-        std::fs::remove_file(&path)?;
-        Ok((file, None))
-    }
-    #[cfg(not(unix))]
-    Ok((file, Some(path)))
+    Ok((file, path))
 }
 
 /// Writes `stream` to a temporary file in `dir`, at most `cap` bytes. `declared`
@@ -163,12 +160,24 @@ pub async fn spool_stream(
         return Err(XlsxError::TooLarge(Cap::Bytes));
     }
     let (file, path) = temp_file(dir).map_err(|_| XlsxError::Local)?;
+    // The guard exists before anything else can fail, so no failure below leaks the
+    // file: its drop removes the path. On Unix the file is unlinked at once, so it
+    // cannot outlive the process either; if that fails the path stays set and the
+    // drop retries it.
     let mut guard = Spooled {
-        file: file.try_clone().map_err(|_| XlsxError::Local)?,
-        path,
+        file,
+        path: Some(path),
         len: 0,
     };
-    let mut out = tokio::fs::File::from_std(file);
+    #[cfg(unix)]
+    if guard
+        .path
+        .as_ref()
+        .is_some_and(|p| std::fs::remove_file(p).is_ok())
+    {
+        guard.path = None;
+    }
+    let mut out = tokio::fs::File::from_std(guard.file.try_clone().map_err(|_| XlsxError::Local)?);
     read.store(0, Ordering::Relaxed);
     loop {
         let next = tokio::select! {

@@ -24,14 +24,15 @@ use crate::tabular_prepare::convert::{
 };
 use crate::tabular_prepare::csv::Encoding;
 use crate::tabular_prepare::manifest::{
-    min_tables_json_len, part_path, ColumnType, ManifestError, TABLES_JSON_MAX_BYTES,
+    min_tables_json_len, part_path, unique_table_names, ColumnType, Manifest, ManifestError,
+    SkippedSheet, TableInfo, SKIPPED_HEADER_ROW, TABLES_JSON_MAX_BYTES,
 };
 use crate::tabular_prepare::part_sink::PartSink;
 use crate::tabular_prepare::writer::WriterConfig;
 use crate::tabular_prepare::xlsx_package::XlsxLimits;
 use crate::tabular_prepare::xlsx_run::{open_book, run_sheet, sample_sheet, Plan, RunEnd};
 use crate::tabular_prepare::xlsx_sheet::SheetLimits;
-use crate::tabular_prepare::xlsx_spool::{Invalid, Spooled, XlsxError};
+use crate::tabular_prepare::xlsx_spool::{Cap, Invalid, Spooled, XlsxError};
 use async_trait::async_trait;
 use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex};
@@ -44,6 +45,23 @@ pub trait XlsxSource: Send + Sync {
     /// The workbook in a local file. `cancel` is cancelled when the conversion is
     /// dropped or cancelled.
     async fn spool(&self, cancel: &CancellationToken) -> Result<Spooled, XlsxError>;
+}
+
+/// What a workbook became: a table per sheet that has a value, and the sheets that
+/// are not tables for want of a header. Derefs to the tables.
+#[derive(Debug)]
+pub struct Converted {
+    pub tables: Vec<SheetTable>,
+    /// Sheets skipped (see [`SKIPPED_HEADER_ROW`]); their names cleaned.
+    pub skipped: Vec<SkippedSheet>,
+}
+
+impl std::ops::Deref for Converted {
+    type Target = [SheetTable];
+
+    fn deref(&self) -> &[SheetTable] {
+        &self.tables
+    }
 }
 
 /// A table that was written, with the name of its sheet.
@@ -69,7 +87,7 @@ pub async fn convert_xlsx(
     sink: Arc<dyn PartSink>,
     cfg: WriterConfig,
     control: &Arc<ConvertControl>,
-) -> Result<Vec<SheetTable>, TableFailure> {
+) -> Result<Converted, TableFailure> {
     convert_xlsx_limits(source, sink, cfg, control, &Limits::default()).await
 }
 
@@ -79,7 +97,7 @@ pub(crate) async fn convert_xlsx_limits(
     cfg: WriterConfig,
     control: &Arc<ConvertControl>,
     limits: &Limits,
-) -> Result<Vec<SheetTable>, TableFailure> {
+) -> Result<Converted, TableFailure> {
     // A child of the caller's token, cancelled when this future is dropped.
     let cancel = control.token().child_token();
     let _stop_on_drop = cancel.clone().drop_guard();
@@ -102,6 +120,7 @@ pub(crate) async fn convert_xlsx_limits(
     let book = Arc::new(Mutex::new(book));
 
     let mut tables: Vec<SheetTable> = Vec::new();
+    let mut skipped: Vec<SkippedSheet> = Vec::new();
     for sheet in &sheets {
         // The cell limit is the job's: the book counts every cell any read of it
         // reads, so sampling, runs, restarts and skipped sheets all count.
@@ -114,7 +133,20 @@ pub(crate) async fn convert_xlsx_limits(
             })
             .await
             .map_err(panicked)?
-            .map_err(|e| fail(e.into()))?
+        };
+        let sample = match sample {
+            Ok(sample) => sample,
+            // A header narrower than a row of the sample: this sheet has no names
+            // for its columns, but the others still do. Skipped, and said so.
+            Err(XlsxError::Invalid(Invalid::BeyondHeader)) => {
+                let name = unique_table_names(&[sheet.name.as_str()]).remove(0);
+                skipped.push(SkippedSheet {
+                    sheet: name,
+                    reason: SKIPPED_HEADER_ROW.to_string(),
+                });
+                continue;
+            }
+            Err(e) => return Err(fail(e.into())),
         };
         let Some(sample) = sample else { continue };
         // Fail now, not after the whole sheet, when even the smallest possible
@@ -212,11 +244,31 @@ pub(crate) async fn convert_xlsx_limits(
                 stale_paths,
             },
         });
+        // The table lists of all the sheets share one registry row: say so now, with
+        // its own sentence, not after the last sheet.
+        let infos: Vec<TableInfo> = tables
+            .iter()
+            .map(|t| TableInfo {
+                name: t.sheet.clone(),
+                rows: t.table.written.rows,
+                parts: t.table.written.parts,
+                columns: t.table.written.columns.clone(),
+            })
+            .collect();
+        if Manifest::new(infos).tables_json().is_err() {
+            return Err(fail(XlsxError::TooLarge(Cap::TableList).into()));
+        }
     }
     if tables.is_empty() {
-        return Err(fail(XlsxError::Invalid(Invalid::NoData).into()));
+        // Every sheet with a value was skipped: say why the first one was.
+        let why = if skipped.is_empty() {
+            Invalid::NoData
+        } else {
+            Invalid::BeyondHeader
+        };
+        return Err(fail(XlsxError::Invalid(why).into()));
     }
-    Ok(tables)
+    Ok(Converted { tables, skipped })
 }
 
 #[cfg(test)]
@@ -243,9 +295,9 @@ mod tests {
         }
     }
 
-    type Converted = Result<Vec<SheetTable>, TableFailure>;
+    type Outcome = Result<Converted, TableFailure>;
 
-    async fn convert(bytes: Vec<u8>) -> (Converted, Arc<MemorySink>) {
+    async fn convert(bytes: Vec<u8>) -> (Outcome, Arc<MemorySink>) {
         convert_with(bytes, WriterConfig::default(), &Limits::default()).await
     }
 
@@ -253,7 +305,7 @@ mod tests {
         bytes: Vec<u8>,
         cfg: WriterConfig,
         limits: &Limits,
-    ) -> (Converted, Arc<MemorySink>) {
+    ) -> (Outcome, Arc<MemorySink>) {
         let sink = Arc::new(MemorySink::default());
         let control = ConvertControl::new();
         let result = convert_xlsx_limits(
@@ -649,6 +701,114 @@ mod tests {
                 ["12345678901234567", "12345678901234567"],
                 ["12345678901234568", "1.5"]
             ]
+        );
+    }
+
+    /// A sheet with a title above its table: the first row with a value has one cell
+    /// and the next has two.
+    fn titled() -> String {
+        [
+            row(1, &[text("A", 1, "Quarterly report")]),
+            row(2, &[text("A", 2, "id"), text("B", 2, "name")]),
+            row(3, &[num("A", 3, 1), text("B", 3, "a")]),
+        ]
+        .concat()
+    }
+
+    fn plain() -> String {
+        [
+            row(1, &[text("A", 1, "id"), text("B", 1, "name")]),
+            row(2, &[num("A", 2, 1), text("B", 2, "a")]),
+        ]
+        .concat()
+    }
+
+    #[tokio::test]
+    async fn a_sheet_without_a_header_is_skipped_and_the_others_survive() {
+        let book = Wb::new()
+            .sheet("Title sheet", &titled())
+            .sheet("Data", &plain())
+            .build();
+        let (result, sink) = convert(book).await;
+        let converted = result.unwrap();
+        let names: Vec<_> = converted.iter().map(|t| t.sheet.as_str()).collect();
+        assert_eq!(names, ["Data"]);
+        assert_eq!(converted.skipped.len(), 1);
+        assert_eq!(converted.skipped[0].sheet, "Title sheet");
+        assert_eq!(converted.skipped[0].reason, "header_row");
+        // The skipped sheet wrote nothing: the table that survived is table 0.
+        assert_eq!(sink.paths(), ["t0/part-00000.parquet".to_string()]);
+        // Every sheet with a value skipped: the file is refused, saying why.
+        let (result, _) = convert(Wb::new().sheet("Only", &titled()).build()).await;
+        let failure = result.err().unwrap();
+        assert!(matches!(
+            failure.error,
+            TableError::Xlsx(XlsxError::Invalid(Invalid::BeyondHeader))
+        ));
+        // A ragged row after the 10,000 the sample reads is not skipped: parts of the
+        // sheet exist by then, so the whole file fails (the stated limit of the rule).
+        let mut rows = vec![row(1, &[text("A", 1, "n")])];
+        rows.extend((2..=10_010).map(|r| row(r, &[num("A", r, r)])));
+        rows.push(row(
+            10_011,
+            &[num("A", 10_011, 1), text("B", 10_011, "stray")],
+        ));
+        let (result, _) = convert(Wb::new().sheet("Late", &rows.concat()).build()).await;
+        assert!(matches!(
+            result.err().unwrap().error,
+            TableError::Xlsx(XlsxError::Invalid(Invalid::BeyondHeader))
+        ));
+    }
+
+    #[tokio::test]
+    async fn the_table_lists_of_many_sheets_fail_early_with_their_own_error() {
+        // 24 sheets of 40 columns: about 3.5 KiB of table list each, so the 64 KiB of
+        // the registry row runs out around the 19th sheet, not at the end.
+        let sheet = |n: usize| {
+            let header: String = (0..40)
+                .map(|c| {
+                    text(
+                        &format!(
+                            "{}{}",
+                            (b'A' + (c / 26) as u8) as char,
+                            (b'A' + (c % 26) as u8) as char
+                        ),
+                        1,
+                        &format!("column {n} {c}"),
+                    )
+                })
+                .collect();
+            let data: String = (0..40)
+                .map(|c| {
+                    num(
+                        &format!(
+                            "{}{}",
+                            (b'A' + (c / 26) as u8) as char,
+                            (b'A' + (c % 26) as u8) as char
+                        ),
+                        2,
+                        c,
+                    )
+                })
+                .collect();
+            format!("<row r=\"1\">{header}</row><row r=\"2\">{data}</row>")
+        };
+        let mut book = Wb::new();
+        for n in 0..24 {
+            book = book.sheet(&format!("S{n}"), &sheet(n));
+        }
+        let (result, sink) = convert(book.build()).await;
+        let failure = result.err().unwrap();
+        assert!(matches!(
+            failure.error,
+            TableError::Xlsx(XlsxError::TooLarge(
+                crate::tabular_prepare::xlsx_spool::Cap::TableList
+            ))
+        ));
+        assert!(
+            sink.paths().len() < 24,
+            "{} sheets written",
+            sink.paths().len()
         );
     }
 }

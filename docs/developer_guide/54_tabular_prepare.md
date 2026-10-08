@@ -1130,6 +1130,25 @@ keeps every value as it would be shown: a number is its shortest exact decimal f
 its rows and closes one at the CSV reader's bounds (8,192 rows, 1,000,000 cells or 8 MiB of
 text), so a wide or text-heavy sheet gets shorter batches.
 
+**A sheet with no header does not discard the workbook.** The header is the first row that has
+a value. When a later row of the first 10,000 has a value past its last column (a title cell
+above the table, say), that sheet has no names for its columns: it is **skipped, and the manifest
+says so** in an optional `skipped` list (`sheet`, the cleaned name, and `reason: "header_row"`),
+absent for a CSV. The other sheets are converted. If every sheet with a value is skipped the file
+is refused (`unreadable_file`: a row has a value past the last column of the header). The limit of
+the rule: it applies to what the sampling read sees; a ragged row after those 10,000 rows is found
+while parts are being written and fails the whole file. A reader that parses the manifest strictly
+must accept the new key (it is optional and appears only when a sheet was skipped).
+
+**Names.** Table and column names have Unicode format characters (category Cf: bidirectional
+overrides, zero-width characters, the byte order mark) replaced by `_` as control characters
+are, and the manifest refuses them. Known limit, shared with the CSV and not changed: column names
+are made unique case-sensitively (`a` and `A` are two columns) while table names ignore case.
+
+**The table list of a workbook** is checked after every sheet against the 64 KiB registry row, so
+many sheets fail early, with their own sentence (`table_too_large`: the table lists of all the
+sheets do not fit the registry row; export fewer sheets or columns).
+
 ### Converting the workbook (`xlsx_convert.rs`)
 
 `convert_xlsx` turns a workbook into one table per sheet that holds a value, through the same
