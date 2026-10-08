@@ -463,7 +463,7 @@ output = res
 
 /// What the program is, has and can do is the same with or without mounts: user,
 /// groups, capabilities, `no_new_privs`, seccomp mode, environment, limits,
-/// network and working directory. Only `/data` is added.
+/// network and working directory. Only `/data` and `/out` are added.
 #[tokio::test]
 async fn a_call_with_mounts_is_otherwise_the_same_sandbox() {
     let Some(root) = Root::new() else { return };
@@ -487,7 +487,7 @@ output = {
   'ifaces': sorted(l.split(':')[0].strip() for l in open('/proc/net/dev').read().splitlines()[2:]),
   'cwd': os.getcwd(),
   'tmp': os.statvfs('/tmp').f_blocks,
-  'root': [d for d in sorted(os.listdir('/')) if d != 'data'],
+  'root': [d for d in sorted(os.listdir('/')) if d not in ('data', 'out')],
 }
 "#;
     let plain = run_plain(&ex, code).await.unwrap();
@@ -593,12 +593,188 @@ async fn the_staging_root_is_hidden_from_a_call_without_mounts() {
     let staged = StagedCall::create(&root.path, 1).unwrap();
     std::fs::write(staged.data_dir().join("a.txt"), "hello").unwrap();
     let code = format!(
-        "import os\nroot = {:?}\noutput = [os.listdir(root), os.path.exists(root + '/' + {:?}), os.listdir('/data') if os.path.exists('/data') else [], os.path.exists('/out')]",
+        "import os\nroot = {:?}\noutput = [os.listdir(root), os.path.exists(root + '/' + {:?}), os.listdir('/data') if os.path.exists('/data') else [], os.listdir('/out') if os.path.exists('/out') else []]",
         root.path.to_str().unwrap(),
         staged.id()
     );
     let out = run_plain(&ex, &code).await.unwrap();
-    assert_eq!(out, json!([[], false, [], false]));
+    assert_eq!(out, json!([[], false, [], []]));
+}
+
+// ---------------------------------------------------------------------------
+// The output volume, from inside.
+// ---------------------------------------------------------------------------
+
+/// `/out` takes files, the trusted side finds them where it staged them, and the
+/// next call starts with an empty one.
+#[tokio::test]
+async fn out_is_writable_and_private_to_each_call() {
+    let Some(root) = Root::new() else { return };
+    let ex = executor(Some(&root));
+    let first = StagedCall::create(&root.path, 2).unwrap();
+    let write = "import os\nopen('/out/result.csv', 'w').write('a,b\\n1,2\\n')\noutput = os.listdir('/out')";
+    let out = run_staged(&ex, first.mounts(), write).await.unwrap();
+    assert_eq!(out, json!(["result.csv"]));
+    let seen = std::fs::read_to_string(first.out_dir().join("result.csv")).unwrap();
+    assert_eq!(seen, "a,b\n1,2\n");
+    let second = StagedCall::create(&root.path, 2).unwrap();
+    let list = "import os\noutput = os.listdir('/out')";
+    assert_eq!(
+        run_staged(&ex, second.mounts(), list).await.unwrap(),
+        json!([])
+    );
+}
+
+/// The volume is the one the trusted side sized: its flags, its size and the
+/// limits on one file and on the number of files, as the program sees them.
+#[tokio::test]
+async fn out_is_bounded_and_mounted_nosuid_nodev_noexec() {
+    let Some(root) = Root::new() else { return };
+    let ex = executor(Some(&root));
+    let staged = StagedCall::create(&root.path, 2).unwrap();
+    let code = r#"
+import os, errno
+st = os.statvfs('/out')
+def attempt(f):
+    try:
+        f()
+        return 'done'
+    except OSError as e:
+        return errno.errorcode.get(e.errno, e.errno)
+def big():
+    with open('/out/big', 'wb') as f:
+        f.write(b'x' * (3 << 20))
+def many():
+    for i in range(2000):
+        open('/out/f%d' % i, 'w').close()
+output = {
+  'flags': [bool(st.f_flag & x) for x in (os.ST_RDONLY, os.ST_NOSUID, os.ST_NODEV, os.ST_NOEXEC)],
+  'size': st.f_blocks * st.f_frsize,
+  'big': attempt(big),
+  'many': attempt(many),
+  'mknod': attempt(lambda: os.mknod('/out/dev', 0o600 | 0o020000, os.makedev(1, 3))),
+  'hardlink_from_data': attempt(lambda: os.link('/data/a.txt', '/out/h')),
+}
+"#;
+    std::fs::write(staged.data_dir().join("a.txt"), "hello").unwrap();
+    let out = run_staged(&ex, staged.mounts(), code).await.unwrap();
+    assert_eq!(
+        out,
+        json!({"flags": [false, true, true, true], "size": 2 << 20, "big": "ENOSPC",
+               "many": "ENOSPC", "mknod": "EPERM", "hardlink_from_data": "EXDEV"})
+    );
+}
+
+/// Nothing the program wrote is followed on the trusted side: a link it left
+/// pointing at a directory of the trusted side leaves that directory alone when
+/// the call is released.
+#[tokio::test]
+async fn a_link_left_in_out_is_never_followed_by_the_cleanup() {
+    let Some(root) = Root::new() else { return };
+    let ex = executor(Some(&root));
+    let trusted = root.path.join(unique("trusted"));
+    let _scrap = Scrap(trusted.clone());
+    std::fs::create_dir(&trusted).unwrap();
+    std::fs::write(trusted.join("canary"), "keep").unwrap();
+    let staged = StagedCall::create(&root.path, 1).unwrap();
+    let code = format!(
+        "import os\nos.symlink({:?}, '/out/to_trusted')\nos.symlink('/data', '/out/to_data')\noutput = sorted(os.listdir('/out'))",
+        trusted.to_str().unwrap()
+    );
+    let out = run_staged(&ex, staged.mounts(), &code).await.unwrap();
+    assert_eq!(out, json!(["to_data", "to_trusted"]));
+    drop(staged);
+    assert_eq!(
+        std::fs::read_to_string(trusted.join("canary")).unwrap(),
+        "keep"
+    );
+}
+
+/// `/out` cannot be remounted with fewer restrictions or unmounted either.
+#[tokio::test]
+async fn out_cannot_be_remounted_or_unmounted() {
+    let Some(root) = Root::new() else { return };
+    let ex = executor(Some(&root));
+    let staged = StagedCall::create(&root.path, 1).unwrap();
+    let code = r#"
+import ctypes, os, errno
+libc = ctypes.CDLL(None, use_errno=True)
+def err(rc):
+    return 'ok' if rc == 0 else errno.errorcode.get(ctypes.get_errno(), ctypes.get_errno())
+MS_REMOUNT, MS_BIND = 32, 4096
+output = {
+  'remount_exec': err(libc.mount(b'', b'/out', None, MS_REMOUNT | MS_BIND, None)),
+  'umount': err(libc.umount2(b'/out', 0)),
+  'tmpfs_over': err(libc.mount(b'tmpfs', b'/out', b'tmpfs', 0, None)),
+  'noexec_still': bool(os.statvfs('/out').f_flag & os.ST_NOEXEC),
+}
+"#;
+    let out = run_staged(&ex, staged.mounts(), code).await.unwrap();
+    assert_eq!(
+        out,
+        json!({"remount_exec": "EPERM", "umount": "EPERM", "tmpfs_over": "EPERM",
+               "noexec_still": true})
+    );
+}
+
+/// An output the jail cannot vouch for ends the call before any code runs: a
+/// bound smaller than the volume really is, and an output that is only a
+/// directory on the staging volume.
+#[tokio::test]
+async fn an_output_that_is_not_a_bound_volume_ends_the_call() {
+    let Some(root) = Root::new() else { return };
+    let ex = executor(Some(&root));
+    let staged = StagedCall::create(&root.path, 2).unwrap();
+    let mut too_small = staged.mounts();
+    too_small.out_mb = 1;
+    let err = run_staged(&ex, too_small, "output = 1").await.unwrap_err();
+    assert_eq!(err.to_string(), CRASHED_MESSAGE);
+    // A plain directory where the volume should be.
+    let plain_id = unique("plain");
+    let plain = root.path.join(&plain_id);
+    let _scrap = Scrap(plain.clone());
+    for d in ["", "data", "out"] {
+        std::fs::create_dir_all(plain.join(d)).unwrap();
+    }
+    std::fs::set_permissions(&plain, Permissions::from_mode(0o700)).unwrap();
+    let mounts = CallMounts {
+        stage_id: plain_id.clone(),
+        out_mb: 1,
+    };
+    let err = run_staged(&ex, mounts, "output = 1").await.unwrap_err();
+    assert_eq!(err.to_string(), CRASHED_MESSAGE);
+}
+
+/// The file size limit follows the output volume for a call with mounts and
+/// nothing else changes: `/tmp` stays a 64 MiB volume, and a call without mounts
+/// keeps 64 MiB.
+#[tokio::test]
+async fn only_the_file_size_limit_follows_the_output_volume() {
+    let Some(root) = Root::new() else { return };
+    let ex = executor(Some(&root));
+    let staged = StagedCall::create(&root.path, 100).unwrap();
+    let code = r#"
+import os, resource, errno
+def attempt(path, mb):
+    try:
+        with open(path, 'wb') as f:
+            f.write(b'x' * (mb << 20))
+        return 'done'
+    except OSError as e:
+        return errno.errorcode.get(e.errno, e.errno)
+output = {
+  'fsize_mb': resource.getrlimit(resource.RLIMIT_FSIZE)[1] >> 20,
+  'tmp_65': attempt('/tmp/big', 65),
+  'out_80': attempt('/out/big', 80) if os.path.exists('/out') else 'no out',
+}
+"#;
+    let with = run_staged(&ex, staged.mounts(), code).await.unwrap();
+    assert_eq!(
+        with,
+        json!({"fsize_mb": 100, "tmp_65": "ENOSPC", "out_80": "done"})
+    );
+    let limit = "import resource\noutput = resource.getrlimit(resource.RLIMIT_FSIZE)[1] >> 20";
+    assert_eq!(run_plain(&ex, limit).await.unwrap(), json!(64));
 }
 
 // ---------------------------------------------------------------------------
