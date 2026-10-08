@@ -1,7 +1,10 @@
 # Python sandbox: run mounts (review note for the sandbox owner)
 
-Status: built, local only, not delivered. Dark behind `COLMENA_LARGE_TABULAR`. Nothing in the engine calls the new
-paths yet (the protocol, prelude and routing work come later), so no existing call changes. This note is for the person
+Status: built, local only, not delivered. Dark behind `COLMENA_LARGE_TABULAR`. The engine's own calls do not use the
+new paths yet (the protocol, prelude and routing work come later), so no existing call changes; BUT the host
+(`Dispatcher::build`) and `python_executor serve` now build their subprocess executor with `new_for_serving`, which, when
+a staging root is configured (switch on AND the directory set), sweeps that root before serving: it unmounts and removes
+call directories left by a killed predecessor. With the switch off nothing is swept. This note is for the person
 who signs off the jail change; the developer-facing description is in
 [53_python_executors.md](../developer_guide/53_python_executors.md#run-staging-directories-linux-dark).
 
@@ -14,8 +17,8 @@ filter denies `mount`, `umount2`, `unshare`, `setns`, `pivot_root`, `chroot` but
 not cleared either. Both are as they were before this change. Two blind reviewers independently asked for the seven
 calls to be added to the denylist as defence in depth. That edit touches `seccomp.rs`, which this unit was told not to
 change, so it was NOT made and no claim is made that it would not alter anything else. Tests prove today's behaviour
-only: the four of them that a kernel has (`fsopen`, `open_tree`, `mount_setattr`, `move_mount`) fail with `EPERM` from
-inside (`ENOSYS` would be accepted only for a kernel without the API, and only because the capability sets are asserted
+only: four of the seven (`fsopen`, `open_tree`, `mount_setattr`, `move_mount`) are exercised and fail with `EPERM` from
+inside; the other three (`fsconfig`, `fsmount`, `fspick`) exist and are NOT exercised (`ENOSYS` would be accepted only for a kernel without the API, and only because the capability sets are asserted
 empty in the same test). Decision for the sandbox owner: add the seven calls to the denylist (and its test), clear the
 bounding set, or accept the capability drop as the only barrier.
 
@@ -43,12 +46,12 @@ executor with a staging root. "Mounts" = a call that asks for them.
 | `RLIMIT_FSIZE` | `tmp_mb` (64 MiB) | same | same | `max(tmp_mb, verified volume size)`, from the volume the jail checked, not from the header |
 | `/tmp` | private tmpfs 64 MiB, `nosuid,nodev` | same | same | same |
 | `/proc`, hidden paths | fresh proc `hidepid=invisible`; `DEFAULT_HIDDEN` + configured | same | + staging root covered | + staging root covered |
-| Other calls' mounts in the call's namespace | n/a | n/a | detached | detached (own binds kept) |
+| Mounts below the staging root in the call's namespace | n/a | n/a | all detached | all detached, this call's own volume at its staging path included (only the `/data` and `/out` binds survive) |
 | `/data` | absent | absent | absent (an empty directory persists after the first mounted call, see Q1) | bind of the call's `data`, ro,nosuid,nodev,noexec, flags read back |
 | `/out` | absent | absent | same as `/data` | bind of the call's own tmpfs, rw,nosuid,nodev,noexec |
 | Output size | n/a | n/a | n/a | 1 to 1,024 MiB (`OUT_MB_MAX`), checked at creation and again in the jail, before any mount |
 | Output volume checks in the jail | n/a | n/a | n/a | tmpfs, size <= declared, inodes <= 1,024, mount root, not the call directory's volume |
-| Staged volumes in flight | n/a | n/a | n/a | at most 2 volumes and 2,048 MiB in total per executor (see Budget) |
+| Staged volumes in flight | n/a | n/a | n/a | at most 2 volumes and 2,048 MiB in total per executor, enforced ONLY through `SubprocessExecutor::stage_call`; `StagedCall::create` and `run_staged(CallMounts)` are public and unbudgeted (see Budget) |
 | Environment | `PATH`, 3 thread variables, host locale | same | + `ARROW_DEFAULT_MEMORY_POOL=system`, `ARROW_IO_THREADS=1` | same as Plain |
 | Call header | 4 fields | same bytes | same bytes | + `mounts {stage_id, out_mb}` |
 | Jail spec | 3 fields | same bytes | + `staging_root` | same |
@@ -67,7 +70,9 @@ executor with a staging root. "Mounts" = a call that asks for them.
 
 All four are estimates. The tmpfs is memory and counts against the instance budget; spike item 5 (instance memory,
 concurrency) has not been measured, so the final values of the budget and the ceiling still need it. A request over the
-budget gets a typed `StageError::OverBudget` and mounts nothing.
+budget gets a typed `StageError::OverBudget` and mounts nothing. The budget is NOT enforced by visibility: the tests and any
+caller can still call `StagedCall::create` or `run_staged` directly, so the unit that wires the protocol must use
+`stage_call`. A share is not given back when the volume could not be unmounted (it still holds its memory).
 
 ## Evidence that the unchanged things are unchanged
 
@@ -94,8 +99,8 @@ descriptor reaching the sandbox). They agreed on ten items. The fixes are stacke
 
 | # | Finding | Resolution | Proof |
 |---|---|---|---|
-| S1 | `out_mb` unvalidated: 0 mounts an unlimited tmpfs; `RLIMIT_FSIZE` from the header; no bound on concurrent volumes | 1 to 1,024 MiB checked at creation and in the jail before any mount; file limit from the verified volume; per-executor budget with a typed error | `an_invalid_output_size_makes_nothing`, `a_header_with_an_invalid_output_size_ends_the_call`, `the_file_limit_follows_the_verified_volume_not_the_header`, `the_executor_refuses_staged_calls_over_its_budget`, budget unit tests |
-| S2 | every call's namespace copies every other live call's `/out` | the jail detaches every mount below the staging root (deepest first) before covering it; a mount that vanished meanwhile is ignored | `a_call_does_not_see_other_calls_mounts`, `calls_start_correctly_while_other_calls_come_and_go`. The claim that pages stay pinned could NOT be reproduced here (see below) |
+| S1 | `out_mb` unvalidated: 0 mounts an unlimited tmpfs; `RLIMIT_FSIZE` from the header; no bound on concurrent volumes | 1 to 1,024 MiB checked at creation and in the jail before any mount; file limit from the verified volume; per-executor budget with a typed error | `an_invalid_output_size_makes_nothing`, `a_header_with_an_invalid_output_size_ends_the_call`, `the_file_limit_follows_the_verified_volume_not_the_header`, `the_executor_refuses_staged_calls_over_its_budget`, budget unit tests. The ordering "refused before any path is opened or anything mounted" is proven by `an_invalid_output_size_is_refused_before_any_path_is_opened` and `creation_refuses_an_invalid_size_before_touching_the_root` (against a root that does not exist: `InvalidInput`, not `NotFound`), not by the end-to-end header test, which `judge_out_volume` would also satisfy |
+| S2 | every call's namespace copies every other live call's `/out` | the jail detaches EVERY mount below the staging root (this call's own volume at its staging path too; deepest first) before covering it; a mount whose path vanished meanwhile (ENOENT/EINVAL) is ignored: that branch IS reached (56 ENOENT hits in one full run of the suite, counted once with a temporary probe), though no test asserts it on purpose | `a_call_does_not_see_other_calls_mounts`, `calls_start_correctly_while_other_calls_come_and_go`. The claim that pages stay pinned could NOT be reproduced here (see below) |
 | S3 | `check_out_volume` checked only size and device | tmpfs type, size, inode bound, mount root, not the call directory's volume; self-test probes the inode limit | `the_output_volume_is_judged_fact_by_fact`, `real_volumes_that_miss_one_fact_are_refused`, self-test unit tests |
 | S4 | `staging_root_hidden` passed when the listing failed | the layer proves the cover (empty read-only tmpfs, listed successfully); a listing failure fails it | `the_staging_probe_proves_the_cover_and_does_not_read_a_failure_as_one`, and the self-test fails when the jail does not cover the root |
 | S5 | tests that did not prove what they said | swap test now runs the real `open_staged` and `bind_dir` and swaps the path between them; mount API helper clears errno and treats `rc >= 0` as success; same-sandbox test order independent and compares a 100 MiB file limit | `a_path_swapped_between_the_walk_and_the_bind_binds_the_original`, `data_cannot_be_remounted_unmounted_or_replaced`, `a_call_with_mounts_is_otherwise_the_same_sandbox` |
@@ -129,7 +134,7 @@ Docker container and a named test failed; "not mutated" = no mutation was run.
 | Output shared between calls | own tmpfs per call | `out_is_writable_and_private_to_each_call` | not mutated |
 | Output cleaned afterwards | unmount, then remove; failures logged | `dropping_the_call_unmounts_and_removes_everything`, `a_failed_cleanup_is_logged_with_the_call_id` | mutated: skip cleanup, never unmount, swallow the error |
 | Trusted side follows a link the program left | cleanup unmounts first | `a_link_left_in_out_is_never_followed_by_the_cleanup` | mutated |
-| Leftovers after a crash | startup sweep, no-follow | `the_sweep_reclaims_leftover_calls_and_follows_nothing`, `an_executor_about_to_serve_sweeps_its_root`; `out_is_still_mounted` unit test | mutated: no unmount, follow a link inside, no sweep at start, still-mounted judgement. The "volume that cannot be detached is left in place" branch is covered by the unit test of its judgement only: a mount that `MNT_DETACH` refuses could not be built |
+| Leftovers after a crash | startup sweep, no-follow | `the_sweep_reclaims_leftover_calls_and_follows_nothing`, `an_executor_about_to_serve_sweeps_its_root`; `out_is_still_mounted` unit test | mutated: no unmount, follow a link inside, no sweep at start, still-mounted judgement. An `out` that cannot be opened for any reason but ENOENT is left in place (`the_sweep_leaves_a_call_whose_out_it_cannot_open`, `only_a_missing_out_means_nothing_to_unmount`). The "volume that cannot be detached is left in place" branch is covered by the unit test of its judgement only: a mount that `MNT_DETACH` refuses could not be built |
 | Larger file limit leaks to other calls | only for mounts calls, from the verified volume | `only_the_file_size_limit_follows_the_output_volume`, `the_file_limit_follows_the_verified_volume_not_the_header` | mutated |
 | Feature visible with the switch off | gate on switch and staging dir | `config::staging_tests` (macOS and Linux), byte tests in `child.rs`, `jail.rs` | mutated: ignore the switch, serialise always |
 | Mounts asked for without a staging root | refused before a child starts | `mounts_without_a_staging_root_are_refused` | mutated |
@@ -177,12 +182,13 @@ Not done in this unit: nothing here reads `/out` on the trusted side.
 
 ## Deployment requirements
 
+- A staging root BELOW a path the jail covers (`/mnt`, `/srv`, `/run`, `/home`, `/root`, `/var/tmp`, `/app`, `/dev/shm`, a configured hidden path or `/tmp`: a Cloud Run volume is normally under `/mnt`) is supported: inside the jail it does not exist, and that counts as hidden only when the nearest covered ancestor is proven to be the cover (`a_staging_root_below_a_covered_path_enables_mounts` runs a self-test and a real mounts call with roots under `/mnt` and `/tmp`). Before this was fixed such a root disabled mounts with a misleading `mount_layer_failed`.
 - The staging root must be the staging volume's OWN mount point (a tmpfs or a volume mounted for this executor), so that
   its contents cannot be shared with anything else and the cover the jail puts over it hides only staged data.
 - Its owner must be the executor's user (root) and its mode `0700` (no group or other access). The call directories the
   trusted side creates are `0700` (call) and `0755` (`data`, readable by the slot user through the bind); the jail refuses
   a call directory or `data` directory that is not owned by the executor or is writable by group or others.
-- One executor per staging root: the startup sweep cannot tell a leftover from a call in flight.
+- One executor per staging root: the startup sweep cannot tell a leftover from a call in flight. This is documented, NOT enforced (see the open questions).
 - If the volume is persistent, the prepared customer data of a call that was killed stays on it until the next start of
   an executor with that root, which sweeps it; a tmpfs volume vanishes with the instance. Mounted output volumes do not
   survive a restart of the container (their namespace is gone).
@@ -198,6 +204,9 @@ Not built here (later slices): filling `data` and the `/v2/run` protocol (C6), t
 `out` on the trusted side (C8), the executor image and staging volume (A4).
 
 ## Other open questions for the sandbox owner
+
+- CI installs no pyarrow (S8): a template with pyarrow loaded and a Parquet read through `/data` never run in CI, only in the Docker run. Install it in the job (a workflow change, not made) or accept that?
+- One executor per staging root is documented but NOT enforced: a second root process started with the same staging directory would sweep the first one's in-flight calls (and unmount their volumes) at its start. A lock file or a per-process subdirectory would enforce it; not done.
 
 1. Mount points. `/data` and `/out` are created by the jail in the root filesystem when absent (a link or file there is
    refused; calls racing to create them are handled). They then persist, empty and not writable by the program, and later

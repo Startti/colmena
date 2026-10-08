@@ -538,6 +538,38 @@ mod tests {
         }
     }
 
+    /// The size is refused BEFORE any path is opened: against a staging root that
+    /// does not exist, an invalid size is `InvalidInput`, while a valid size gets
+    /// as far as the open and fails with `NotFound`.
+    #[test]
+    fn an_invalid_output_size_is_refused_before_any_path_is_opened() {
+        let spec = JailSpec {
+            uid_base: 1,
+            tmp_mb: 1,
+            hide_paths: vec![],
+            staging_root: Some("/nonexistent-staging-root".into()),
+        };
+        let header = |out_mb| CallHeader {
+            slot: 0,
+            memory_mb: 1,
+            cpu_secs: 1,
+            max_request_bytes: 1,
+            mounts: Some(super::super::child::CallMounts {
+                stage_id: "a".repeat(32),
+                out_mb,
+            }),
+        };
+        for bad in [
+            0,
+            crate::dag_engine::infrastructure::python_exec::staging::OUT_MB_MAX + 1,
+        ] {
+            let e = open_staged(&spec, &header(bad)).err().unwrap();
+            assert_eq!(e.kind(), io::ErrorKind::InvalidInput, "{bad}");
+        }
+        let e = open_staged(&spec, &header(1)).err().unwrap();
+        assert_eq!(e.kind(), io::ErrorKind::NotFound);
+    }
+
     /// A mount point is a directory of the jail's own root: made when missing,
     /// never a link or a file standing in its place.
     #[test]

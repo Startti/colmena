@@ -533,24 +533,64 @@ fn inodes_bounded(dir: &Path) -> bool {
 /// tmpfs, listed successfully and found empty. A path that cannot be listed (the
 /// probe runs as the slot's user, and the real directory is the executor's, mode
 /// 0700) proves nothing and fails the layer: a missing cover must not read as one.
-fn staging_hidden(root: &Path) -> LayerCheck {
+fn staging_hidden(root: &Path, covers: &[PathBuf]) -> LayerCheck {
     let layer = "staging_root_hidden";
     let held = "covered";
-    let Ok(mut entries) = std::fs::read_dir(root) else {
-        return outcome(layer, "unreadable", held);
+    let mut entries = match std::fs::read_dir(root) {
+        Ok(entries) => entries,
+        // Not there. Only that, and only when a covered ancestor is PROVEN to be
+        // the cover, is the root hidden (it lies below a path the jail covers).
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            let proven = root
+                .ancestors()
+                .skip(1)
+                .filter(|a| covers.iter().any(|c| c == a))
+                .any(is_cover_of_absent_root);
+            return outcome(layer, if proven { held } else { "unreadable" }, held);
+        }
+        Err(_) => return outcome(layer, "unreadable", held),
     };
     if entries.next().is_some() {
         return outcome(layer, "not_covered", held);
     }
-    let c = std::ffi::CString::new(root.as_os_str().as_encoded_bytes()).unwrap_or_default();
+    outcome(
+        layer,
+        if is_empty_ro_tmpfs(root) {
+            held
+        } else {
+            "not_covered"
+        },
+        held,
+    )
+}
+
+/// An empty read-only tmpfs, as `hide` makes it, that can be listed.
+fn is_empty_ro_tmpfs(dir: &Path) -> bool {
+    let Ok(mut entries) = std::fs::read_dir(dir) else {
+        return false;
+    };
+    let c = std::ffi::CString::new(dir.as_os_str().as_encoded_bytes()).unwrap_or_default();
     let mut fs: libc::statfs = unsafe { std::mem::zeroed() };
     let mut vfs: libc::statvfs = unsafe { std::mem::zeroed() };
     let read = unsafe { libc::statfs(c.as_ptr(), &mut fs) } == 0
         && unsafe { libc::statvfs(c.as_ptr(), &mut vfs) } == 0;
-    let cover = read
+    entries.next().is_none()
+        && read
         && fs.f_type as i64 == super::staging::TMPFS_MAGIC
-        && vfs.f_flag & libc::ST_RDONLY != 0;
-    outcome(layer, if cover { held } else { "not_covered" }, held)
+        && vfs.f_flag & libc::ST_RDONLY != 0
+}
+
+/// What an ancestor must be for a root below it to count as hidden by it: the
+/// jail's fresh `/tmp` (a tmpfs, whatever is not in it is absent), or the empty
+/// read-only tmpfs cover of any other covered path.
+fn is_cover_of_absent_root(ancestor: &Path) -> bool {
+    if ancestor != Path::new("/tmp") {
+        return is_empty_ro_tmpfs(ancestor);
+    }
+    let c = std::ffi::CString::new("/tmp").unwrap_or_default();
+    let mut fs: libc::statfs = unsafe { std::mem::zeroed() };
+    let read = unsafe { libc::statfs(c.as_ptr(), &mut fs) } == 0;
+    read && fs.f_type as i64 == super::staging::TMPFS_MAGIC
 }
 
 fn probe(spec: &JailSpec, before: &Before) -> Vec<LayerCheck> {
@@ -578,10 +618,12 @@ fn probe_mounts(spec: &JailSpec) -> Vec<LayerCheck> {
         .staging_root
         .as_deref()
         .unwrap_or(Path::new("/nonexistent"));
+    // Paths the jail covers: a root below one of them is not there at all.
+    let covers: Vec<PathBuf> = all_hidden(spec).chain([PathBuf::from("/tmp")]).collect();
     vec![
         data_mount(Path::new("/data")),
         out_mount(Path::new("/out")),
-        staging_hidden(root),
+        staging_hidden(root, &covers),
     ]
 }
 
@@ -901,13 +943,13 @@ mod tests {
         // An absent path or one that cannot be listed proves nothing.
         let tmp = tempfile::tempdir().unwrap();
         assert_eq!(
-            staging_hidden(&tmp.path().join("absent")).reason,
+            staging_hidden(&tmp.path().join("absent"), &[]).reason,
             "unreadable"
         );
         // A plain writable directory is not the cover, empty or not.
-        assert_eq!(staging_hidden(tmp.path()).reason, "not_covered");
+        assert_eq!(staging_hidden(tmp.path(), &[]).reason, "not_covered");
         std::fs::write(tmp.path().join("visible"), "x").unwrap();
-        assert_eq!(staging_hidden(tmp.path()).reason, "not_covered");
+        assert_eq!(staging_hidden(tmp.path(), &[]).reason, "not_covered");
         if !enabled() {
             return;
         }
@@ -924,17 +966,57 @@ mod tests {
             Some("size=16k,mode=0555"),
         )
         .unwrap();
-        let held = staging_hidden(&cover);
+        let held = staging_hidden(&cover, &[]);
         assert!(held.ok, "{held:?}");
         // A tmpfs that is writable is not the cover.
         let loose = tmp.path().join("loose");
         std::fs::create_dir(&loose).unwrap();
         let _v = Unmount(loose.clone());
         jail::mount(Some("tmpfs"), &loose, Some("tmpfs"), 0, Some("size=16k")).unwrap();
-        assert_eq!(staging_hidden(&loose).reason, "not_covered");
+        assert_eq!(staging_hidden(&loose, &[]).reason, "not_covered");
     }
 
-    /// The layers a staging root adds are fixed: three, and the 26 of before are unchanged.
+    /// A staging root below a path the jail covers (a Cloud Run volume under
+    /// `/mnt`, say) does not exist inside the jail, and that IS hidden: but only
+    /// when the covered ancestor is proven to be the cover, not on any `ENOENT`.
+    #[test]
+    fn a_root_below_a_covered_ancestor_is_hidden_only_when_the_ancestor_is_the_cover() {
+        if !enabled() {
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let ancestor = tmp.path().join("hidden");
+        let root = ancestor.join("deep").join("staging");
+        let covers = [ancestor.clone()];
+        std::fs::create_dir_all(&root).unwrap();
+        // The ancestor is a plain directory (nothing covers it) and holds the root:
+        // the root is simply visible.
+        assert_eq!(staging_hidden(&root, &covers).reason, "not_covered");
+        // Gone, but the listed ancestor is not the cover: an absent root proves
+        // nothing.
+        std::fs::remove_dir_all(ancestor.join("deep")).unwrap();
+        assert_eq!(staging_hidden(&root, &covers).reason, "unreadable");
+        // The real cover over it: the root is not there, and the layer passes.
+        let _u = Unmount(ancestor.clone());
+        let flags = libc::MS_NOSUID | libc::MS_NODEV | libc::MS_NOEXEC | libc::MS_RDONLY;
+        jail::mount(
+            Some("tmpfs"),
+            &ancestor,
+            Some("tmpfs"),
+            flags,
+            Some("size=16k,mode=0555"),
+        )
+        .unwrap();
+        let held = staging_hidden(&root, &covers);
+        assert!(held.ok, "{held:?}");
+        // The same absent root with no covering ancestor listed is NOT proven.
+        assert_eq!(staging_hidden(&root, &[]).reason, "unreadable");
+        // A listed ancestor that is not an ancestor of the root proves nothing.
+        let other = [tmp.path().join("elsewhere")];
+        assert_eq!(staging_hidden(&root, &other).reason, "unreadable");
+    }
+
+    /// The plain report is the 26 layers; the mount probe adds its own three.
     #[test]
     fn the_plain_report_is_the_26_layers_and_the_mount_probe_adds_its_own_three() {
         let spec = |staging_root| JailSpec {

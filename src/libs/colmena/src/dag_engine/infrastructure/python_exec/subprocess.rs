@@ -360,6 +360,11 @@ fn reap(mut conn: UnixStream, slot: Slot) {
 }
 
 impl SubprocessExecutor {
+    /// Volumes and MiB of staged calls in flight on this executor.
+    pub fn staged_in_flight(&self) -> (usize, u64) {
+        self.staging_budget.in_flight()
+    }
+
     /// Stages one call (dark behind `COLMENA_LARGE_TABULAR`): takes a share of
     /// the executor's budget of volumes in flight, then makes the directories
     /// and the output volume. The share goes back when the call is dropped.
