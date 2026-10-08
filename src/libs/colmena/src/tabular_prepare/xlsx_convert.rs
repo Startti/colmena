@@ -16,8 +16,7 @@
 //! - A late cell that contradicts its column's type makes that column text and the
 //!   sheet is read again, at most three times; the third makes every column text,
 //!   which cannot conflict. Only the sheet that conflicted is read again.
-//! - Cells are capped over the whole workbook: each sheet may use what the sheets
-//!   before it left of the 50,000,000.
+//! - The cell cap is the job's: every cell any read counts, restarts included.
 
 use crate::tabular_prepare::convert::{
     ConvertControl, ConvertError, ConvertedTable, TableError, TableFailure, TrackingSink,
@@ -103,11 +102,10 @@ pub(crate) async fn convert_xlsx_limits(
     let book = Arc::new(Mutex::new(book));
 
     let mut tables: Vec<SheetTable> = Vec::new();
-    let mut cells_used = 0u64;
     for sheet in &sheets {
-        // Each sheet may use what the ones before it left of the workbook's cells.
-        let mut sheet_limits = limits.sheet;
-        sheet_limits.max_cells = limits.sheet.max_cells.saturating_sub(cells_used);
+        // The cell limit is the job's: the book counts every cell any read of it
+        // reads, so sampling, runs, restarts and skipped sheets all count.
+        let sheet_limits = limits.sheet;
         let sample = {
             let (book, part, cancel) = (book.clone(), sheet.part.clone(), cancel.clone());
             tokio::task::spawn_blocking(move || {
@@ -178,7 +176,6 @@ pub(crate) async fn convert_xlsx_limits(
             }
         };
         let ((written, stats), types) = done;
-        cells_used += stats.cells;
         let blob_paths = control.paths_of(table_idx);
         let live: BTreeSet<String> = (0..written.parts as usize)
             .filter_map(|i| part_path(table_idx, i).ok())
@@ -507,10 +504,11 @@ mod tests {
         .concat();
         let book = || Wb::new().sheet("One", &sheet).sheet("Two", &sheet).build();
         let mut limits = Limits::default();
-        limits.sheet.max_cells = 6;
+        // Each sheet is read twice (sampled, then written): 2 x 2 x 3 = 12 cells.
+        limits.sheet.max_cells = 12;
         let (result, _) = convert_with(book(), WriterConfig::default(), &limits).await;
-        assert_eq!(result.unwrap().len(), 2, "six cells fit exactly");
-        limits.sheet.max_cells = 5;
+        assert_eq!(result.unwrap().len(), 2, "twelve cells fit exactly");
+        limits.sheet.max_cells = 11;
         let (result, _) = convert_with(book(), WriterConfig::default(), &limits).await;
         let failure = result.err().unwrap();
         assert!(matches!(
@@ -594,5 +592,35 @@ mod tests {
             TableError::Xlsx(XlsxError::Invalid(Invalid::BeyondHeader))
         ));
         assert!(failure.blob_paths.is_empty() && sink.paths().is_empty());
+    }
+
+    #[tokio::test]
+    async fn the_cell_cap_counts_every_read_of_a_sheet_restarts_included() {
+        // 10,011 rows with a text cell after the 10,000 the types come from: the
+        // sample (10,001 cells), the run that conflicts (10,006) and the run that
+        // does not (10,011) read about 30,000 cells of a sheet that holds 10,011.
+        let mut rows = vec![row(1, &[text("A", 1, "n")])];
+        for r in 2..=10_011 {
+            let cell = if r == 10_006 {
+                text("A", r, "N/A")
+            } else {
+                num("A", r, r)
+            };
+            rows.push(row(r, &[cell]));
+        }
+        let book = Wb::new().sheet("Data", &rows.concat()).build();
+        let mut limits = Limits::default();
+        limits.sheet.max_cells = 31_000;
+        let (result, _) = convert_with(book.clone(), WriterConfig::default(), &limits).await;
+        assert_eq!(result.unwrap()[0].table.restarts, 1);
+        limits.sheet.max_cells = 25_000;
+        let (result, _) = convert_with(book, WriterConfig::default(), &limits).await;
+        let failure = result.err().unwrap();
+        assert!(matches!(
+            failure.error,
+            TableError::Xlsx(XlsxError::TooLarge(
+                crate::tabular_prepare::xlsx_spool::Cap::Cells
+            ))
+        ));
     }
 }

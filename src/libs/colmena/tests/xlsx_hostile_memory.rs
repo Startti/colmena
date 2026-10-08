@@ -164,10 +164,13 @@ fn read_part(pkg: &mut Package, name: &str) -> Result<(), XlsxError> {
         "xl/sharedStrings.xml" => read_shared_strings(pkg, name).map(|_| ()),
         _ => {
             let (strings, styles) = (SharedStrings::none(), Styles::none());
+            let (cells, cancel) = (AtomicU64::new(0), CancellationToken::new());
             let ctx = SheetContext {
                 strings: &strings,
                 styles: &styles,
                 date1904: false,
+                cells: &cells,
+                cancel: &cancel,
             };
             read_sheet(pkg, name, &ctx, |_, _| Ok(true)).map(|_| ())
         }

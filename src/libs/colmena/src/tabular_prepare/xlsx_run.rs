@@ -27,6 +27,7 @@ use crate::tabular_prepare::xlsx_strings::{read_shared_strings, SharedStrings};
 use crate::tabular_prepare::xlsx_styles::{read_styles, Styles};
 use crate::tabular_prepare::xlsx_workbook::{read_workbook, SheetRef};
 use arrow_array::RecordBatch;
+use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -38,6 +39,8 @@ pub struct Book {
     pub strings: SharedStrings,
     pub styles: Styles,
     pub date1904: bool,
+    /// Cells read by every read of this book, for the job's cell limit.
+    pub cells: AtomicU64,
 }
 
 pub fn open_book(spooled: Spooled, limits: &XlsxLimits) -> Result<Book, XlsxError> {
@@ -57,6 +60,7 @@ pub fn open_book(spooled: Spooled, limits: &XlsxLimits) -> Result<Book, XlsxErro
         strings,
         styles,
         date1904: workbook.date1904,
+        cells: AtomicU64::new(0),
     })
 }
 
@@ -93,12 +97,15 @@ pub fn sample_sheet(
         strings,
         styles,
         date1904,
+        cells,
         ..
     } = book;
     let ctx = SheetContext {
         strings,
         styles,
         date1904: *date1904,
+        cells,
+        cancel,
     };
     let mut header: Option<Vec<String>> = None;
     let mut seen = Seen::new(0);
@@ -152,12 +159,15 @@ fn produce(
         strings,
         styles,
         date1904,
+        cells,
         ..
     } = &mut *book;
     let ctx = SheetContext {
         strings,
         styles,
         date1904: *date1904,
+        cells,
+        cancel,
     };
     let mut batcher = Batcher::new(names, types);
     let mut header_seen = false;

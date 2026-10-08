@@ -182,13 +182,19 @@ pub fn read_workbook(pkg: &mut Package) -> Result<Workbook, XlsxError> {
             Err(invalid(Invalid::MissingPart))
         }
     };
-    let mut sheets = Vec::new();
+    let mut sheets: Vec<SheetRef> = Vec::new();
     for (name, rid, hidden) in &listed {
         let (kind, target) = by_id.get(rid).ok_or(invalid(Invalid::BadRelationship))?;
         if kind == "worksheet" {
+            let part = part_of(target)?;
+            // Up to 256 `sheet` elements could name one part, each read (sampled,
+            // written, restarted) as if it were another sheet: one part, one sheet.
+            if sheets.iter().any(|s| s.part == part) {
+                return Err(invalid(Invalid::BadRelationship));
+            }
             sheets.push(SheetRef {
                 name: name.clone(),
-                part: part_of(target)?,
+                part,
                 hidden: *hidden,
             });
         }
@@ -395,5 +401,32 @@ mod tests {
         let wb = read(bytes).await.unwrap();
         assert_eq!(wb.sheets[0].name.chars().count(), MAX_SHEET_NAME_CHARS);
         assert_eq!(wb.styles, None);
+    }
+
+    #[tokio::test]
+    async fn many_sheets_naming_one_part_are_refused() {
+        let ns = "xmlns:r=\"r\"";
+        let sheets: String = (1..=3)
+            .map(|i| format!("<sheet name=\"S{i}\" r:id=\"rId{i}\"/>"))
+            .collect();
+        let rels: String = (1..=3)
+            .map(|i| format!("<Relationship Id=\"rId{i}\" Type=\"http://x/worksheet\" Target=\"worksheets/sheet1.xml\"/>"))
+            .collect();
+        let bytes = build(&[
+            Entry::stored("_rels/.rels", ROOT.as_bytes()),
+            Entry::stored(
+                "xl/workbook.xml",
+                format!("<workbook {ns}><sheets>{sheets}</sheets></workbook>").as_bytes(),
+            ),
+            Entry::stored(
+                "xl/_rels/workbook.xml.rels",
+                format!("<Relationships>{rels}</Relationships>").as_bytes(),
+            ),
+            Entry::stored("xl/worksheets/sheet1.xml", b"<worksheet/>"),
+        ]);
+        assert_eq!(
+            read(bytes).await,
+            Err(XlsxError::Invalid(Invalid::BadRelationship))
+        );
     }
 }

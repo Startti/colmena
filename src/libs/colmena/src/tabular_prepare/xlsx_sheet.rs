@@ -29,6 +29,8 @@ use crate::tabular_prepare::xlsx_spool::{Cap, Invalid, XlsxError};
 use crate::tabular_prepare::xlsx_strings::{unescape_ooxml, SharedStrings};
 use crate::tabular_prepare::xlsx_styles::{temporal, Styles, Temporal};
 use quick_xml::events::Event;
+use std::sync::atomic::{AtomicU64, Ordering};
+use tokio_util::sync::CancellationToken;
 
 /// Rows of a sheet (Excel's own limit).
 pub const MAX_ROWS: u32 = 1_048_576;
@@ -97,7 +99,16 @@ pub struct SheetContext<'a> {
     pub strings: &'a SharedStrings,
     pub styles: &'a Styles,
     pub date1904: bool,
+    /// Cells read by every read of this workbook so far (sampling, runs, restarts and
+    /// skipped sheets included): the cell limit is the job's, not one read's.
+    pub cells: &'a AtomicU64,
+    /// Checked every [`CANCEL_CHECK_CELLS`] cells, whatever the cells hold.
+    pub cancel: &'a CancellationToken,
 }
+
+/// Cells between two looks at the cancel token: a sheet of tens of millions of empty
+/// cells has no non-empty row to look at it on.
+pub const CANCEL_CHECK_CELLS: u64 = 4096;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Kind {
@@ -206,6 +217,8 @@ where
 /// Where a read of a sheet is: counters, and the limits it enforces.
 struct Reading<'l> {
     limits: &'l SheetLimits,
+    cells: &'l AtomicU64,
+    cancel: &'l CancellationToken,
     stats: SheetStats,
     row_number: u32,
     row_bytes: usize,
@@ -237,8 +250,12 @@ impl Reading<'_> {
     fn begin_cell(&mut self, e: &quick_xml::events::BytesStart) -> Result<Pending, XlsxError> {
         let bad = XlsxError::Invalid(Invalid::BadCell);
         self.stats.cells += 1;
-        if self.stats.cells > self.limits.max_cells {
+        let total = self.cells.fetch_add(1, Ordering::Relaxed) + 1;
+        if total > self.limits.max_cells {
             return Err(XlsxError::TooLarge(Cap::Cells));
+        }
+        if total.is_multiple_of(CANCEL_CHECK_CELLS) && self.cancel.is_cancelled() {
+            return Err(XlsxError::Cancelled);
         }
         let column = match attribute(e, b"r")?.as_deref().map(column_of) {
             Some(Some(c)) => c,
@@ -283,6 +300,8 @@ pub(crate) fn read_sheet_with(
 ) -> Result<SheetStats, XlsxError> {
     let mut at = Reading {
         limits,
+        cells: ctx.cells,
+        cancel: ctx.cancel,
         stats: SheetStats::default(),
         row_number: 0,
         row_bytes: 0,
@@ -409,10 +428,13 @@ mod tests {
             Some(part) => read_styles(&mut pkg, part)?,
             None => Styles::none(),
         };
+        let (cells, cancel) = (AtomicU64::new(0), CancellationToken::new());
         let ctx = SheetContext {
             strings: &strings,
             styles: &styles,
             date1904: wb.date1904,
+            cells: &cells,
+            cancel: &cancel,
         };
         let mut rows: Rows = Vec::new();
         let stats = read_sheet_with(
@@ -569,10 +591,13 @@ mod tests {
         let wb = read_workbook(&mut pkg).unwrap();
         let strings = SharedStrings::none();
         let styles = Styles::none();
+        let (cells, cancel) = (AtomicU64::new(0), CancellationToken::new());
         let ctx = SheetContext {
             strings: &strings,
             styles: &styles,
             date1904: false,
+            cells: &cells,
+            cancel: &cancel,
         };
         let mut seen = 0;
         let stats = read_sheet(&mut pkg, &wb.sheets[0].part, &ctx, |_, _| {
@@ -762,5 +787,35 @@ mod tests {
         // The merged value sits in its top-left cell; nothing is filled in.
         assert_eq!(got[1], (2, vec![(0, text("merged"))]));
         assert_eq!(got.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn the_cell_count_is_the_jobs_and_a_cancel_is_seen_on_cells_that_hold_nothing() {
+        // 12,000 rows of one empty cell: no non-empty row to look at the token on.
+        let rows: String = (1..=12_000)
+            .map(|r| format!("<row r=\"{r}\"><c r=\"A{r}\"/></row>"))
+            .collect();
+        let mut pkg = open_with(Wb::new().sheet("A", &rows).build(), &XlsxLimits::default()).await;
+        let wb = read_workbook(&mut pkg).unwrap();
+        let (strings, styles) = (SharedStrings::none(), Styles::none());
+        let (counter, cancel) = (AtomicU64::new(0), CancellationToken::new());
+        let ctx = SheetContext {
+            strings: &strings,
+            styles: &styles,
+            date1904: false,
+            cells: &counter,
+            cancel: &cancel,
+        };
+        // Two reads of the same sheet count together.
+        read_sheet(&mut pkg, &wb.sheets[0].part, &ctx, |_, _| Ok(true)).unwrap();
+        read_sheet(&mut pkg, &wb.sheets[0].part, &ctx, |_, _| Ok(true)).unwrap();
+        assert_eq!(counter.load(Ordering::Relaxed), 24_000);
+        // Cancelled, the third read stops within one check interval, though no row
+        // of it ever holds a value.
+        cancel.cancel();
+        counter.store(0, Ordering::Relaxed);
+        let r = read_sheet(&mut pkg, &wb.sheets[0].part, &ctx, |_, _| Ok(true));
+        assert_eq!(r.unwrap_err(), XlsxError::Cancelled);
+        assert!(counter.load(Ordering::Relaxed) <= CANCEL_CHECK_CELLS);
     }
 }

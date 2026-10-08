@@ -18,6 +18,8 @@ use crate::tabular_prepare::xlsx_spool::{Invalid, Spooled, XlsxError};
 use quick_xml::events::{BytesStart, Event};
 use quick_xml::Reader;
 use std::io::{self, BufRead, Read, Seek, SeekFrom};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use thiserror::Error;
 
 /// Sheets a workbook may have. It is the number of tables a manifest holds.
@@ -73,6 +75,10 @@ struct ExpandsPastDeclared;
 struct TokenTooLong;
 
 #[derive(Debug, Error)]
+#[error("the workbook's parts inflated past the job's total limit")]
+struct BudgetSpent;
+
+#[derive(Debug, Error)]
 #[error("a part is shorter than declared or its checksum is wrong")]
 struct BadChecksum;
 
@@ -84,6 +90,8 @@ pub struct Limited<R> {
     left: u64,
     crc: flate2::Crc,
     expected: u32,
+    /// The job's running count of inflated bytes and its limit.
+    budget: Option<(Arc<AtomicU64>, u64)>,
 }
 
 impl<R> Limited<R> {
@@ -93,6 +101,7 @@ impl<R> Limited<R> {
             left: declared,
             crc: flate2::Crc::new(),
             expected: crc,
+            budget: None,
         }
     }
 }
@@ -114,6 +123,11 @@ impl<R: Read> Read for Limited<R> {
         if n == 0 {
             // Shorter than declared.
             return Err(io::Error::other(BadChecksum));
+        }
+        if let Some((used, max)) = &self.budget {
+            if used.fetch_add(n as u64, Ordering::Relaxed) + n as u64 > *max {
+                return Err(io::Error::other(BudgetSpent));
+            }
         }
         self.crc.update(&buf[..n]);
         self.left -= n as u64;
@@ -189,6 +203,7 @@ pub fn io_failure(e: &io::Error) -> XlsxError {
         Some(inner) if inner.is::<ExpandsPastDeclared>() => {
             XlsxError::Archive(ArchiveError::EntryTooLarge)
         }
+        Some(inner) if inner.is::<BudgetSpent>() => XlsxError::Archive(ArchiveError::TotalTooLarge),
         Some(inner) if inner.is::<TokenTooLong>() => XlsxError::Invalid(Invalid::TokenTooLong),
         _ => XlsxError::Invalid(Invalid::Xml),
     }
@@ -204,6 +219,10 @@ pub fn xml_failure(e: &quick_xml::Error) -> XlsxError {
 /// An opened workbook archive: what it declares and a way to read its parts.
 pub struct Package {
     file: Spooled,
+    /// Bytes inflated by every read of any part so far, against the archive's total
+    /// limit: the same part read again (a sample, a run, a restart) is read again.
+    inflated: Arc<AtomicU64>,
+    max_inflated: u64,
     summary: ArchiveSummary,
     max_token_bytes: u64,
     max_sheets: usize,
@@ -222,6 +241,8 @@ impl Package {
         })?;
         Ok(Self {
             file: spooled,
+            inflated: Arc::new(AtomicU64::new(0)),
+            max_inflated: limits.archive.max_total_bytes,
             summary,
             max_token_bytes: limits.max_token_bytes,
             max_sheets: limits.max_sheets,
@@ -265,7 +286,8 @@ impl Package {
         } else {
             Box::new(flate2::read::DeflateDecoder::new(raw))
         };
-        let limited = Limited::new(inner, entry.uncompressed, entry.crc);
+        let mut limited = Limited::new(inner, entry.uncompressed, entry.crc);
+        limited.budget = Some((self.inflated.clone(), self.max_inflated));
         Ok(Reader::from_reader(Guarded::new(
             limited,
             self.max_token_bytes,
@@ -489,5 +511,29 @@ mod tests {
             XlsxError::Archive(ArchiveError::EntryTooLarge)
                 | XlsxError::Invalid(Invalid::TokenTooLong)
         ));
+    }
+
+    #[tokio::test]
+    async fn the_same_part_read_again_counts_again_against_the_jobs_total() {
+        let mut limits = XlsxLimits::default();
+        limits.archive.max_total_bytes = 1500;
+        let body = format!("<a>{}</a>", "x".repeat(993));
+        let bytes = build(&[Entry::stored("a.xml", body.as_bytes())]);
+        let mut pkg = package_of(bytes, &limits).await.unwrap();
+        let drain = |pkg: &mut Package| -> Result<(), XlsxError> {
+            let mut part = pkg.xml("a.xml", MAX_SMALL_PART_BYTES)?;
+            let mut buf = Vec::new();
+            loop {
+                if matches!(next_event(&mut part, &mut buf)?, Event::Eof) {
+                    return Ok(());
+                }
+            }
+        };
+        // 1,000 bytes declared, 1,500 allowed in all: once is fine, twice is not.
+        drain(&mut pkg).unwrap();
+        assert_eq!(
+            drain(&mut pkg),
+            Err(XlsxError::Archive(ArchiveError::TotalTooLarge))
+        );
     }
 }
