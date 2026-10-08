@@ -256,6 +256,15 @@ in place and logged. It cannot tell a leftover from a call in flight, so the sta
 to ONE executor. If the staging volume is persistent, the prepared data of a call that was killed stays on it until the
 next start of an executor with that root; a tmpfs staging volume vanishes with the instance.
 
+For a jail with a staging root, two layers are added so that the read-only guarantee of `/data` does not rest on the empty
+capability sets alone: the capability BOUNDING set is cleared (`PR_CAPBSET_DROP` of every capability, read back, while the
+process is still root and before the uid change; `no_new_privs` was already set and is checked), and the seccomp denylist
+gains the new mount API, `open_tree`, `move_mount`, `fsopen`, `fsconfig`, `fsmount`, `fspick`, `mount_setattr` and
+`open_tree_attr` (428-433, 442 and 467: the same numbers on x86_64 and aarch64, so none is skipped on either), with the same
+action and errno as `mount` (EPERM). The filter matches numbers, not the kernel's table: it loads on a kernel that lacks a
+call (the libc crate does not name `open_tree_attr`, Linux 6.15, so it is listed by number) and answers EPERM where the
+kernel alone would say ENOSYS. A jail without a staging root is today's jail, with neither layer.
+
 ### Startup self-test (Linux)
 
 Before it binds its socket, the template forks a throwaway child that enters the jail as slot 9999 (uid
@@ -277,11 +286,12 @@ success is implied by `READY`.
 
 With a staging root (`--staging-root`, see
 [Run staging directories](#run-staging-directories-linux-dark)) a second probe, `selftest::run_mounts`, is a throwaway
-staged call that asks for mounts and checks three more layers, 29 in all in `python_executor self-test`:
+staged call that asks for mounts and checks four more layers, 30 in all in `python_executor self-test`:
 `mount_data_readonly` (a world-writable file and directory under `/data` cannot be written, it reads back, and its flags
 are read-only, `nosuid`, `nodev`, `noexec`), `mount_out_bounded` (`/out` takes a file, is the size the trusted side gave
 it, refuses a write past it, stops empty files at the inode bound and is `nosuid`, `nodev`, `noexec`) and
-`staging_root_hidden` (the root IS the empty read-only tmpfs cover, listed successfully and found empty; a path that
+`capabilities_empty` (all five capability sets read zero, the bounding set included, `no_new_privs` is set, and each call of
+the new mount API is refused with EPERM) and `staging_root_hidden` (the root IS the empty read-only tmpfs cover, listed successfully and found empty; a path that
 cannot be listed fails the layer, because the probe runs as the slot user and the real directory is the executor's). A root
 BELOW a path the jail covers (a volume mounted under `/mnt`, `/srv`, `/run`, `/home`, `/root`, `/var/tmp`, `/app`,
 `/dev/shm`, a configured hidden path, or the jail's own `/tmp`) does not exist inside the jail, and that is hidden: the
@@ -297,7 +307,7 @@ staged call could not be made: an unwritable or read-only staging root, a root f
 `/out`), `mount_layer_failed` (a mount layer did not hold), `arrow_pool_not_system`, `arrow_pool_unreadable`. A call that
 asks for mounts then gets `PythonExecutorError: run mounts are disabled on this executor (<reason>)` before any child
 starts; the pool setting is therefore enforced for every mounts call. The `python_executor self-test` exit code covers
-all 29.
+all 30.
 
 `python_executor self-test [--uid-base N] [--tmp-mb N] [--hide /abs] [--staging-root /abs]` runs the same checks (same values as the
 executor settings; root and `CAP_SYS_ADMIN` needed): exit 0 when every layer holds, 3 when one fails, 2 for bad

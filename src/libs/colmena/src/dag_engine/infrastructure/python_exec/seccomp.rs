@@ -56,6 +56,23 @@ const DENIED_COMMON: &[i64] = &[
     libc::SYS_io_uring_register,
 ];
 
+/// The new mount API, which can do what `mount`, `umount2` and `pivot_root` do
+/// by other means: `open_tree`, `move_mount`, `fsopen`, `fsconfig`, `fsmount`,
+/// `fspick`, `mount_setattr`, and `open_tree_attr` (Linux 6.15, which the libc
+/// crate does not name). Every number is the same on x86_64 and aarch64 (both
+/// use the generic table from 424 on), so there is nothing to skip on either.
+/// Denied only for a jail that asks for the extra layer (see [`apply`]).
+pub(crate) const MOUNT_API: &[i64] = &[
+    libc::SYS_open_tree,
+    libc::SYS_move_mount,
+    libc::SYS_fsopen,
+    libc::SYS_fsconfig,
+    libc::SYS_fsmount,
+    libc::SYS_fspick,
+    libc::SYS_mount_setattr,
+    467, // open_tree_attr
+];
+
 #[cfg(target_arch = "x86_64")]
 const DENIED_ARCH: &[i64] = &[
     libc::SYS_fork,
@@ -74,10 +91,12 @@ fn err(e: impl Into<seccompiler::Error>) -> io::Error {
     }
 }
 
-fn deny_filter(arch: TargetArch) -> io::Result<BpfProgram> {
+fn deny_filter(arch: TargetArch, mount_api: bool) -> io::Result<BpfProgram> {
+    let extra: &[i64] = if mount_api { MOUNT_API } else { &[] };
     let mut rules: BTreeMap<i64, Vec<SeccompRule>> = DENIED_COMMON
         .iter()
         .chain(DENIED_ARCH)
+        .chain(extra)
         .map(|&nr| (nr, vec![]))
         .collect();
     // `clone` without CLONE_THREAD creates a process: refused. Threads pass.
@@ -138,9 +157,14 @@ fn x32_filter() -> BpfProgram {
 }
 
 /// Installs every program on the calling thread; threads it starts later
-/// inherit them. Nothing here can be undone.
-pub fn apply() -> io::Result<()> {
-    apply_filter(&deny_filter(ARCH)?).map_err(err)?;
+/// inherit them. Nothing here can be undone. `mount_api` adds [`MOUNT_API`] to
+/// the denylist, with the same action and errno (EPERM) as `mount`: it is for
+/// jails that stage run mounts, so that the read-only guarantee of `/data` does
+/// not rest on the empty capability set alone. The filter matches numbers, never
+/// the kernel's table, so it loads on a kernel that lacks a call and answers EPERM
+/// for it where the kernel alone would answer ENOSYS.
+pub fn apply(mount_api: bool) -> io::Result<()> {
+    apply_filter(&deny_filter(ARCH, mount_api)?).map_err(err)?;
     apply_filter(&clone3_filter(ARCH)?).map_err(err)?;
     #[cfg(target_arch = "x86_64")]
     apply_filter(&x32_filter()).map_err(err)?;
@@ -178,7 +202,7 @@ mod tests {
     #[test]
     fn both_programs_build_for_each_supported_architecture() {
         for arch in [TargetArch::x86_64, TargetArch::aarch64] {
-            let deny = deny_filter(arch).unwrap();
+            let deny = deny_filter(arch, false).unwrap();
             let mut listed = DENIED_COMMON.iter().chain(DENIED_ARCH);
             assert!(listed.all(|&nr| compares(&deny, nr)), "{arch:?}");
             assert!(compares(&deny, libc::SYS_clone), "{arch:?}");
@@ -187,6 +211,97 @@ mod tests {
             assert!(compares(&clone3, libc::SYS_clone3), "{arch:?}");
             assert!(answers(&clone3, libc::ENOSYS), "{arch:?}");
         }
+    }
+
+    /// The seven calls of the new mount API and its newest sibling, by number:
+    /// the same on x86_64 and aarch64 (they share the generic table from 424 on).
+    /// `open_tree_attr` (467) is not named by the libc crate.
+    #[test]
+    fn the_mount_api_numbers_are_the_documented_ones() {
+        assert_eq!(MOUNT_API, [428, 429, 430, 431, 432, 433, 442, 467]);
+    }
+
+    /// Listed only for a jail that asks for the extra layer; when listed, with
+    /// the same action and errno as `mount` and `umount2`.
+    #[test]
+    fn the_mount_api_is_denied_only_when_asked_for_and_like_mount() {
+        for arch in [TargetArch::x86_64, TargetArch::aarch64] {
+            let without = deny_filter(arch, false).unwrap();
+            assert!(
+                MOUNT_API.iter().all(|&nr| !compares(&without, nr)),
+                "{arch:?}"
+            );
+            let with = deny_filter(arch, true).unwrap();
+            for &nr in MOUNT_API {
+                assert!(compares(&with, nr), "{arch:?} {nr}");
+            }
+            assert!(compares(&with, libc::SYS_mount) && answers(&with, libc::EPERM));
+        }
+    }
+
+    /// Run as root, with every capability, in a throwaway child: the calls get
+    /// past the kernel (an answer other than EPERM: a descriptor, EFAULT, EINVAL,
+    /// ENOSYS on a kernel without the call), then the filter is installed and each
+    /// of them answers EPERM. That it is the FILTER, not a missing capability,
+    /// that refuses them. A filter built without the extra layer leaves them alone.
+    #[test]
+    fn the_filter_refuses_each_mount_api_call_where_the_capability_is_present() {
+        if std::env::var("COLMENA_PYEXEC_JAIL_TESTS").as_deref() != Ok("1") {
+            return;
+        }
+        let answer = |nr: i64| -> i32 {
+            let rc = unsafe { libc::syscall(nr, 0, 0, 0, 0, 0, 0) };
+            let e = if rc < 0 {
+                io::Error::last_os_error().raw_os_error().unwrap_or(-1)
+            } else {
+                0
+            };
+            if rc >= 3 {
+                unsafe { libc::close(rc as libc::c_int) };
+            }
+            e
+        };
+        // Exit status: 0 held; otherwise the index of the call that did not
+        // behave, plus 10 for "refused before the filter" and 50 for "not refused
+        // by the filter".
+        let child = |extra: bool| -> i32 {
+            match unsafe { libc::fork() } {
+                0 => {
+                    unsafe { libc::alarm(30) };
+                    let code = std::panic::catch_unwind(|| {
+                        for (i, &nr) in MOUNT_API.iter().enumerate() {
+                            if answer(nr) == libc::EPERM {
+                                return 10 + i as i32;
+                            }
+                        }
+                        apply(extra).unwrap();
+                        for (i, &nr) in MOUNT_API.iter().enumerate() {
+                            let refused = answer(nr) == libc::EPERM;
+                            if refused != extra {
+                                return 50 + i as i32;
+                            }
+                        }
+                        0
+                    });
+                    unsafe { libc::_exit(code.unwrap_or(99)) }
+                }
+                pid => {
+                    let mut status = 0;
+                    assert_eq!(unsafe { libc::waitpid(pid, &mut status, 0) }, pid);
+                    if libc::WIFEXITED(status) {
+                        libc::WEXITSTATUS(status)
+                    } else {
+                        98
+                    }
+                }
+            }
+        };
+        assert_eq!(
+            child(true),
+            0,
+            "with the extra layer: every call refused by the filter"
+        );
+        assert_eq!(child(false), 0, "without it: none refused (today's filter)");
     }
 
     /// The x86_64 x32 program, instruction by instruction: EPERM for a
