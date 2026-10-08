@@ -5,6 +5,7 @@
 
 use super::child::CallHeader;
 use super::jail::{self, JailSpec, CHANNEL_FD, DEFAULT_HIDDEN, NOFILE, NPROC};
+use super::staging::StagedCall;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::io::{self, Read, Write};
@@ -25,6 +26,19 @@ const HEADER: CallHeader = CallHeader {
     max_request_bytes: 1024,
     mounts: None,
 };
+/// The layers a staging root adds to a complete report, checked from inside a
+/// call that asks for mounts; a report without a staging root has none of them.
+pub const MOUNT_LAYERS: &[&str] = &[
+    "mount_data_readonly",
+    "mount_out_bounded",
+    "staging_root_hidden",
+];
+/// The output volume of the probe's call, in MiB, and the files its data
+/// directory holds: one world-writable file and one world-writable directory,
+/// so that only the mount, not a file mode, can stop a write.
+const SELF_TEST_OUT_MB: u64 = 1;
+const CANARY: &str = "canary";
+const CANARY_CONTENT: &str = "canary";
 /// A probe still running after this counts as failed.
 const PROBE_TIMEOUT: Duration = Duration::from_secs(30);
 const CONNECT_TIMEOUT: Duration = Duration::from_millis(500);
@@ -83,6 +97,17 @@ pub struct LayerCheck {
     /// The OS error of a layer that could not be applied.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub errno: Option<i32>,
+}
+
+/// The layers a complete report carries for this jail: the fixed ones, and the
+/// mount ones only when a staging root is configured.
+fn expected_layers(spec: &JailSpec) -> BTreeSet<&'static str> {
+    let mounts = spec.staging_root.is_some().then_some(MOUNT_LAYERS);
+    LAYERS
+        .iter()
+        .chain(mounts.into_iter().flatten())
+        .copied()
+        .collect()
 }
 
 fn outcome(layer: &str, reason: &str, held: &str) -> LayerCheck {
@@ -430,6 +455,77 @@ fn syscall_filter() -> [LayerCheck; 2] {
     ]
 }
 
+fn flags_of(path: &Path) -> Option<u64> {
+    let c = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()).ok()?;
+    let mut st: libc::statvfs = unsafe { std::mem::zeroed() };
+    (unsafe { libc::statvfs(c.as_ptr(), &mut st) } == 0).then_some(st.f_flag)
+}
+
+fn refused_as(result: io::Result<()>, errno: i32) -> bool {
+    result.is_err_and(|e| e.raw_os_error() == Some(errno))
+}
+
+/// The data directory is read-only AT THE MOUNT: the world-writable file and
+/// directory cannot be written, the flags say so, and the content is readable.
+fn data_mount(dir: &Path) -> LayerCheck {
+    let layer = "mount_data_readonly";
+    if std::fs::read_to_string(dir.join(CANARY)).ok().as_deref() != Some(CANARY_CONTENT) {
+        return outcome(layer, "unreadable", "read_only");
+    }
+    let open = std::fs::OpenOptions::new()
+        .write(true)
+        .open(dir.join(CANARY));
+    let create = std::fs::File::create(dir.join("sub").join("probe")).map(|_| ());
+    let blocked = refused_as(open.map(|_| ()), libc::EROFS) && refused_as(create, libc::EROFS);
+    let _ = std::fs::remove_file(dir.join("sub").join("probe"));
+    if !blocked {
+        return outcome(layer, "writable", "read_only");
+    }
+    let wanted = libc::ST_RDONLY | libc::ST_NOSUID | libc::ST_NODEV | libc::ST_NOEXEC;
+    let flags = flags_of(dir).unwrap_or(0);
+    outcome(
+        layer,
+        if flags & wanted == wanted {
+            "read_only"
+        } else {
+            "flags_missing"
+        },
+        "read_only",
+    )
+}
+
+/// The output directory takes a file, is the size the trusted side gave it, stops
+/// a write past it, and is `nosuid`, `nodev` and `noexec`.
+fn out_mount(dir: &Path) -> LayerCheck {
+    let layer = "mount_out_bounded";
+    let file = dir.join("probe");
+    if std::fs::write(&file, b"x").is_err() {
+        return outcome(layer, "unwritable", "bounded");
+    }
+    let past = std::fs::write(&file, vec![0u8; (SELF_TEST_OUT_MB as usize + 1) << 20]);
+    let _ = std::fs::remove_file(&file);
+    let mut fs: libc::statvfs = unsafe { std::mem::zeroed() };
+    let c = std::ffi::CString::new(dir.as_os_str().as_encoded_bytes()).unwrap_or_default();
+    let read = unsafe { libc::statvfs(c.as_ptr(), &mut fs) } == 0;
+    let size = (fs.f_blocks as u64).saturating_mul(fs.f_frsize as u64);
+    if !read || size != SELF_TEST_OUT_MB << 20 || !refused_as(past, libc::ENOSPC) {
+        return outcome(layer, "unbounded", "bounded");
+    }
+    let wanted = libc::ST_NOSUID | libc::ST_NODEV | libc::ST_NOEXEC;
+    let flags = fs.f_flag;
+    let held = flags & wanted == wanted && flags & libc::ST_RDONLY == 0;
+    outcome(
+        layer,
+        if held { "bounded" } else { "flags_missing" },
+        "bounded",
+    )
+}
+
+/// The staging root shows nothing: absent, or an empty cover.
+fn staging_hidden(root: &Path) -> LayerCheck {
+    check("staging_root_hidden", covered(root), "covered", "visible")
+}
+
 fn probe(spec: &JailSpec, before: &Before) -> Vec<LayerCheck> {
     // First, while nothing else the probe opens is open.
     let mut out = vec![descriptors(), identity(jail::uid_for(spec, SELF_TEST_SLOT))];
@@ -446,12 +542,22 @@ fn probe(spec: &JailSpec, before: &Before) -> Vec<LayerCheck> {
     out.extend(network(before.loopback_port));
     out.push(interfaces());
     out.extend(syscall_filter());
+    if let Some(root) = &spec.staging_root {
+        out.push(data_mount(Path::new("/data")));
+        out.push(out_mount(Path::new("/out")));
+        out.push(staging_hidden(root));
+    }
     out
 }
 
 /// The forked child: enters the jail, probes it and reports on fd 3. That
 /// stays the channel whichever layer fails, so `enter` gets a copy of it.
-fn probe_in_child(spec: &JailSpec, before: &Before, channel: UnixStream) -> bool {
+fn probe_in_child(
+    spec: &JailSpec,
+    before: &Before,
+    header: &CallHeader,
+    channel: UnixStream,
+) -> bool {
     let fd = channel.into_raw_fd();
     if fd != CHANNEL_FD
         && (unsafe { libc::dup2(fd, CHANNEL_FD) } < 0 || unsafe { libc::close(fd) } < 0)
@@ -462,7 +568,7 @@ fn probe_in_child(spec: &JailSpec, before: &Before, channel: UnixStream) -> bool
     if copy < 0 {
         return false;
     }
-    let checks = match jail::enter(spec, &HEADER, unsafe { UnixStream::from_raw_fd(copy) }) {
+    let checks = match jail::enter(spec, header, unsafe { UnixStream::from_raw_fd(copy) }) {
         // What it returns is fd 3, written through below.
         Ok(channel) => {
             let _ = channel.into_raw_fd();
@@ -529,11 +635,33 @@ fn setup(
     Ok((listener, before, ours, theirs))
 }
 
+/// A staged call for the probe: the files [`data_mount`] looks for.
+fn stage_probe(root: &Path) -> io::Result<StagedCall> {
+    use std::os::unix::fs::PermissionsExt;
+    let staged = StagedCall::create(root, SELF_TEST_OUT_MB)?;
+    let data = staged.data_dir();
+    std::fs::write(data.join(CANARY), CANARY_CONTENT)?;
+    std::fs::set_permissions(data.join(CANARY), std::fs::Permissions::from_mode(0o666))?;
+    std::fs::create_dir(data.join("sub"))?;
+    std::fs::set_permissions(data.join("sub"), std::fs::Permissions::from_mode(0o777))?;
+    Ok(staged)
+}
+
 /// Forks a child that enters the jail as [`SELF_TEST_SLOT`] and checks each
 /// layer; `Ok` only when every check held. Only for a single-threaded
 /// process: the child allocates after the fork.
 pub fn run(spec: &JailSpec) -> Result<Vec<LayerCheck>, Vec<LayerCheck>> {
     let (listener, before, mut ours, theirs) = setup(spec)?;
+    // With a staging root the probe is a call that asks for mounts, staged like
+    // any other and removed after the probe, before the host's mounts are read.
+    let staged = match &spec.staging_root {
+        Some(root) => Some(stage_probe(root).map_err(|e| setup_error("staging_failed", e))?),
+        None => None,
+    };
+    let header = CallHeader {
+        mounts: staged.as_ref().map(StagedCall::mounts),
+        ..HEADER
+    };
     let pid = match unsafe { libc::fork() } {
         -1 => {
             let e = io::Error::last_os_error();
@@ -541,7 +669,9 @@ pub fn run(spec: &JailSpec) -> Result<Vec<LayerCheck>, Vec<LayerCheck>> {
         }
         0 => {
             drop(ours);
-            let sent = catch_unwind(AssertUnwindSafe(|| probe_in_child(spec, &before, theirs)));
+            let sent = catch_unwind(AssertUnwindSafe(|| {
+                probe_in_child(spec, &before, &header, theirs)
+            }));
             let code = i32::from(!matches!(sent, Ok(true)));
             // Dropping a panic's payload could panic again.
             std::mem::forget(sent);
@@ -559,6 +689,7 @@ pub fn run(spec: &JailSpec) -> Result<Vec<LayerCheck>, Vec<LayerCheck>> {
     }
     let exited = wait(pid).is_some_and(|s| libc::WIFEXITED(s) && libc::WEXITSTATUS(s) == 0);
     drop(listener);
+    drop(staged);
     let mut checks: Vec<LayerCheck> = serde_json::from_slice(&report).unwrap_or_default();
     let reported = exited && !checks.is_empty();
     // The probe's mounts stayed where it made them: the template's /tmp and
@@ -568,7 +699,7 @@ pub fn run(spec: &JailSpec) -> Result<Vec<LayerCheck>, Vec<LayerCheck>> {
             .is_ok_and(|t| mounts_unchanged(&t, spec.staging_root.as_deref(), before.mounts));
     checks.push(check("host_mounts", kept, "unchanged", "mounts_leaked"));
     let layers: BTreeSet<&str> = checks.iter().map(|c| c.layer.as_str()).collect();
-    let complete = layers == LAYERS.iter().copied().collect();
+    let complete = layers == expected_layers(spec);
     if !reported {
         checks.push(failure("self_test", "no_report", None));
     } else if !complete {
@@ -587,6 +718,127 @@ pub fn run(spec: &JailSpec) -> Result<Vec<LayerCheck>, Vec<LayerCheck>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The probes are exercised in this process, as root, on real mounts: each
+    /// must hold on a correct mount and name what is wrong on an incorrect one.
+    fn enabled() -> bool {
+        std::env::var("COLMENA_PYEXEC_JAIL_TESTS").as_deref() == Ok("1")
+    }
+
+    fn bind(src: &Path, dst: &Path, extra: libc::c_ulong) {
+        jail::mount(Some(src.to_str().unwrap()), dst, None, libc::MS_BIND, None).unwrap();
+        let flags = libc::MS_REMOUNT | libc::MS_BIND | extra;
+        jail::mount(None, dst, None, flags, None).unwrap();
+    }
+
+    struct Unmount(PathBuf);
+    impl Drop for Unmount {
+        fn drop(&mut self) {
+            let c = std::ffi::CString::new(self.0.to_str().unwrap()).unwrap();
+            unsafe { libc::umount2(c.as_ptr(), libc::MNT_DETACH) };
+        }
+    }
+
+    fn data_fixture(dir: &Path) {
+        std::fs::write(dir.join(CANARY), CANARY_CONTENT).unwrap();
+        std::fs::set_permissions(
+            dir.join(CANARY),
+            std::os::unix::fs::PermissionsExt::from_mode(0o666),
+        )
+        .unwrap();
+        std::fs::create_dir(dir.join("sub")).unwrap();
+        std::fs::set_permissions(
+            dir.join("sub"),
+            std::os::unix::fs::PermissionsExt::from_mode(0o777),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn the_data_probe_holds_on_a_read_only_mount_and_names_what_is_wrong_otherwise() {
+        if !enabled() {
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let (src, dst) = (tmp.path().join("src"), tmp.path().join("dst"));
+        std::fs::create_dir(&src).unwrap();
+        std::fs::create_dir(&dst).unwrap();
+        data_fixture(&src);
+        let safe = libc::MS_NOSUID | libc::MS_NODEV | libc::MS_NOEXEC;
+        let _u = Unmount(dst.clone());
+        // Not a mount at all: world-writable files are writable.
+        assert_eq!(data_mount(&src).reason, "writable");
+        bind(&src, &dst, safe | libc::MS_RDONLY);
+        let held = data_mount(&dst);
+        assert!(held.ok, "{held:?}");
+        // Read-only but missing a flag.
+        bind(
+            &src,
+            &dst,
+            libc::MS_RDONLY | libc::MS_NOSUID | libc::MS_NODEV,
+        );
+        assert_eq!(data_mount(&dst).reason, "flags_missing");
+        // Every flag but read-only.
+        bind(&src, &dst, safe);
+        assert_eq!(data_mount(&dst).reason, "writable");
+        assert_eq!(data_mount(&tmp.path().join("absent")).reason, "unreadable");
+    }
+
+    #[test]
+    fn the_out_probe_holds_on_a_bound_volume_and_names_what_is_wrong_otherwise() {
+        if !enabled() {
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let out = tmp.path().join("out");
+        std::fs::create_dir(&out).unwrap();
+        let safe = libc::MS_NOSUID | libc::MS_NODEV | libc::MS_NOEXEC;
+        let size = format!("size={SELF_TEST_OUT_MB}m,mode=1777");
+        let _u = Unmount(out.clone());
+        // A directory on a big volume: writable and not bounded.
+        assert_eq!(out_mount(&out).reason, "unbounded");
+        jail::mount(Some("tmpfs"), &out, Some("tmpfs"), safe, Some(&size)).unwrap();
+        let held = out_mount(&out);
+        assert!(held.ok, "{held:?}");
+        let umount = || {
+            let c = std::ffi::CString::new(out.to_str().unwrap()).unwrap();
+            assert_eq!(unsafe { libc::umount2(c.as_ptr(), libc::MNT_DETACH) }, 0);
+        };
+        umount();
+        // Right size, missing flags.
+        jail::mount(Some("tmpfs"), &out, Some("tmpfs"), 0, Some(&size)).unwrap();
+        assert_eq!(out_mount(&out).reason, "flags_missing");
+        umount();
+        // Read-only output: nothing can be written.
+        let ro = safe | libc::MS_RDONLY;
+        jail::mount(Some("tmpfs"), &out, Some("tmpfs"), ro, Some(&size)).unwrap();
+        assert_eq!(out_mount(&out).reason, "unwritable");
+    }
+
+    #[test]
+    fn the_staging_probe_holds_only_on_a_covered_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(staging_hidden(&tmp.path().join("absent")).ok);
+        assert!(staging_hidden(tmp.path()).ok);
+        std::fs::write(tmp.path().join("visible"), "x").unwrap();
+        assert_eq!(staging_hidden(tmp.path()).reason, "visible");
+    }
+
+    /// The layers a staging root adds are fixed: three, and the 26 of before are unchanged.
+    #[test]
+    fn the_expected_layers_grow_by_three_only_with_a_staging_root() {
+        let spec = |staging_root| JailSpec {
+            uid_base: 1,
+            tmp_mb: 1,
+            hide_paths: vec![],
+            staging_root,
+        };
+        assert_eq!(expected_layers(&spec(None)).len(), 26);
+        let with = expected_layers(&spec(Some("/x".into())));
+        assert_eq!(with.len(), 29);
+        assert!(MOUNT_LAYERS.iter().all(|l| with.contains(l)));
+        assert!(LAYERS.iter().all(|l| with.contains(l)));
+    }
 
     // A real `/proc/net/dev`'s two header lines, then one `name: counters`
     // line per interface — exercised here on fixed text so CI covers this

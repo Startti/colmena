@@ -37,6 +37,18 @@ impl Drop for Scrap {
     }
 }
 
+fn mounts_under(root: &Path) -> usize {
+    std::fs::read_to_string("/proc/self/mountinfo")
+        .unwrap()
+        .lines()
+        .filter(|l| {
+            l.split(' ')
+                .nth(4)
+                .is_some_and(|p| Path::new(p).starts_with(root))
+        })
+        .count()
+}
+
 fn mounted(path: &Path) -> bool {
     let want = path.to_str().unwrap();
     std::fs::read_to_string("/proc/self/mountinfo")
@@ -778,14 +790,25 @@ output = {
 }
 
 // ---------------------------------------------------------------------------
-// The startup self-test and calls that mount while a template starts.
+// The startup self-test proves the run mounts too.
 // ---------------------------------------------------------------------------
 
-fn self_test(root: &Root) -> (bool, Vec<Value>) {
+/// The self-test with no staging root counts every mount of the host: alone only.
+fn self_test_without_root(alone: &Root) -> (bool, Vec<Value>) {
+    assert!(
+        alone.exclusive,
+        "an unrooted self-test needs Root::exclusive()"
+    );
+    self_test(None)
+}
+
+fn self_test(root: Option<&Root>) -> (bool, Vec<Value>) {
     let mut cmd = std::process::Command::new(env!("CARGO_BIN_EXE_python_executor"));
     cmd.arg("self-test").arg("--uid-base");
     cmd.arg(next_uid_base().to_string());
-    cmd.arg("--staging-root").arg(&root.path);
+    if let Some(root) = root {
+        cmd.arg("--staging-root").arg(&root.path);
+    }
     let out = cmd.output().unwrap();
     let lines = String::from_utf8(out.stdout).unwrap();
     let checks = lines
@@ -793,6 +816,36 @@ fn self_test(root: &Root) -> (bool, Vec<Value>) {
         .map(|l| serde_json::from_str(l).unwrap())
         .collect();
     (out.status.success(), checks)
+}
+
+/// With a staging root the report has three more layers, all held; without one
+/// it is the 26 layers it always was, none of them about mounts.
+#[test]
+fn the_self_test_reports_the_mount_layers_only_with_a_staging_root() {
+    let Some(root) = Root::exclusive() else {
+        return;
+    };
+    let (ok, plain) = self_test_without_root(&root);
+    assert!(ok && plain.len() == 26, "{plain:?}");
+    let (ok, staged) = self_test(Some(&root));
+    assert!(ok, "{staged:?}");
+    let names: Vec<&str> = staged
+        .iter()
+        .map(|c| c["layer"].as_str().unwrap())
+        .collect();
+    for layer in [
+        "mount_data_readonly",
+        "mount_out_bounded",
+        "staging_root_hidden",
+    ] {
+        let found = staged.iter().find(|c| c["layer"] == layer);
+        assert!(
+            found.is_some_and(|c| c["ok"] == true),
+            "{layer} in {names:?}"
+        );
+    }
+    assert_eq!(staged.len(), 29);
+    assert_eq!(mounts_under(&root.path), 0, "the probe left a mount behind");
 }
 
 /// Calls in flight mount and unmount their output volumes under the staging root
@@ -815,7 +868,7 @@ fn the_self_test_ignores_mounts_of_calls_in_flight() {
         })
         .collect();
     for _ in 0..25 {
-        let (ok, checks) = self_test(&root);
+        let (ok, checks) = self_test(Some(&root));
         assert!(ok, "{checks:?}");
     }
     stop.store(true, Ordering::Relaxed);
