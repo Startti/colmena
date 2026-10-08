@@ -305,6 +305,11 @@ fn classify_xlsx(e: &XlsxError) -> (&'static str, String) {
             "the table lists of all the sheets do not fit the registry row; export fewer sheets or columns"
                 .into(),
         ),
+        XlsxError::TooLarge(Cap::Manifest) => (
+            TABLE_TOO_LARGE,
+            "the manifest of the workbook (its tables, conversion reports and skipped sheets) is over its size limit; export fewer sheets or columns"
+                .into(),
+        ),
         XlsxError::TooLarge(cap) => (
             XLSX_TOO_LARGE,
             match cap {
@@ -320,7 +325,7 @@ fn classify_xlsx(e: &XlsxError) -> (&'static str, String) {
                 Cap::Cells => {
                     format!("the workbook has more than {MAX_CELLS} cells; export it as CSV")
                 }
-                Cap::TableList => unreachable!("classified above"),
+                Cap::TableList | Cap::Manifest => unreachable!("classified above"),
                 Cap::SharedStrings => {
                     "the workbook's text is over the limit; export it as CSV".into()
                 }
@@ -899,7 +904,7 @@ async fn run_prepare(
 /// source was deleted) what it wrote belongs to nobody and is removed; if
 /// another job owns the row, the keys are the same deterministic ones and belong
 /// to that job now, so they are left alone.
-async fn settle_lost(
+pub(crate) async fn settle_lost(
     env: &PrepareEnv,
     req: &PrepareRequest,
     keys: &[String],
@@ -927,10 +932,12 @@ async fn source_gone(
     if !within(env, env.registry.still_owned(&req.source_key, owner)).await? {
         return settle_lost(env, req, &keys).await;
     }
-    if !matches!(
-        bounded(env, env.storage.delete_derived(&req.source_key, &keys)).await,
-        Some(Ok(()))
-    ) {
+    if !keys.is_empty()
+        && !matches!(
+            bounded(env, env.storage.delete_derived(&req.source_key, &keys)).await,
+            Some(Ok(()))
+        )
+    {
         let detail = "the objects of a deleted source could not be removed".to_string();
         return fail(env, req, owner, reason::STORAGE, detail, keys).await;
     }
@@ -946,7 +953,16 @@ async fn source_gone(
 /// Deletes what a preparation wrote. The keys are listed in the row, so what
 /// this cannot delete the cleanup pass will; the failure is logged as a fixed
 /// sentence and a kind, never with the adapter's text or a key.
-async fn delete_best_effort(env: &PrepareEnv, req: &PrepareRequest, keys: &[String], listed: bool) {
+pub(crate) async fn delete_best_effort(
+    env: &PrepareEnv,
+    req: &PrepareRequest,
+    keys: &[String],
+    listed: bool,
+) {
+    // Never an empty list to the adapter: it may read one as "delete by prefix".
+    if keys.is_empty() {
+        return;
+    }
     let kind = match bounded(env, env.storage.delete_derived(&req.source_key, keys)).await {
         Some(Ok(())) => return,
         Some(Err(e)) => storage_kind(&e),
@@ -1298,6 +1314,11 @@ mod tests {
                 XlsxError::TooLarge(Cap::Cells),
                 reason::XLSX_TOO_LARGE,
                 "the workbook has more than 50000000 cells; export it as CSV".into(),
+            ),
+            (
+                XlsxError::TooLarge(Cap::Manifest),
+                reason::TABLE_TOO_LARGE,
+                "the manifest of the workbook (its tables, conversion reports and skipped sheets) is over its size limit; export fewer sheets or columns".into(),
             ),
             (
                 XlsxError::TooLarge(Cap::TableList),

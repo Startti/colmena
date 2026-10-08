@@ -1172,16 +1172,30 @@ above the table, say), that sheet has no names for its columns: it is **skipped,
 says so** in an optional `skipped` list (`sheet`, the cleaned name, and `reason: "header_row"`),
 absent for a CSV. The other sheets are converted. If every sheet with a value is skipped the file
 is refused (`unreadable_file`: a row has a value past the last column of the header). The limit of
-the rule: it applies to what the sampling read sees; a ragged row after those 10,000 rows is found
-while parts are being written and fails the whole file. A reader that parses the manifest strictly
-must accept the new key (it is optional and appears only when a sheet was skipped).
+the rule, exactly: it applies to what the sampling read sees, the first 10,000 data rows after the
+header. A row **wider than the header that comes after those 10,000 rows is not skipped**: by then
+parts of that sheet are already stored, so the sheet cannot be dropped cleanly, and **the whole
+workbook fails** (`unreadable_file`: "a row has a value past the last column of the header",
+which says what is wrong with that row). **Why `skipped` does not bump the manifest version.** `MANIFEST_VERSION` and the registry's
+`FORMAT_VERSION` move together, and a bump would make every ready row (CSV ones too) claimable and
+prepared again. `skipped` is optional and written only for a workbook with a skipped sheet: a CSV's
+manifest is byte for byte what it was, and no host has prepared a workbook yet. A reader that does
+not know the key and parses strictly (as this crate's own parser, with `deny_unknown_fields`, did
+before this change) fails closed on exactly those manifests: it must treat the source as not prepared,
+as for any manifest it cannot read. **Readers on the ADP side that need to accept it** (and the
+optional `conversion` key, which already needed it): the preparation job binary (A3), the status
+endpoint, the registry-side readers of `tables_json` (which does not carry it), and the prelude that
+reads the manifest in the sandbox (C7). **The whole manifest is checked after every sheet**: the
+table list against the 64 KiB registry row and then the whole file (tables, one conversion report
+each, skipped sheets) against its 128 KiB cap, each with its own sentence, so 256 sheets fail at the
+sheet that overflows and not late, as `internal`, at the manifest put.
 
 **Names.** Table and column names have Unicode format characters (category Cf: bidirectional
 overrides, zero-width characters, the byte order mark) replaced by `_` as control characters
 are, and the manifest refuses them. Known limit, shared with the CSV and not changed: column names
 are made unique case-sensitively (`a` and `A` are two columns) while table names ignore case.
 
-**The table list of a workbook** is checked after every sheet against the 64 KiB registry row, so
+**The table list of a workbook** (and the manifest, see above) is checked after every sheet against the 64 KiB registry row, so
 many sheets fail early, with their own sentence (`table_too_large`: the table lists of all the
 sheets do not fit the registry row; export fewer sheets or columns). A refusal before anything is
 written (the byte cap) no longer asks the adapter to delete derived objects with an empty key
@@ -1330,3 +1344,9 @@ promise. The scenarios added after the review: production 64 MiB parts, a workbo
 sheets (the peak is one sheet's), a sheet read again after a late conflict, and a sheet of 16,384
 columns, refused after its sample (its table list cannot fit the registry row) at 4 MiB. Tests
 that measure share global counters, so they take one lock and run one at a time.
+
+**No empty list to the adapter, anywhere.** A host adapter may read an empty key list in
+`delete_derived` as "delete everything under the prefix", so no path sends one: `fail` (nothing
+written), `source_gone`, `settle_lost` and `delete_best_effort` skip the call when they hold no key,
+and the cleanup pass (`attachment_gc`) settles a row that tracks nothing without asking the adapter.
+Each has a test with an adapter that records its calls, and each fails without the guard.

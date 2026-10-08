@@ -197,16 +197,20 @@ async fn remove_prepared(
         );
         return Ok(false);
     }
-    if let Err(e) = storage.delete_derived(source, &keys).await {
-        summary.storage_errors += 1;
-        tracing::warn!(
-            target: "colmena::attachment_gc",
-            event = "gc.prepared.storage_delete_failed",
-            source_key = source,
-            error = %e,
-            "prepared blob delete failed; the row stays `deleting` and a later run retries"
-        );
-        return Ok(true);
+    // An adapter may read an empty list as "delete everything under the prefix": with
+    // nothing tracked, nothing is asked of it.
+    if !keys.is_empty() {
+        if let Err(e) = storage.delete_derived(source, &keys).await {
+            summary.storage_errors += 1;
+            tracing::warn!(
+                target: "colmena::attachment_gc",
+                event = "gc.prepared.storage_delete_failed",
+                source_key = source,
+                error = %e,
+                "prepared blob delete failed; the row stays `deleting` and a later run retries"
+            );
+            return Ok(true);
+        }
     }
     summary.blobs_deleted += keys.len() as u64;
     if registry.finish_delete(source, &owner).await? {
@@ -282,6 +286,8 @@ mod tests {
         bare_root: Mutex<bool>,
         /// Runs before `delete_derived` deletes anything.
         hook: Mutex<Option<Hook>>,
+        /// Times `delete_derived` was asked, whatever the list.
+        derived_calls: Mutex<usize>,
     }
 
     type Hook = Box<dyn Fn() -> futures::future::BoxFuture<'static, ()> + Send + Sync>;
@@ -349,6 +355,7 @@ mod tests {
             _source: &str,
             tracked_keys: &[String],
         ) -> Result<(), StorageError> {
+            *self.derived_calls.lock().unwrap() += 1;
             let hook = self.hook.lock().unwrap().take();
             if let Some(hook) = hook {
                 hook().await;
@@ -714,6 +721,26 @@ mod tests {
             "nothing to contain: the row just goes"
         );
         assert_eq!(summary.keys_rejected, 0);
+    }
+
+    #[tokio::test]
+    async fn attachment_gc_never_asks_the_adapter_to_delete_with_an_empty_list() {
+        let f = fixture().await;
+        f.registry
+            .claim(claim_at("empty", "job", now()))
+            .await
+            .unwrap()
+            .unwrap();
+        f.registry
+            .fail(&source_of("empty"), "job", "time", "x", now())
+            .await
+            .unwrap();
+        // With a root and without one: a row that tracks nothing is settled and the
+        // adapter, which might read an empty list as "delete by prefix", is not asked.
+        let storage = FakeStorage::with(&[]);
+        let summary = gc_source(&f, &storage, "empty", &now, false).await;
+        assert_eq!(summary.rows_deleted, 1);
+        assert_eq!(*storage.derived_calls.lock().unwrap(), 0);
     }
 
     #[tokio::test]
