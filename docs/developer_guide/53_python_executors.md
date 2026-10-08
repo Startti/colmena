@@ -253,7 +253,10 @@ generated id (32 lowercase hex digits; a link, a file or any other name is skipp
 `out` volume and, once it is known not to be a mount, removes the directory without following links; a volume that cannot
 be detached, or an `out` that cannot be opened for any reason but ENOENT (EMFILE, EACCES, EIO, a file in its place), is left
 in place and logged. It cannot tell a leftover from a call in flight, so the staging root must belong
-to ONE executor. If the staging volume is persistent, the prepared data of a call that was killed stays on it until the
+to ONE executor, and that is enforced: `new_for_serving` first takes an exclusive `flock` on `.executor.lock` inside the root
+(`staging::StagingLock`, opened `O_NOFOLLOW`, held for the executor's life and released by a crash), BEFORE the sweep; a
+second process on the same root gets `PythonExecutorError: the staging root is already owned by another executor` as its
+startup error and sweeps nothing. If the staging volume is persistent, the prepared data of a call that was killed stays on it until the
 next start of an executor with that root; a tmpfs staging volume vanishes with the instance.
 
 For a jail with a staging root, two layers are added so that the read-only guarantee of `/data` does not rest on the empty

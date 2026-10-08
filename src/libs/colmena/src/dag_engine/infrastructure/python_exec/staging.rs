@@ -507,6 +507,70 @@ fn out_state(opened: io::Result<Option<u64>>, call_dev: Option<u64>) -> OutState
     }
 }
 
+/// Name of the lock file inside a staging root. Not a generated call id, so the
+/// sweep never touches it.
+#[cfg(target_os = "linux")]
+pub const LOCK_NAME: &str = ".executor.lock";
+
+/// Why the staging root could not be locked.
+#[cfg(target_os = "linux")]
+#[derive(Debug)]
+pub enum LockError {
+    /// Another process (or another executor of this one) holds it.
+    Held,
+    Io(io::Error),
+}
+
+#[cfg(target_os = "linux")]
+impl std::fmt::Display for LockError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            LockError::Held => write!(
+                f,
+                "PythonExecutorError: the staging root is already owned by another executor (one executor per staging root)"
+            ),
+            LockError::Io(e) => write!(f, "PythonExecutorError: cannot lock the staging root: {e}"),
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl std::error::Error for LockError {}
+
+/// An exclusive advisory lock (`flock`) on a file inside the staging root, held
+/// until this is dropped (or the process ends: a killed executor frees it). The
+/// file is opened with `O_NOFOLLOW` relative to the root's descriptor and is never
+/// reachable by a call (the root is covered in the jail). One executor per root:
+/// the startup sweep cannot tell a leftover from a call in flight, so whoever
+/// sweeps must own the root.
+#[cfg(target_os = "linux")]
+#[derive(Debug)]
+pub struct StagingLock {
+    _file: OwnedFd,
+}
+
+#[cfg(target_os = "linux")]
+impl StagingLock {
+    pub fn acquire(root: &Path) -> Result<Self, LockError> {
+        let rootfd = open_root(root).map_err(LockError::Io)?;
+        let name = CString::new(LOCK_NAME).expect("no nul");
+        let flags = libc::O_RDWR | libc::O_CREAT | libc::O_NOFOLLOW | libc::O_CLOEXEC;
+        let fd = unsafe { libc::openat(rootfd.as_raw_fd(), name.as_ptr(), flags, 0o600) };
+        if fd < 0 {
+            return Err(LockError::Io(io::Error::last_os_error()));
+        }
+        let file = unsafe { OwnedFd::from_raw_fd(fd) };
+        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+            let e = io::Error::last_os_error();
+            return Err(match e.raw_os_error() {
+                Some(libc::EWOULDBLOCK) => LockError::Held,
+                _ => LockError::Io(e),
+            });
+        }
+        Ok(StagingLock { _file: file })
+    }
+}
+
 /// What a sweep of the staging root did.
 #[cfg(target_os = "linux")]
 #[derive(Debug, Default, PartialEq, Eq)]

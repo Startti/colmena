@@ -10,8 +10,8 @@ use colmena::dag_engine::infrastructure::python_exec::child::CallMounts;
 use colmena::dag_engine::infrastructure::python_exec::config::SubprocessConfig;
 use colmena::dag_engine::infrastructure::python_exec::protocol::CRASHED_MESSAGE;
 use colmena::dag_engine::infrastructure::python_exec::staging::{
-    check_out_volume, open_call_dirs, sweep_staging_root, StageError, StagedCall, OUT_MAX_INODES,
-    OUT_MB_MAX, STAGED_VOLUMES_MAX,
+    check_out_volume, open_call_dirs, sweep_staging_root, LockError, StageError, StagedCall,
+    StagingLock, OUT_MAX_INODES, OUT_MB_MAX, STAGED_VOLUMES_MAX,
 };
 use colmena::dag_engine::infrastructure::python_exec::subprocess::SubprocessExecutor;
 use serde_json::{json, Value};
@@ -1575,4 +1575,59 @@ fn the_sweep_leaves_a_call_whose_out_it_cannot_open() {
     std::fs::remove_file(call.join("out")).unwrap();
     let report = sweep_staging_root(&root).unwrap();
     assert_eq!(report.removed, 1, "{report:?}");
+}
+
+// ---------------------------------------------------------------------------
+// One executor per staging root, enforced.
+// ---------------------------------------------------------------------------
+
+/// A second executor on a root that another process serves gets a typed startup
+/// error and sweeps nothing: the first one's in-flight call and its volume are
+/// untouched. When the first is gone, the root can be taken again.
+#[tokio::test]
+async fn a_second_serving_executor_on_one_root_is_refused_and_sweeps_nothing() {
+    let Some(_alone) = Root::exclusive() else {
+        return;
+    };
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().canonicalize().unwrap();
+    let build = |uid_base: u32| {
+        let mut cfg = SubprocessConfig::from_lookup(&|_: &str| None::<String>).unwrap();
+        cfg.bin = PathBuf::from(env!("CARGO_BIN_EXE_python_executor"));
+        cfg.slots = 1;
+        cfg.uid_base = uid_base;
+        cfg.staging_root = Some(root.clone());
+        SubprocessExecutor::new_for_serving(cfg, Duration::from_secs(60))
+    };
+    let first = build(67000).unwrap();
+    // The first one has a call in flight: staged, data written, volume mounted.
+    let staged = first.stage_call(1).unwrap();
+    std::fs::write(staged.data_dir().join("a.txt"), "in flight").unwrap();
+    std::fs::write(staged.out_dir().join("partial.csv"), "half").unwrap();
+    let in_flight = root.join(staged.id());
+    let err = build(67100)
+        .err()
+        .expect("a second executor on the same root");
+    assert!(
+        err.0.contains("already") && err.0.contains("another executor"),
+        "{}",
+        err.0
+    );
+    // The same, one level down, typed.
+    assert!(matches!(StagingLock::acquire(&root), Err(LockError::Held)));
+    assert!(
+        in_flight.join("data").join("a.txt").exists(),
+        "swept from under a live call"
+    );
+    assert_eq!(mounts_under(&root), 1, "the live volume was unmounted");
+    // And the live call still works end to end.
+    let code = "import os\noutput = open('/data/a.txt').read()";
+    assert_eq!(
+        run_staged(&first, staged.mounts(), code).await.unwrap(),
+        json!("in flight")
+    );
+    drop(staged);
+    // Released with the executor: the root can be taken again.
+    drop(first);
+    assert!(build(67200).is_ok());
 }

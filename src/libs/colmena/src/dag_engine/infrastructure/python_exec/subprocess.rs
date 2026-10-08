@@ -15,7 +15,7 @@ use super::protocol::{
     MALFORMED_MESSAGE, REFUSED_MESSAGE,
 };
 use super::staging::{
-    StageError, StagedCall, StagingBudget, STAGED_OUT_MIB_MAX, STAGED_VOLUMES_MAX,
+    StageError, StagedCall, StagingBudget, StagingLock, STAGED_OUT_MIB_MAX, STAGED_VOLUMES_MAX,
 };
 use super::zygote::{ARROW_ENV, TEMPLATE_ENV};
 use crate::dag_engine::domain::python_executor::{
@@ -151,6 +151,9 @@ pub struct SubprocessExecutor {
     stderr_dropped: Arc<AtomicU64>,
     /// Staged volumes in flight (dark behind `COLMENA_LARGE_TABULAR`).
     staging_budget: Arc<StagingBudget>,
+    /// The lock that makes this the only executor of its staging root, held for
+    /// this executor's life (see [`Self::new_for_serving`]).
+    _staging_lock: Option<StagingLock>,
 }
 
 /// Returns its index to the pool when dropped, once every process still
@@ -435,9 +438,14 @@ impl SubprocessExecutor {
         cfg: SubprocessConfig,
         max_timeout: Duration,
     ) -> Result<Self, ExecutorConfigError> {
-        let executor = Self::new(cfg, max_timeout)?;
-        if let Some(root) = &executor.cfg.staging_root {
-            if let Err(e) = super::staging::sweep_staging_root(root) {
+        let mut executor = Self::new(cfg, max_timeout)?;
+        if let Some(root) = executor.cfg.staging_root.clone() {
+            // Before the sweep, which would unmount a live executor's volumes: the
+            // root is taken first, or this start fails and sweeps nothing.
+            let lock =
+                StagingLock::acquire(&root).map_err(|e| ExecutorConfigError(e.to_string()))?;
+            executor._staging_lock = Some(lock);
+            if let Err(e) = super::staging::sweep_staging_root(&root) {
                 tracing::error!(target: T_PYTHON_EXEC, error = %e, "cannot sweep the staging root");
             }
         }
@@ -474,6 +482,7 @@ impl SubprocessExecutor {
             spawner,
             stderr_dropped: Arc::default(),
             staging_budget: Arc::new(StagingBudget::new(STAGED_VOLUMES_MAX, STAGED_OUT_MIB_MAX)),
+            _staging_lock: None,
         })
     }
 
