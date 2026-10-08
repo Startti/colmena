@@ -426,6 +426,11 @@ Locally, run them in a container:
 -e COLMENA_PYEXEC_JAIL_TESTS=1 -v "$PWD":/work -w /work <image with Rust, python3-dev and pandas> cargo test --test
 python_executor_subprocess --test python_executor_isolation`.
 
+The one test that reads a Parquet part through `/data` needs pyarrow for the system Python, which the job's Debian
+packages do not include (a decision for the sandbox owner): without it the test prints a `NOTE` and passes; with
+`COLMENA_PYEXEC_EXPECT_PYARROW=1` (set it wherever pyarrow is installed) a missing pyarrow prints the skip line the
+job's step fails on and fails the test.
+
 CI runs them in the `python-executor` job of `ci-develop.yml` (Debian bookworm container with those options, pandas,
 numpy and scipy from Debian): the executor's unit tests, both jail suites (the step fails on any skip line),
 `python_executor self-test`, the Python node and tool suites and the equivalence bench under `subprocess` with

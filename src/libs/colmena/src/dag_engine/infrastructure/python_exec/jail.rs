@@ -461,6 +461,83 @@ mod tests {
         assert_eq!(serde_json::from_str::<JailSpec>(today).unwrap(), spec);
     }
 
+    /// Between the walk and the bind a path component can be swapped. Run the real
+    /// `open_staged` and `bind_dir` in a child with a mount namespace of its own,
+    /// swap the `data` directory (and then the whole call directory) for others
+    /// holding other files, and bind: what appears is the ORIGINAL directory.
+    #[test]
+    fn a_path_swapped_between_the_walk_and_the_bind_binds_the_original() {
+        use crate::dag_engine::infrastructure::python_exec::staging::StagedCall;
+        if std::env::var("COLMENA_PYEXEC_JAIL_TESTS").as_deref() != Ok("1") {
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let base = tmp.path().canonicalize().unwrap();
+        let root = base.join("root");
+        std::fs::create_dir(&root).unwrap();
+        let staged = StagedCall::create(&root, 1).unwrap();
+        std::fs::write(staged.data_dir().join("original.txt"), "x").unwrap();
+        let target = base.join("target");
+        std::fs::create_dir(&target).unwrap();
+        let spec = JailSpec {
+            uid_base: 1,
+            tmp_mb: 1,
+            hide_paths: vec![],
+            staging_root: Some(root.clone()),
+        };
+        let hdr = CallHeader {
+            slot: 0,
+            memory_mb: 1,
+            cpu_secs: 1,
+            max_request_bytes: 1,
+            mounts: Some(staged.mounts()),
+        };
+        let call = root.join(staged.id());
+        let evil = base.join("evil");
+        std::fs::create_dir_all(evil.join("data")).unwrap();
+        std::fs::write(evil.join("data").join("evil.txt"), "x").unwrap();
+        match unsafe { libc::fork() } {
+            0 => {
+                unsafe { libc::alarm(60) };
+                let code = std::panic::catch_unwind(|| {
+                    check(unsafe { libc::unshare(libc::CLONE_NEWNS) }).unwrap();
+                    mount(
+                        None,
+                        Path::new("/"),
+                        None,
+                        libc::MS_REC | libc::MS_PRIVATE,
+                        None,
+                    )
+                    .unwrap();
+                    let opened = open_staged(&spec, &hdr).unwrap().unwrap();
+                    // The swaps: the data directory, then the call directory itself.
+                    std::fs::rename(call.join("data"), call.join("data-orig")).unwrap();
+                    std::fs::create_dir(call.join("data")).unwrap();
+                    std::fs::write(call.join("data").join("evil.txt"), "x").unwrap();
+                    std::fs::rename(&call, root.join("call-orig")).unwrap();
+                    std::os::unix::fs::symlink(&evil, &call).unwrap();
+                    bind_dir(&opened.dirs.data, target.to_str().unwrap(), true).unwrap();
+                    let mut names: Vec<_> = std::fs::read_dir(&target)
+                        .unwrap()
+                        .map(|e| e.unwrap().file_name().into_string().unwrap())
+                        .collect();
+                    names.sort();
+                    i32::from(names != ["original.txt"])
+                });
+                unsafe { libc::_exit(code.unwrap_or(2)) }
+            }
+            pid => {
+                let mut status = 0;
+                assert_eq!(unsafe { libc::waitpid(pid, &mut status, 0) }, pid);
+                let ok = libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0;
+                // Put the original back so the call can be released.
+                let _ = std::fs::remove_file(&call);
+                let _ = std::fs::rename(root.join("call-orig"), &call);
+                assert!(ok, "the swapped path was bound (exit status {status})");
+            }
+        }
+    }
+
     /// A mount point is a directory of the jail's own root: made when missing,
     /// never a link or a file standing in its place.
     #[test]

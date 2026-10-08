@@ -573,7 +573,7 @@ pub fn sweep_staging_root(root: &Path) -> io::Result<SweepReport> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::os::unix::fs::{symlink, DirBuilderExt, MetadataExt};
+    use std::os::unix::fs::{symlink, DirBuilderExt};
 
     /// A staging root and one call directory under it, as the trusted side
     /// lays them out. The root is canonical: macOS temp dirs run through a link.
@@ -841,31 +841,5 @@ mod tests {
                 assert_eq!(e.kind(), io::ErrorKind::PermissionDenied, "{name} {mode:o}");
             }
         }
-    }
-
-    /// Between the check and the bind a path can be swapped for a link. The
-    /// descriptors opened before the swap keep naming the directories that
-    /// were checked: the jail binds those, never the path again.
-    #[test]
-    fn the_descriptors_keep_the_checked_directories_after_a_swap() {
-        let f = fixture();
-        let dirs = open_call_dirs(&f.root, "c1").unwrap();
-        let mut st: libc::stat = unsafe { std::mem::zeroed() };
-        unsafe { libc::fstat(dirs.data.as_raw_fd(), &mut st) };
-        let checked = (st.st_dev as u64, st.st_ino as u64);
-
-        let data = f.root.join("c1").join("data");
-        let evil = f.root.join("evil");
-        std::fs::DirBuilder::new()
-            .mode(0o755)
-            .create(&evil)
-            .unwrap();
-        std::fs::rename(&data, f.root.join("c1").join("data-old")).unwrap();
-        symlink(&evil, &data).unwrap();
-
-        unsafe { libc::fstat(dirs.data.as_raw_fd(), &mut st) };
-        assert_eq!((st.st_dev as u64, st.st_ino as u64), checked);
-        let evil_ino = std::fs::metadata(&evil).unwrap().ino();
-        assert_ne!(st.st_ino as u64, evil_ino);
     }
 }
