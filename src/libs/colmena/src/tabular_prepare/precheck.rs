@@ -112,6 +112,10 @@ pub struct EntryInfo {
     pub method: u16,
     pub compressed: u64,
     pub uncompressed: u64,
+    /// Where the entry's data begins (after its local header), validated.
+    pub data_offset: u64,
+    /// The CRC-32 of the uncompressed data, as the central directory declares it.
+    pub crc: u32,
 }
 
 /// What a passing archive declares.
@@ -171,7 +175,7 @@ pub(crate) fn check_archive_with<R: Read + Seek>(
     if cd_size > limits.max_central_dir_bytes {
         return Err(ArchiveError::CentralDirectoryTooLarge);
     }
-    if cd_size < (entries_total * CENTRAL_LEN) as u64 || cd_offset + cd_size > eocd_at {
+    if cd_size < (entries_total * CENTRAL_LEN) as u64 || cd_offset + cd_size != eocd_at {
         return Err(ArchiveError::InconsistentHeaders);
     }
     let mut central = vec![0u8; cd_size as usize];
@@ -247,6 +251,8 @@ pub(crate) fn check_archive_with<R: Read + Seek>(
             method,
             compressed: csize,
             uncompressed: usize_,
+            data_offset: local_offset + local_len,
+            crc,
         });
     }
     if at != central.len() {
@@ -285,6 +291,14 @@ fn read_end_record<R: Read + Seek>(
         if tail[pos..].starts_with(b"PK\x05\x06")
             && pos + EOCD_LEN + usize::from(le16(&tail, pos + 20)) == tail.len()
         {
+            // A second record inside the comment would be a second directory for any
+            // reader that looks for the record from the end of the file: refused.
+            if tail[pos + EOCD_LEN..]
+                .windows(4)
+                .any(|w| w == b"PK\x05\x06")
+            {
+                return Err(ArchiveError::InconsistentHeaders);
+            }
             let mut record = [0u8; EOCD_LEN];
             record.copy_from_slice(&tail[pos..pos + EOCD_LEN]);
             return Ok((record, len - tail_len + pos as u64));
@@ -583,5 +597,26 @@ mod tests {
         // The end of the file (64 KiB at most) and a few small headers.
         assert!(counting.read < 128 * 1024, "read {} bytes", counting.read);
         assert!(counting.biggest <= 65_536 + EOCD_LEN);
+    }
+
+    #[test]
+    fn a_second_end_record_in_the_comment_or_a_gap_before_the_end_record_is_refused() {
+        // A real archive whose comment holds a forged end record: a library that
+        // looks for the record from the end of the file would read the forged
+        // directory (65,535 entries) that this check never saw.
+        let mut forged = b"PK\x05\x06".to_vec();
+        forged.extend_from_slice(&[0, 0, 0, 0, 0xFF, 0xFF, 0xFF, 0xFF]);
+        forged.extend_from_slice(&[0, 0, 0, 1, 0, 0, 0, 0, 1, 0]);
+        let mut bytes = build(&[Entry::stored("a.xml", b"hello")]);
+        let n = bytes.len();
+        bytes[n - 2..].copy_from_slice(&(forged.len() as u16).to_le_bytes());
+        bytes.extend_from_slice(&forged);
+        assert_eq!(check(bytes), Err(ArchiveError::InconsistentHeaders));
+        // Bytes between the central directory and the end record shift where a
+        // library would find the directory: the two must meet exactly.
+        let mut bytes = build(&[Entry::stored("a.xml", b"hello")]);
+        let n = bytes.len();
+        bytes.splice(n - 22..n - 22, [7u8; 5]);
+        assert_eq!(check(bytes), Err(ArchiveError::InconsistentHeaders));
     }
 }
