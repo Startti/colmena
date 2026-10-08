@@ -42,6 +42,7 @@ const BOOL: u8 = 4;
 const DATE: u8 = 8;
 const TIMESTAMP: u8 = 16;
 const TEXT: u8 = 32;
+const BIGINT: u8 = 64;
 
 /// The largest whole number a double holds exactly (2^53).
 const EXACT_INT: f64 = 9_007_199_254_740_992.0;
@@ -54,6 +55,7 @@ fn kind_of(cell: &Cell) -> u8 {
     match cell {
         Cell::Number(n) if is_whole(*n) => INT,
         Cell::Number(n) if n.is_finite() => FLOAT,
+        Cell::Integer(_) => BIGINT,
         Cell::Bool(_) => BOOL,
         Cell::Temporal(Temporal::Date(_)) => DATE,
         Cell::Temporal(Temporal::Timestamp(_)) => TIMESTAMP,
@@ -87,6 +89,15 @@ fn resolve(seen: u8) -> ColumnType {
     match seen {
         0 => ColumnType::String,
         s if s & TEXT != 0 => ColumnType::String,
+        // Whole numbers beyond 2^53 are exact only as 64-bit integers: with anything
+        // but other whole numbers the column is text, never a rounded float.
+        s if s & BIGINT != 0 => {
+            if s & !(INT | BIGINT) == 0 {
+                ColumnType::Int
+            } else {
+                ColumnType::String
+            }
+        }
         s if s == INT => ColumnType::Int,
         s if s & !(INT | FLOAT) == 0 => ColumnType::Float,
         BOOL => ColumnType::Bool,
@@ -104,6 +115,7 @@ pub fn cell_text(cell: &Cell) -> Cow<'_, str> {
         Cell::Number(n) => Cow::Owned(format!("{n}")),
         Cell::Bool(true) => Cow::Borrowed("TRUE"),
         Cell::Bool(false) => Cow::Borrowed("FALSE"),
+        Cell::Integer(n) => Cow::Owned(n.to_string()),
         Cell::Temporal(t) => Cow::Owned(t.to_text()),
     }
 }
@@ -150,6 +162,7 @@ impl Column {
                 return Some(text.len());
             }
             (Self::Int(b), Cell::Number(n)) if is_whole(*n) => b.append_value(*n as i64),
+            (Self::Int(b), Cell::Integer(n)) => b.append_value(*n),
             (Self::Float(b), Cell::Number(n)) if n.is_finite() => b.append_value(*n),
             (Self::Bool(b), Cell::Bool(v)) => b.append_value(*v),
             (Self::Date(b), Cell::Temporal(Temporal::Date(d))) => b.append_value(*d),
@@ -238,13 +251,14 @@ impl Batcher {
     }
 
     /// Closes the batch (`None` when it holds no row) and starts the next.
-    pub fn take(&mut self) -> Option<RecordBatch> {
+    pub fn take(&mut self) -> Result<Option<RecordBatch>, arrow_schema::ArrowError> {
         if self.rows == 0 {
-            return None;
+            return Ok(None);
         }
         let arrays: Vec<ArrayRef> = self.columns.iter_mut().map(Column::finish).collect();
         (self.rows, self.text_bytes) = (0, 0);
-        RecordBatch::try_new(self.schema.clone(), arrays).ok()
+        // Never a batch silently dropped: one that cannot be built is an error.
+        RecordBatch::try_new(self.schema.clone(), arrays).map(Some)
     }
 }
 
@@ -364,7 +378,7 @@ mod tests {
             .unwrap();
         batcher.push(&vec![(2, txt("x"))]).unwrap();
         assert_eq!(batcher.rows(), 2);
-        let batch = batcher.take().unwrap();
+        let batch = batcher.take().unwrap().unwrap();
         assert_eq!((batch.num_rows(), batch.num_columns()), (2, 5));
         assert_eq!(
             batch
@@ -398,7 +412,10 @@ mod tests {
             .as_primitive::<TimestampMicrosecondType>()
             .value(0);
         assert_eq!(micros, 18_628 * 86_400_000_000);
-        assert!(batcher.take().is_none(), "a taken batch starts empty");
+        assert!(
+            batcher.take().unwrap().is_none(),
+            "a taken batch starts empty"
+        );
     }
 
     #[test]
@@ -458,5 +475,38 @@ mod tests {
         assert!(!text.is_full());
         text.push(&vec![(0, big)]).unwrap();
         assert!(text.is_full());
+    }
+
+    #[test]
+    fn a_whole_number_beyond_2_53_is_an_exact_integer_or_text_never_a_rounded_float() {
+        let big = Cell::Integer(12_345_678_901_234_567);
+        let rows = |cells: Vec<Cell>| -> Vec<RowCells> {
+            cells.into_iter().map(|c| vec![(0, c)]).collect()
+        };
+        use ColumnType::*;
+        // Only whole numbers: a 64-bit integer column, with every digit.
+        assert_eq!(types_of(&rows(vec![big.clone(), num(7.0)]), 1), [Int]);
+        let mut batcher = Batcher::new(&names(1), &[Int]);
+        batcher.push(&vec![(0, big.clone())]).unwrap();
+        let batch = batcher.take().unwrap().unwrap();
+        assert_eq!(
+            batch.column(0).as_primitive::<Int64Type>().value(0),
+            12_345_678_901_234_567
+        );
+        // With a number that has a fraction it would have to be rounded: text.
+        assert_eq!(types_of(&rows(vec![big.clone(), num(1.5)]), 1), [String]);
+        assert_eq!(cell_text(&big), "12345678901234567");
+        // A late one in a float column is a conflict, not a rounding.
+        let mut floats = Batcher::new(&names(1), &[Float]);
+        assert_eq!(floats.push(&vec![(0, big)]), Err(0));
+    }
+
+    #[test]
+    fn a_batch_that_cannot_be_built_is_an_error_not_a_dropped_batch() {
+        let mut batcher = Batcher::new(&names(1), &[ColumnType::Int]);
+        batcher.push(&vec![(0, num(1.0))]).unwrap();
+        // A column the schema does not have: the arrays no longer match it.
+        batcher.columns.push(Column::new(ColumnType::Int));
+        assert!(batcher.take().is_err());
     }
 }

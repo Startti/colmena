@@ -261,3 +261,28 @@ async fn a_tag_with_tens_of_thousands_of_attributes_is_refused_in_linear_time() 
         started.elapsed()
     );
 }
+
+#[tokio::test]
+async fn one_cell_made_of_millions_of_tiny_tokens_is_cut_at_the_cell_cap() {
+    let _one_at_a_time = SERIAL.lock().await;
+    // 3,000,000 comments between one-byte texts: each token is tiny and passes the
+    // per-token guard, but the cell they build would be 3 MB.
+    let value = format!("1{}", "<!-- -->1".repeat(3_000_000));
+    let sheet = format!(
+        "<worksheet><sheetData><row r=\"1\"><c r=\"A1\" t=\"str\"><v>{value}</v></c></row></sheetData></worksheet>"
+    );
+    let (pkg, _) = open(book_with("xl/worksheets/sheet1.xml", sheet.into_bytes())).await;
+    let mut pkg = pkg.unwrap();
+    let base = LIVE.load(Ordering::SeqCst);
+    PEAK.store(base, Ordering::SeqCst);
+    let result = read_part(&mut pkg, "xl/worksheets/sheet1.xml");
+    let peak = PEAK.load(Ordering::SeqCst) - base;
+    assert!(matches!(
+        result,
+        Err(XlsxError::Invalid(
+            colmena::tabular_prepare::xlsx_spool::Invalid::CellTooLong
+        ))
+    ));
+    // The cell cap is 128 KiB; the rest is the reader's own buffers.
+    assert!(peak < MIB, "peak {peak} bytes");
+}

@@ -1087,6 +1087,23 @@ index that does not exist, is a corrupt part (`BadCell`).
   (numbers, text with markup characters, a boolean, a date, a cached formula, a merged range)
   through the whole stack.
 
+**Values that must not change** (fixes after review):
+
+- A whole number beyond 2^53 (a 17-digit id) is kept as the digits the file has (`Cell::Integer`,
+  a 64-bit integer) and never parsed to a double and stored altered. The rule: a column whose
+  numbers are all whole is `int` (64-bit, exact); a column that mixes such a number with a number
+  that has a fraction is **text**, never a rounded float; one that does not fit 64 bits is text.
+- A cell arrives in any number of tokens (text, CDATA, comments between them), each small, so
+  the **running length is capped at 128 KiB on every push**, not after the pieces are joined.
+- CDATA is text, in a value and in an inline string, as in the shared strings (it was read as
+  empty and became null).
+- A boolean is `1` or `true` in any case (`TRUE`, `True`).
+- A number format is elapsed time only for `[h]`, `[hh]`, `[m]`, `[mm]`, `[s]`, `[ss]`
+  (any case); `[Magenta]0.00` or `[$-409]` is not. A value within half a second of midnight shows
+  `23:59:59` of its own day instead of rolling over (in the 1900 system to the day that never
+  existed).
+- A batch that cannot be built is an error (`a batch could not be built`), never a batch dropped.
+
 ### Typing the columns (`xlsx_columns.rs`)
 
 An xlsx cell already has a type, so a sheet's columns are typed **from the kinds of their

@@ -140,6 +140,8 @@ enum Item {
     Done(SheetStats),
     Conflict(TypeConflict),
     Failed(XlsxError),
+    /// A batch that could not be built.
+    Broken,
 }
 
 /// The blocking half of a run: read every row of the sheet, type it and send the
@@ -173,6 +175,7 @@ fn produce(
     let mut header_seen = false;
     let mut data_rows = 0u64;
     let mut stopped = false;
+    let mut broken = false;
     let mut conflict = None;
     let read = read_sheet_with(pkg, part, &ctx, limits, &mut |_, row| {
         if cancel.is_cancelled() {
@@ -186,9 +189,16 @@ fn produce(
             return Err(XlsxError::Invalid(Invalid::BeyondHeader));
         }
         if batcher.is_full() {
-            if let Some(batch) = batcher.take() {
-                if tx.blocking_send(Item::Batch(batch)).is_err() {
-                    stopped = true;
+            match batcher.take() {
+                Ok(Some(batch)) => {
+                    if tx.blocking_send(Item::Batch(batch)).is_err() {
+                        stopped = true;
+                        return Ok(false);
+                    }
+                }
+                Ok(None) => {}
+                Err(_) => {
+                    broken = true;
                     return Ok(false);
                 }
             }
@@ -206,10 +216,18 @@ fn produce(
     let item = match (read, conflict) {
         _ if stopped => return,
         (Err(e), _) => Item::Failed(e),
+        (Ok(_), _) if broken => Item::Broken,
         (Ok(_), Some(c)) => Item::Conflict(c),
         (Ok(stats), None) => {
-            if let Some(batch) = batcher.take() {
-                if tx.blocking_send(Item::Batch(batch)).is_err() {
+            match batcher.take() {
+                Ok(Some(batch)) => {
+                    if tx.blocking_send(Item::Batch(batch)).is_err() {
+                        return;
+                    }
+                }
+                Ok(None) => {}
+                Err(_) => {
+                    let _ = tx.blocking_send(Item::Broken);
                     return;
                 }
             }
@@ -275,6 +293,10 @@ pub async fn run_sheet(
                 Some(Item::Done(stats)) => return Ok((writer.finish().await?, stats)),
                 Some(Item::Conflict(c)) => return Err(RunEnd::Conflict(c)),
                 Some(Item::Failed(e)) => return Err(RunEnd::Failed(e.into())),
+                Some(Item::Broken) => {
+                    let e = ConvertError::Cast("a batch could not be built".into());
+                    return Err(RunEnd::Failed(e.into()));
+                }
                 None => {
                     let e = ConvertError::Cast("the reader stopped unexpectedly".into());
                     return Err(RunEnd::Failed(e.into()));

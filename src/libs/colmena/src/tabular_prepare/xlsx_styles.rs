@@ -88,9 +88,11 @@ pub fn classify(code: &str) -> NumFmt {
             }
             '[' => {
                 let inner: String = chars.by_ref().take_while(|&b| b != ']').collect();
+                // Only the elapsed-time sections count; a colour, a locale or a
+                // condition (`[Magenta]`, `[$-409]`, `[>100]`) does not.
                 if matches!(
-                    inner.chars().next(),
-                    Some('h' | 'H' | 'm' | 'M' | 's' | 'S')
+                    inner.to_ascii_lowercase().as_str(),
+                    "h" | "hh" | "m" | "mm" | "s" | "ss"
                 ) {
                     time = true;
                 }
@@ -213,12 +215,11 @@ pub fn temporal(serial: f64, date1904: bool, format: NumFmt) -> Option<Temporal>
     if format == NumFmt::Plain || !serial.is_finite() || !(0.0..2_958_466.0).contains(&serial) {
         return None;
     }
-    let mut days = serial.floor() as i64;
-    let mut secs = ((serial - serial.floor()) * 86_400.0).round() as u32;
-    if secs == 86_400 {
-        days += 1;
-        secs = 0;
-    }
+    let days = serial.floor() as i64;
+    // A value within half a second of midnight shows 23:59:59 of its own day:
+    // rolling over would land on the next day, and in the 1900 system possibly on
+    // the 29 February 1900 that never existed.
+    let secs = (((serial - serial.floor()) * 86_400.0).round() as u32).min(86_399);
     if format == NumFmt::Time {
         return (days == 0).then_some(Temporal::Time(secs));
     }
@@ -280,6 +281,14 @@ mod tests {
             ("0.00E+00", NumFmt::Plain),
             ("@", NumFmt::Plain),
             ("[Red]0.0", NumFmt::Plain),
+            ("[Magenta]0.00", NumFmt::Plain),
+            ("[Green]0", NumFmt::Plain),
+            ("[$-409]0.00", NumFmt::Plain),
+            ("[>100]0", NumFmt::Plain),
+            ("[Red]yyyy-mm-dd", NumFmt::Date),
+            ("[HH]:MM:SS", NumFmt::Time),
+            ("[mm]:ss", NumFmt::Time),
+            ("[hhh]0", NumFmt::Plain),
             ("0 \"days\"", NumFmt::Plain),
             ("\\d0", NumFmt::Plain),
             ("0_)", NumFmt::Plain),
@@ -341,10 +350,19 @@ mod tests {
             t(44_197.25, NumFmt::Date).as_deref(),
             Some("2021-01-01 06:00:00")
         );
-        // Seconds are rounded, and 23:59:59.9 is the next midnight.
+        // Seconds are rounded; 23:59:59.9 stays on its own day.
         assert_eq!(
             t(44_197.999_999_9, NumFmt::DateTime).as_deref(),
-            Some("2021-01-02 00:00:00")
+            Some("2021-01-01 23:59:59")
+        );
+        // Day 59 of the 1900 system rolling over would be the day that never existed.
+        assert_eq!(
+            text(59.999_999, false, NumFmt::Date).as_deref(),
+            Some("1900-02-28 23:59:59")
+        );
+        assert_eq!(
+            text(0.999_999_9, false, NumFmt::Time).as_deref(),
+            Some("23:59:59")
         );
         assert_eq!(t(0.5, NumFmt::Time).as_deref(), Some("12:00:00"));
         assert_eq!(

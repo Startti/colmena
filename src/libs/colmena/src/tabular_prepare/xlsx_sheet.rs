@@ -73,6 +73,9 @@ pub enum Cell {
     Text(Box<str>),
     Number(f64),
     Bool(bool),
+    /// A whole number beyond 2^53, which a double cannot hold exactly: kept as the
+    /// digits the file has, never rounded.
+    Integer(i64),
     Temporal(Temporal),
 }
 
@@ -135,6 +138,31 @@ fn column_of(reference: &str) -> Option<usize> {
     (letters > 0).then(|| column - 1)
 }
 
+/// The literal of a whole number of 16 digits or more that a double cannot hold
+/// exactly (beyond 2^53), as an integer; text when it does not fit 64 bits. `None`
+/// for every other literal, which is a number as a double holds it.
+fn big_integer(raw: &str) -> Option<Cell> {
+    let digits = raw.strip_prefix('-').unwrap_or(raw);
+    if digits.len() < 16 || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    match raw.parse::<i64>() {
+        Ok(n) if n.unsigned_abs() > 1 << 53 => Some(Cell::Integer(n)),
+        Ok(_) => None,
+        Err(_) => Some(Cell::Text(raw.into())),
+    }
+}
+
+/// Adds `more` to a cell's text, refusing the cell once it is over `cap`: a cell
+/// can arrive in any number of tokens (text, CDATA, runs), each small.
+fn push_capped(text: &mut String, more: &str, cap: usize) -> Result<(), XlsxError> {
+    if text.len() + more.len() > cap {
+        return Err(XlsxError::Invalid(Invalid::CellTooLong));
+    }
+    text.push_str(more);
+    Ok(())
+}
+
 /// An ISO 8601 date or date and time without a zone, as a value.
 fn iso_date(text: &str) -> Option<Temporal> {
     use chrono::{NaiveDate, NaiveDateTime};
@@ -177,9 +205,10 @@ fn finish(p: Pending, ctx: &SheetContext<'_>) -> Result<Option<Cell>, XlsxError>
                 .ok_or(XlsxError::Invalid(Invalid::BadCell))?;
             text(s)
         }
-        Kind::Bool => {
-            (!p.value.is_empty()).then(|| Cell::Bool(matches!(p.value.trim(), "1" | "true")))
-        }
+        Kind::Bool => (!p.value.is_empty()).then(|| {
+            let v = p.value.trim();
+            Cell::Bool(v == "1" || v.eq_ignore_ascii_case("true"))
+        }),
         Kind::IsoDate => match iso_date(p.value.trim()) {
             Some(t) => Some(Cell::Temporal(t)),
             None => text(&p.value),
@@ -187,6 +216,9 @@ fn finish(p: Pending, ctx: &SheetContext<'_>) -> Result<Option<Cell>, XlsxError>
         Kind::Number => {
             if p.value.trim().is_empty() {
                 return Ok(None);
+            }
+            if let Some(whole) = big_integer(p.value.trim()) {
+                return Ok(Some(whole));
             }
             match p.value.trim().parse::<f64>() {
                 Ok(n) => match temporal(n, ctx.date1904, ctx.styles.format(p.style)) {
@@ -373,10 +405,24 @@ pub(crate) fn read_sheet_with(
             },
             Event::Text(t) => {
                 if let Some(p) = pending.as_mut() {
+                    let cap = limits.max_cell_bytes;
                     if in_v {
-                        p.value.push_str(&text_of(&t)?);
+                        push_capped(&mut p.value, &text_of(&t)?, cap)?;
                     } else if in_is && in_t && !in_phonetic {
-                        p.inline.push_str(&unescape_ooxml(&text_of(&t)?));
+                        push_capped(&mut p.inline, &unescape_ooxml(&text_of(&t)?), cap)?;
+                    }
+                }
+            }
+            // A CDATA section is text with nothing to resolve.
+            Event::CData(c) => {
+                if let Some(p) = pending.as_mut() {
+                    let cap = limits.max_cell_bytes;
+                    let raw =
+                        std::str::from_utf8(&c).map_err(|_| XlsxError::Invalid(Invalid::Xml))?;
+                    if in_v {
+                        push_capped(&mut p.value, raw, cap)?;
+                    } else if in_is && in_t && !in_phonetic {
+                        push_capped(&mut p.inline, &unescape_ooxml(raw), cap)?;
                     }
                 }
             }
@@ -817,5 +863,71 @@ mod tests {
         let r = read_sheet(&mut pkg, &wb.sheets[0].part, &ctx, |_, _| Ok(true));
         assert_eq!(r.unwrap_err(), XlsxError::Cancelled);
         assert!(counter.load(Ordering::Relaxed) <= CANCEL_CHECK_CELLS);
+    }
+
+    #[tokio::test]
+    async fn cdata_is_text_in_a_value_and_in_an_inline_string_under_the_same_cell_cap() {
+        let rows = concat!(
+            "<row r=\"1\">",
+            "<c r=\"A1\"><v><![CDATA[42]]></v></c>",
+            "<c r=\"B1\" t=\"inlineStr\"><is><t><![CDATA[a <b> & c]]></t></is></c>",
+            "<c r=\"C1\" t=\"inlineStr\"><is><t>x<![CDATA[y]]>z</t></is></c>",
+            "</row>"
+        );
+        let (got, _) = read(Wb::new().sheet("A", rows).build()).await.unwrap();
+        assert_eq!(
+            got[0].1,
+            vec![
+                (0, Cell::Number(42.0)),
+                (1, text("a <b> & c")),
+                (2, text("xyz"))
+            ]
+        );
+        // The cap runs over the pieces of one cell, not after they are joined.
+        let piece = "<![CDATA[abcde]]>";
+        let long = format!(
+            "<row r=\"1\"><c r=\"A1\" t=\"inlineStr\"><is><t>{}</t></is></c></row>",
+            piece.repeat(3)
+        );
+        let r = read_limited(&long, limited(|l| l.max_cell_bytes = 14)).await;
+        assert_eq!(r.unwrap_err(), XlsxError::Invalid(Invalid::CellTooLong));
+        assert!(read_limited(&long, limited(|l| l.max_cell_bytes = 15))
+            .await
+            .is_ok());
+        let value = "<row r=\"1\"><c r=\"A1\" t=\"str\"><v>aaaaa<!-- --><![CDATA[bbbbb]]>ccccc</v></c></row>";
+        let r = read_limited(value, limited(|l| l.max_cell_bytes = 14)).await;
+        assert_eq!(r.unwrap_err(), XlsxError::Invalid(Invalid::CellTooLong));
+    }
+
+    #[tokio::test]
+    async fn whole_numbers_beyond_2_53_keep_their_digits_and_booleans_accept_any_case() {
+        let rows = concat!(
+            "<row r=\"1\">",
+            "<c r=\"A1\"><v>12345678901234567</v></c>",
+            "<c r=\"B1\"><v>-9007199254740993</v></c>",
+            "<c r=\"C1\"><v>9007199254740992</v></c>",
+            "<c r=\"D1\"><v>1234567890123456789012345</v></c>",
+            "<c r=\"E1\"><v>1.2345678901234567E+16</v></c>",
+            "<c r=\"F1\" t=\"b\"><v>TRUE</v></c>",
+            "<c r=\"G1\" t=\"b\"><v>True</v></c>",
+            "<c r=\"H1\" t=\"b\"><v>false</v></c>",
+            "<c r=\"I1\" t=\"b\"><v>1</v></c>",
+            "</row>"
+        );
+        let (got, _) = read(Wb::new().sheet("A", rows).build()).await.unwrap();
+        assert_eq!(
+            got[0].1,
+            vec![
+                (0, Cell::Integer(12_345_678_901_234_567)),
+                (1, Cell::Integer(-9_007_199_254_740_993)),
+                (2, Cell::Number(9_007_199_254_740_992.0)),
+                (3, text("1234567890123456789012345")),
+                (4, Cell::Number(1.2345678901234567e16)),
+                (5, Cell::Bool(true)),
+                (6, Cell::Bool(true)),
+                (7, Cell::Bool(false)),
+                (8, Cell::Bool(true)),
+            ]
+        );
     }
 }
