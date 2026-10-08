@@ -21,9 +21,13 @@ use std::io::{self, BufRead, Read, Seek, SeekFrom};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use thiserror::Error;
+use tokio_util::sync::CancellationToken;
 
 /// Sheets a workbook may have. It is the number of tables a manifest holds.
 pub const MAX_SHEETS: usize = crate::tabular_prepare::manifest::MAX_TABLES;
+
+/// Events between two looks at the cancel token, in any part.
+pub const CANCEL_CHECK_EVENTS: u64 = 4096;
 
 /// Elements open at once in any part. The deepest part this reads (a rich-text
 /// shared string) is seven deep.
@@ -146,6 +150,9 @@ pub struct Guarded<R> {
     limit: u64,
     /// Elements open at this point of the part.
     depth: usize,
+    /// Events read so far, to look at the cancel token every [`CANCEL_CHECK_EVENTS`].
+    events: u64,
+    cancel: Option<CancellationToken>,
 }
 
 impl<R: Read> Guarded<R> {
@@ -158,6 +165,8 @@ impl<R: Read> Guarded<R> {
             since: 0,
             limit,
             depth: 0,
+            events: 0,
+            cancel: None,
         }
     }
 
@@ -223,6 +232,8 @@ pub struct Package {
     /// limit: the same part read again (a sample, a run, a restart) is read again.
     inflated: Arc<AtomicU64>,
     max_inflated: u64,
+    /// Cancelled when the job is: every part read looks at it.
+    cancel: CancellationToken,
     summary: ArchiveSummary,
     max_token_bytes: u64,
     max_sheets: usize,
@@ -243,10 +254,16 @@ impl Package {
             file: spooled,
             inflated: Arc::new(AtomicU64::new(0)),
             max_inflated: limits.archive.max_total_bytes,
+            cancel: CancellationToken::new(),
             summary,
             max_token_bytes: limits.max_token_bytes,
             max_sheets: limits.max_sheets,
         })
+    }
+
+    /// Makes every part read from now on stop when `cancel` is cancelled.
+    pub fn set_cancel(&mut self, cancel: CancellationToken) {
+        self.cancel = cancel;
     }
 
     pub fn max_sheets(&self) -> usize {
@@ -288,10 +305,9 @@ impl Package {
         };
         let mut limited = Limited::new(inner, entry.uncompressed, entry.crc);
         limited.budget = Some((self.inflated.clone(), self.max_inflated));
-        Ok(Reader::from_reader(Guarded::new(
-            limited,
-            self.max_token_bytes,
-        )))
+        let mut guarded = Guarded::new(limited, self.max_token_bytes);
+        guarded.cancel = Some(self.cancel.clone());
+        Ok(Reader::from_reader(guarded))
     }
 }
 
@@ -305,6 +321,14 @@ pub fn next_event<'b, R: Read>(
     let event = reader.read_event_into(buf).map_err(|e| xml_failure(&e))?;
     let guard = reader.get_mut();
     guard.reset();
+    // A part of millions of comments or of elements that are not cells has no cell
+    // to look at the token on: look every so many events.
+    guard.events += 1;
+    if guard.events.is_multiple_of(CANCEL_CHECK_EVENTS)
+        && guard.cancel.as_ref().is_some_and(|c| c.is_cancelled())
+    {
+        return Err(XlsxError::Cancelled);
+    }
     match &event {
         Event::Start(e) | Event::Empty(e) if e.name().as_ref().len() > MAX_NAME_BYTES => {
             return Err(XlsxError::Invalid(Invalid::TokenTooLong));
@@ -353,7 +377,6 @@ pub fn attribute(e: &BytesStart, local: &[u8]) -> Result<Option<String>, XlsxErr
 /// A part of the workbook, parsed as XML.
 pub type XmlPart<'a> = Reader<Guarded<Limited<Box<dyn Read + 'a>>>>;
 
-#[cfg(test)]
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -535,5 +558,33 @@ mod tests {
             drain(&mut pkg),
             Err(XlsxError::Archive(ArchiveError::TotalTooLarge))
         );
+    }
+
+    #[tokio::test]
+    async fn a_part_of_millions_of_comments_stops_within_a_bounded_number_of_events() {
+        let body = format!("<a>{}</a>", "<!-- -->".repeat(50_000));
+        let bytes = build(&[Entry::stored("a.xml", body.as_bytes())]);
+        let drain = |pkg: &mut Package| -> Result<u64, XlsxError> {
+            let mut part = pkg.xml("a.xml", MAX_SMALL_PART_BYTES)?;
+            let mut buf = Vec::new();
+            let mut events = 0u64;
+            loop {
+                if matches!(next_event(&mut part, &mut buf)?, Event::Eof) {
+                    return Ok(events);
+                }
+                events += 1;
+            }
+        };
+        let mut pkg = package_of(bytes.clone(), &XlsxLimits::default())
+            .await
+            .unwrap();
+        assert_eq!(drain(&mut pkg).unwrap(), 50_002);
+        // Cancelled, no cell and no row in the part to look at the token on: it stops at
+        // the first check.
+        let mut pkg = package_of(bytes, &XlsxLimits::default()).await.unwrap();
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+        pkg.set_cancel(cancel);
+        assert_eq!(drain(&mut pkg), Err(XlsxError::Cancelled));
     }
 }

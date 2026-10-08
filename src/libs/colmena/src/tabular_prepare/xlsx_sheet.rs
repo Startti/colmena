@@ -246,6 +246,16 @@ where
     read_sheet_with(pkg, part, ctx, &SheetLimits::default(), &mut on_row)
 }
 
+/// Where in a sheet's XML the reader is: `row` is allowed only in `sheetData` and `c`
+/// only in a `row`.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Level {
+    Outside,
+    SheetData,
+    Row,
+    Cell,
+}
+
 /// Where a read of a sheet is: counters, and the limits it enforces.
 struct Reading<'l> {
     limits: &'l SheetLimits,
@@ -341,19 +351,57 @@ pub(crate) fn read_sheet_with(
     };
     let mut cells = RowCells::new();
     let mut pending: Option<Pending> = None;
+    // Where in the sheet the reader is. `row` and `c` mean something only at their
+    // place; anywhere else they are a corrupt part, never a second row opened
+    // inside an open one (which would reset the row's counters while its cells are
+    // still held).
+    let mut at_level = Level::Outside;
+    let wrong = || XlsxError::Invalid(Invalid::BadCell);
     let (mut in_v, mut in_is, mut in_t, mut in_phonetic) = (false, false, false, false);
     let mut reader = pkg.xml(part, MAX_SHEET_PART_BYTES)?;
     let mut buf = Vec::new();
     loop {
         match next_event(&mut reader, &mut buf)? {
+            // A part that ends inside a row or a cell is truncated.
+            Event::Eof if at_level == Level::Row || at_level == Level::Cell => return Err(wrong()),
             Event::Eof => break,
-            Event::Start(e) if e.local_name().as_ref() == b"row" => at.begin_row(&e)?,
+            Event::Start(e) if e.local_name().as_ref() == b"sheetData" => {
+                if at_level != Level::Outside {
+                    return Err(wrong());
+                }
+                at_level = Level::SheetData;
+            }
+            Event::Empty(e)
+                if e.local_name().as_ref() == b"sheetData" && at_level != Level::Outside =>
+            {
+                return Err(wrong());
+            }
+            Event::End(e) if e.local_name().as_ref() == b"sheetData" => {
+                if at_level != Level::SheetData {
+                    return Err(wrong());
+                }
+                at_level = Level::Outside;
+            }
+            Event::Start(e) if e.local_name().as_ref() == b"row" => {
+                if at_level != Level::SheetData || !cells.is_empty() {
+                    return Err(wrong());
+                }
+                at_level = Level::Row;
+                at.begin_row(&e)?
+            }
             // A row with no cells at all.
             Event::Empty(e) if e.local_name().as_ref() == b"row" => {
+                if at_level != Level::SheetData {
+                    return Err(wrong());
+                }
                 at.begin_row(&e)?;
                 at.stats.blank_rows += 1;
             }
             Event::End(e) if e.local_name().as_ref() == b"row" => {
+                if at_level != Level::Row {
+                    return Err(wrong());
+                }
+                at_level = Level::SheetData;
                 if cells.is_empty() {
                     at.stats.blank_rows += 1;
                 } else {
@@ -366,13 +414,24 @@ pub(crate) fn read_sheet_with(
                 }
             }
             Event::Start(e) if e.local_name().as_ref() == b"c" => {
+                if at_level != Level::Row {
+                    return Err(wrong());
+                }
+                at_level = Level::Cell;
                 pending = Some(at.begin_cell(&e)?);
             }
             // A cell with no value: counted and placed, nothing to deliver.
             Event::Empty(e) if e.local_name().as_ref() == b"c" => {
+                if at_level != Level::Row {
+                    return Err(wrong());
+                }
                 at.begin_cell(&e)?;
             }
             Event::End(e) if e.local_name().as_ref() == b"c" => {
+                if at_level != Level::Cell {
+                    return Err(wrong());
+                }
+                at_level = Level::Row;
                 if let Some(p) = pending.take() {
                     let column = p.column;
                     if let Some(cell) = finish(p, ctx)? {

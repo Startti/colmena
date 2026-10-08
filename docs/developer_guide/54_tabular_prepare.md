@@ -949,6 +949,23 @@ the 2 GiB per-entry limit: 16 MiB for the workbook, its relationships and the st
 reads 3,000,000 unclosed elements as each kind of part and asserts the refusal (`TooDeep`)
 costs under 2 MiB.
 
+**Elements only where they belong.** A `row` opened inside an open `row` reset the row's byte
+and column counters while the cells it held stayed, so both per-row caps could be bypassed and the
+cells grew without bound (a 128 KiB shared string behind 8 cells, then an empty `row` element, again
+and again: a megabyte of memory per 250 bytes of XML), and the same construction delivered column
+indexes out of order to the header builder, which indexed past its width. The sheet reader now
+tracks where it is (`Outside`, `sheetData`, `row`, `c`): `sheetData` opens only outside, `row` only
+in `sheetData`, `c` only in a `row`, and a row closes only from `row`; anything else, and a part that
+ends inside a row or a cell, is `BadCell` (an unreadable file). Cells arrive at a row's end, so the
+row caps cannot be reset while cells are held, column indexes are strictly increasing
+(`begin_cell` refuses a repeat or a step back), and the header builder cannot panic whatever order
+it is given. The other readers were audited for the same class (state reset on an element start that
+can be re-entered): in the shared strings a `si` inside a `si` is now refused (it would add strings
+the table did not count); the styles, workbook and relationships readers keep no state that an
+element start resets (their counters and maps are capped, and only grow). Every part read also
+looks at the cancel token every 4,096 events, so a part of millions of comments or of elements
+that are not cells stops within a bounded number of events.
+
 **Budgets that cover every read.** A part read again is inflated again (a sample, a run, each
 restart), so the archive's 2.5 GiB "total expanded" limit would be only a claim about the
 headers if it were not also a running count: `Package` adds every byte any read inflates to one
