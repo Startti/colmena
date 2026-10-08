@@ -4,7 +4,7 @@
 //! before it make.
 
 use super::child::CallHeader;
-use super::staging::{check_out_volume, open_call_dirs, CallDirs};
+use super::staging::{check_out_volume, open_call_dirs, valid_out_mb, CallDirs};
 use serde::{Deserialize, Serialize};
 use std::ffi::CString;
 use std::io;
@@ -194,15 +194,26 @@ const OUT_TARGET: &str = "/out";
 
 /// The staged directories a call asks for. `None` for a call without mounts, which then takes no
 /// step below that a call never had.
-fn open_staged(spec: &JailSpec, hdr: &CallHeader) -> io::Result<Option<CallDirs>> {
+/// The staged directories of a call and the size, in bytes, of the output
+/// volume the jail verified: what the file size limit follows.
+struct Staged {
+    dirs: CallDirs,
+    out_bytes: u64,
+}
+
+fn open_staged(spec: &JailSpec, hdr: &CallHeader) -> io::Result<Option<Staged>> {
     match (&hdr.mounts, &spec.staging_root) {
         (None, _) => Ok(None),
         (Some(_), None) => Err(io::Error::other("mounts asked for without a staging root")),
         (Some(m), Some(root)) => {
+            // Before any path is opened: 0 would be an unlimited volume.
+            if !valid_out_mb(m.out_mb) {
+                return Err(io::Error::from(io::ErrorKind::InvalidInput));
+            }
             let dirs = open_call_dirs(root, &m.stage_id)?;
             // Only a volume of its own, no bigger than declared, is bound for writing.
-            check_out_volume(&dirs, m.out_mb)?;
-            Ok(Some(dirs))
+            let out_bytes = check_out_volume(&dirs, m.out_mb)?;
+            Ok(Some(Staged { dirs, out_bytes }))
         }
     }
 }
@@ -342,9 +353,11 @@ pub fn enter(spec: &JailSpec, hdr: &CallHeader, conn: UnixStream) -> Result<Unix
         Some("hidepid=invisible"),
     )
     .map_err(at("mounts"))?;
-    if let Some(dirs) = staged {
-        bind_dir(&dirs.data, DATA_TARGET, true).map_err(at("mounts"))?;
-        bind_dir(&dirs.out, OUT_TARGET, false).map_err(at("mounts"))?;
+    let mut out_bytes = 0;
+    if let Some(staged) = staged {
+        bind_dir(&staged.dirs.data, DATA_TARGET, true).map_err(at("mounts"))?;
+        bind_dir(&staged.dirs.out, OUT_TARGET, false).map_err(at("mounts"))?;
+        out_bytes = staged.out_bytes;
     }
     let hidden = DEFAULT_HIDDEN
         .iter()
@@ -381,8 +394,8 @@ pub fn enter(spec: &JailSpec, hdr: &CallHeader, conn: UnixStream) -> Result<Unix
     let as_limit = template_vm.saturating_add(hdr.memory_mb.saturating_mul(MIB));
     // The largest file follows the output volume for a call that has one; `/tmp`
     // keeps its own size either way.
-    let out_mb = hdr.mounts.as_ref().map_or(0, |m| m.out_mb);
-    let file_limit = spec.tmp_mb.max(out_mb).saturating_mul(MIB);
+    // From the volume the jail verified, never from the header's claim.
+    let file_limit = spec.tmp_mb.saturating_mul(MIB).max(out_bytes);
     set_limit(libc::RLIMIT_AS, as_limit, as_limit).map_err(at("limits"))?;
     set_limit(
         libc::RLIMIT_CPU,

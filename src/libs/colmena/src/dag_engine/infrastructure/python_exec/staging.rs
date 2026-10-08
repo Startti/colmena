@@ -26,6 +26,122 @@ pub const DATA_NAME: &str = "data";
 pub const OUT_NAME: &str = "out";
 /// Longest call id the jail accepts.
 pub const STAGE_ID_MAX: usize = 64;
+/// The largest output volume of a call, in MiB: the design's output cap (the
+/// 1 GiB upload cap). A ceiling, not a recommendation: the final value waits for
+/// the instance memory measurement (spike item 5).
+pub const OUT_MB_MAX: u64 = 1024;
+/// Staged volumes in flight on one executor: the design's heavy-call
+/// concurrency (`PYEXEC_SLOTS` 2, one heavy slot) rounded up to the slots, and
+/// their total, the design's `V = D_max + OUT_MAX` of 2,048 MiB. Estimates from
+/// the design (D11), NOT measured: the final values need spike item 5.
+pub const STAGED_VOLUMES_MAX: usize = 2;
+pub const STAGED_OUT_MIB_MAX: u64 = 2048;
+
+/// A volume size the trusted side may create and the jail may bind: not zero (a
+/// tmpfs with no size is unlimited) and not above [`OUT_MB_MAX`].
+pub fn valid_out_mb(mb: u64) -> bool {
+    (1..=OUT_MB_MAX).contains(&mb)
+}
+
+/// Why a staged call was not made. The text is what a caller shows.
+#[derive(Debug)]
+pub enum StageError {
+    InvalidSize(u64),
+    OverBudget {
+        volumes: usize,
+        mib: u64,
+        max_volumes: usize,
+        max_mib: u64,
+    },
+    NoStagingRoot,
+    Io(io::Error),
+}
+
+impl std::fmt::Display for StageError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            StageError::InvalidSize(mb) => write!(
+                f,
+                "PythonExecutorError: an output volume of {mb} MiB is not allowed (1 to {OUT_MB_MAX} MiB)"
+            ),
+            StageError::OverBudget { volumes, mib, max_volumes, max_mib } => write!(
+                f,
+                "PythonExecutorError: too many staged volumes in flight ({volumes} of {max_volumes} volumes, {mib} of {max_mib} MiB); retry later"
+            ),
+            StageError::NoStagingRoot => {
+                write!(f, "PythonExecutorError: this executor has no staging directory configured")
+            }
+            StageError::Io(e) => write!(f, "PythonExecutorError: cannot stage the call: {e}"),
+        }
+    }
+}
+
+impl std::error::Error for StageError {}
+
+impl From<io::Error> for StageError {
+    fn from(e: io::Error) -> Self {
+        StageError::Io(e)
+    }
+}
+
+/// How many staged volumes, and how many MiB of them, may be in flight at once.
+#[derive(Debug)]
+pub struct StagingBudget {
+    max_volumes: usize,
+    max_mib: u64,
+    used: std::sync::Mutex<(usize, u64)>,
+}
+
+/// One call's share of a [`StagingBudget`], given back on drop.
+#[derive(Debug)]
+pub struct Reservation {
+    budget: std::sync::Arc<StagingBudget>,
+    mib: u64,
+}
+
+impl StagingBudget {
+    pub fn new(max_volumes: usize, max_mib: u64) -> Self {
+        StagingBudget {
+            max_volumes,
+            max_mib,
+            used: std::sync::Mutex::new((0, 0)),
+        }
+    }
+
+    /// Volumes and MiB in flight now.
+    pub fn in_flight(&self) -> (usize, u64) {
+        *self.used.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Takes a share for one volume of `mib`, or says why not; a refusal holds nothing.
+    pub fn reserve(this: &std::sync::Arc<Self>, mib: u64) -> Result<Reservation, StageError> {
+        if !valid_out_mb(mib) {
+            return Err(StageError::InvalidSize(mib));
+        }
+        let mut used = this.used.lock().unwrap_or_else(|e| e.into_inner());
+        let (volumes, total) = *used;
+        if volumes + 1 > this.max_volumes || total.saturating_add(mib) > this.max_mib {
+            return Err(StageError::OverBudget {
+                volumes,
+                mib: total,
+                max_volumes: this.max_volumes,
+                max_mib: this.max_mib,
+            });
+        }
+        *used = (volumes + 1, total + mib);
+        Ok(Reservation {
+            budget: this.clone(),
+            mib,
+        })
+    }
+}
+
+impl Drop for Reservation {
+    fn drop(&mut self) {
+        let mut used = self.budget.used.lock().unwrap_or_else(|e| e.into_inner());
+        *used = (used.0.saturating_sub(1), used.1.saturating_sub(self.mib));
+    }
+}
 
 /// A call id is one path component of letters, digits, `_` and `-`: it cannot
 /// be `.` or `..`, hold a separator, or start a hidden name.
@@ -125,8 +241,11 @@ pub const OUT_MAX_INODES: u64 = 1024;
 /// bounds what a call can write: the jail refuses a call whose output is
 /// anything else. [`StagedCall`] makes it a tmpfs.
 #[cfg(target_os = "linux")]
-pub fn check_out_volume(dirs: &CallDirs, out_mb: u64) -> io::Result<()> {
+pub fn check_out_volume(dirs: &CallDirs, out_mb: u64) -> io::Result<u64> {
     let unbounded = |why| refused(io::ErrorKind::PermissionDenied, why);
+    if !valid_out_mb(out_mb) {
+        return Err(refused(io::ErrorKind::InvalidInput, "invalid output size"));
+    }
     let mut fs: libc::statfs = unsafe { std::mem::zeroed() };
     if unsafe { libc::fstatfs(dirs.out.as_raw_fd(), &mut fs) } != 0 {
         return Err(io::Error::last_os_error());
@@ -140,7 +259,7 @@ pub fn check_out_volume(dirs: &CallDirs, out_mb: u64) -> io::Result<()> {
         (unsafe { libc::fstat(fd.as_raw_fd(), &mut st) } == 0).then_some(st.st_dev as u64)
     };
     match (dev(&dirs.out), dev(&dirs.call)) {
-        (Some(out), Some(call)) if out != call => Ok(()),
+        (Some(out), Some(call)) if out != call => Ok(bytes as u64),
         _ => Err(unbounded("out shares the volume of the call directory")),
     }
 }
@@ -158,6 +277,8 @@ pub struct StagedCall {
     out_mb: u64,
     mounted: bool,
     released: bool,
+    /// Given back after the volume is unmounted (fields drop after `Drop::drop`).
+    _share: Option<Reservation>,
 }
 
 #[cfg(target_os = "linux")]
@@ -165,7 +286,16 @@ impl StagedCall {
     /// Creates `<root>/<fresh id>/{data,out}` under a root that is a plain
     /// absolute path (no link anywhere in it) and mounts the output volume.
     pub fn create(root: &Path, out_mb: u64) -> io::Result<Self> {
+        Self::create_with(root, out_mb, None)
+    }
+
+    /// [`Self::create`] for a share already taken from a [`StagingBudget`].
+    pub fn create_with(root: &Path, out_mb: u64, share: Option<Reservation>) -> io::Result<Self> {
         use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+        // Before anything is made: a size of 0 would mount a tmpfs with no limit.
+        if !valid_out_mb(out_mb) {
+            return Err(refused(io::ErrorKind::InvalidInput, "invalid output size"));
+        }
         drop(open_root(root)?);
         let id = uuid::Uuid::new_v4().simple().to_string();
         let call = root.join(&id);
@@ -180,6 +310,7 @@ impl StagedCall {
             out_mb,
             mounted: false,
             released: false,
+            _share: share,
         };
         make(&call, 0o700)?;
         make(&call.join(DATA_NAME), 0o755)?;
@@ -280,6 +411,75 @@ mod tests {
             std::fs::DirBuilder::new().mode(0o755).create(p).unwrap();
         }
         Fixture { _tmp: tmp, root }
+    }
+
+    #[test]
+    fn an_output_size_is_between_one_mib_and_the_ceiling() {
+        assert!(!valid_out_mb(0));
+        assert!(valid_out_mb(1));
+        assert!(valid_out_mb(OUT_MB_MAX));
+        assert!(!valid_out_mb(OUT_MB_MAX + 1));
+        assert!(!valid_out_mb(u64::MAX));
+    }
+
+    /// Volumes in flight are counted and summed; a request over either bound is
+    /// refused with a typed error and holds nothing; a drop gives it back.
+    #[test]
+    fn the_budget_counts_volumes_and_mebibytes_and_gives_them_back() {
+        // The count bites on its own when there is plenty of room in MiB.
+        let roomy = std::sync::Arc::new(StagingBudget::new(2, 1000));
+        let (x, y) = (
+            StagingBudget::reserve(&roomy, 1).unwrap(),
+            StagingBudget::reserve(&roomy, 1).unwrap(),
+        );
+        assert!(matches!(
+            StagingBudget::reserve(&roomy, 1).unwrap_err(),
+            StageError::OverBudget {
+                volumes: 2,
+                mib: 2,
+                ..
+            }
+        ));
+        drop((x, y));
+        let budget = std::sync::Arc::new(StagingBudget::new(2, 100));
+        let a = StagingBudget::reserve(&budget, 60).unwrap();
+        let b = StagingBudget::reserve(&budget, 40).unwrap();
+        assert_eq!(budget.in_flight(), (2, 100));
+        let third = StagingBudget::reserve(&budget, 1).unwrap_err();
+        assert!(
+            matches!(
+                third,
+                StageError::OverBudget {
+                    volumes: 2,
+                    mib: 100,
+                    ..
+                }
+            ),
+            "{third:?}"
+        );
+        drop(a);
+        assert_eq!(budget.in_flight(), (1, 40));
+        let too_big = StagingBudget::reserve(&budget, 61).unwrap_err();
+        assert!(matches!(too_big, StageError::OverBudget { .. }));
+        assert_eq!(budget.in_flight(), (1, 40), "a refusal holds nothing");
+        let c = StagingBudget::reserve(&budget, 60).unwrap();
+        drop((b, c));
+        assert_eq!(budget.in_flight(), (0, 0));
+        assert!(matches!(
+            StagingBudget::reserve(&budget, 0).unwrap_err(),
+            StageError::InvalidSize(0)
+        ));
+        let text = StageError::OverBudget {
+            volumes: 2,
+            mib: 100,
+            max_volumes: 2,
+            max_mib: 100,
+        }
+        .to_string();
+        assert!(
+            text.starts_with("PythonExecutorError:") && text.contains("retry"),
+            "{text}"
+        );
     }
 
     #[test]
