@@ -157,24 +157,73 @@ pub struct SkippedSheet {
     pub reason: String,
 }
 
-/// Whether a character may be part of a table or column name: not a control
-/// character and not a Unicode format character (category Cf: bidirectional
-/// overrides and isolates, zero-width spaces, the byte order mark, tag characters,
-/// and the line and paragraph separators), which can make a name read as something
-/// else. The zero-width non-joiner and joiner stay: they are part of the spelling of
-/// Persian, Indic scripts and emoji sequences.
+/// A character that shows nothing, or that makes a name read as something else, and
+/// that no name needs: bidirectional controls, overrides and isolates, zero-width and
+/// other invisible format characters (category Cf), the byte order mark, tag characters,
+/// the line and paragraph separators, and the characters that render blank though they are
+/// letters or symbols (combining grapheme joiner, Hangul and Braille fillers, Khmer inherent
+/// vowels, Mongolian free variation selectors, variation selectors). The zero-width
+/// non-joiner and joiner (U+200C, U+200D) are not here: see [`clean_name`].
+fn is_invisible(c: char) -> bool {
+    matches!(c,
+        '\u{AD}' | '\u{34F}' | '\u{600}'..='\u{605}' | '\u{61C}' | '\u{6DD}' | '\u{70F}'
+        | '\u{890}'..='\u{891}' | '\u{8E2}' | '\u{115F}' | '\u{1160}' | '\u{17B4}' | '\u{17B5}'
+        | '\u{180B}'..='\u{180E}' | '\u{200B}' | '\u{200E}'..='\u{200F}' | '\u{2028}'..='\u{202E}'
+        | '\u{2060}'..='\u{206F}' | '\u{2800}' | '\u{3164}' | '\u{FE00}'..='\u{FE0F}' | '\u{FEFF}'
+        | '\u{FFA0}' | '\u{FFF9}'..='\u{FFFB}' | '\u{110BD}' | '\u{110CD}'
+        | '\u{13430}'..='\u{1343F}' | '\u{1BCA0}'..='\u{1BCA3}' | '\u{1D173}'..='\u{1D17A}'
+        | '\u{E0001}' | '\u{E0020}'..='\u{E007F}' | '\u{E0100}'..='\u{E01EF}')
+}
+
+/// A space other than the ASCII one (no-break, the en/em family, narrow no-break,
+/// medium mathematical, ideographic, Ogham): read as a plain space.
+fn is_odd_space(c: char) -> bool {
+    matches!(
+        c,
+        '\u{A0}' | '\u{1680}' | '\u{2000}'..='\u{200A}' | '\u{202F}' | '\u{205F}' | '\u{3000}'
+    )
+}
+
+/// Whether a character may be part of a table or column name: not a control character,
+/// not invisible (see [`clean_name`]) and not a space other than the ASCII one.
 pub fn is_clean_char(c: char) -> bool {
-    !c.is_control()
-        && !matches!(c,
-            '\u{AD}' | '\u{600}'..='\u{605}' | '\u{61C}' | '\u{6DD}' | '\u{70F}'
-            | '\u{890}'..='\u{891}' | '\u{8E2}'
-            // 200C and 200D (the zero-width non-joiner and joiner) are not here: Persian,
-            // Indic scripts and emoji sequences need them to be spelled correctly.
-            | '\u{180E}' | '\u{200B}' | '\u{200E}'..='\u{200F}' | '\u{2028}'..='\u{202E}'
-            | '\u{2060}'..='\u{2064}' | '\u{2066}'..='\u{206F}' | '\u{FEFF}'
-            | '\u{FFF9}'..='\u{FFFB}' | '\u{110BD}' | '\u{110CD}'
-            | '\u{13430}'..='\u{1343F}' | '\u{1BCA0}'..='\u{1BCA3}' | '\u{1D173}'..='\u{1D17A}'
-            | '\u{E0001}' | '\u{E0020}'..='\u{E007F}')
+    !c.is_control() && !is_invisible(c) && !is_odd_space(c)
+}
+
+/// A name as the manifest keeps it. Control characters become `_`; invisible characters
+/// are removed (so two names that differ only by them are the same name, and the usual
+/// `_2` suffix tells them apart); other spaces become a plain one; and the zero-width
+/// non-joiner and joiner, which Persian, Indic scripts and emoji sequences need, are kept
+/// only between two visible characters. The result is trimmed; an empty one is for the
+/// caller to name (`columnN`, `sheetN`).
+pub fn clean_name(raw: &str) -> String {
+    const ZWNJ: char = '\u{200C}';
+    const ZWJ: char = '\u{200D}';
+    let chars: Vec<char> = raw
+        .chars()
+        .filter_map(|c| {
+            if c.is_control() {
+                Some('_')
+            } else if is_odd_space(c) {
+                Some(' ')
+            } else if is_invisible(c) {
+                None
+            } else {
+                Some(c)
+            }
+        })
+        .collect();
+    let visible = |c: char| !c.is_whitespace() && c != ZWNJ && c != ZWJ;
+    let mut out = String::with_capacity(raw.len());
+    for (i, c) in chars.iter().enumerate() {
+        let joiner = *c == ZWNJ || *c == ZWJ;
+        let between =
+            i > 0 && visible(chars[i - 1]) && chars.get(i + 1).is_some_and(|n| visible(*n));
+        if !joiner || between {
+            out.push(*c);
+        }
+    }
+    out.trim().to_string()
 }
 
 impl Manifest {
@@ -269,7 +318,7 @@ impl Manifest {
         }
         let mut seen = HashSet::new();
         for t in &self.tables {
-            if t.name.is_empty()
+            if t.name.trim().is_empty()
                 || t.name.chars().count() > MAX_NAME_CHARS
                 || !t.name.chars().all(is_clean_char)
             {
@@ -297,7 +346,7 @@ impl Manifest {
             }
             let mut columns = HashSet::new();
             for c in &t.columns {
-                if c.name.is_empty()
+                if c.name.trim().is_empty()
                     || c.name.chars().count() > MAX_COLUMN_NAME_CHARS
                     || !c.name.chars().all(is_clean_char)
                 {
@@ -454,12 +503,7 @@ pub fn unique_table_names(raw: &[&str]) -> Vec<String> {
     let mut taken: HashSet<String> = HashSet::new();
     let mut out = Vec::with_capacity(raw.len());
     for (i, name) in raw.iter().enumerate() {
-        let cleaned: String = name
-            .trim()
-            .chars()
-            .map(|c| if is_clean_char(c) { c } else { '_' })
-            .take(MAX_NAME_CHARS)
-            .collect();
+        let cleaned: String = clean_name(name).chars().take(MAX_NAME_CHARS).collect();
         let base = if cleaned.trim().is_empty() {
             format!("sheet{}", i + 1)
         } else {
@@ -1086,7 +1130,7 @@ mod tests {
         // make a name read as something else.
         let raw = ["Report\u{202E}fdp.exe", "a\u{200B}b", "\u{FEFF}sales"];
         let names = unique_table_names(&raw);
-        assert_eq!(names, ["Report_fdp.exe", "a_b", "_sales"]);
+        assert_eq!(names, ["Reportfdp.exe", "ab", "sales"]);
         for c in ['\u{202E}', '\u{200B}', '\u{FEFF}', '\u{2066}', '\u{E0041}'] {
             assert!(!is_clean_char(c), "{c:?}");
         }
@@ -1169,6 +1213,78 @@ mod tests {
             '\u{E0041}',
         ] {
             assert!(!is_clean_char(c), "{c:?}");
+        }
+    }
+
+    #[test]
+    fn invisible_and_blank_characters_are_removed_and_spaces_normalised() {
+        // Every character that shows nothing, however it is spelled.
+        for c in [
+            '\u{34F}',
+            '\u{115F}',
+            '\u{1160}',
+            '\u{3164}',
+            '\u{FFA0}',
+            '\u{17B4}',
+            '\u{17B5}',
+            '\u{180B}',
+            '\u{180C}',
+            '\u{180D}',
+            '\u{2800}',
+            '\u{2065}',
+            '\u{FE00}',
+            '\u{FE0F}',
+            '\u{E0100}',
+            '\u{E01EF}',
+        ] {
+            assert!(!is_clean_char(c), "{c:?}");
+            assert_eq!(clean_name(&format!("a{c}b")), "ab", "{c:?}");
+        }
+        // Other spaces are a plain space, and trimmed at the ends.
+        assert_eq!(clean_name("\u{A0}a\u{2003}b\u{3000}"), "a b");
+        for c in [
+            '\u{A0}', '\u{2000}', '\u{200A}', '\u{202F}', '\u{205F}', '\u{3000}',
+        ] {
+            assert!(!is_clean_char(c), "{c:?}");
+        }
+        // A name made only of invisible characters, or only of joiners, is blank and is
+        // named like an empty one.
+        let blanks = [
+            "\u{2800}\u{3164}",
+            "\u{200C}",
+            "\u{200D}\u{200C}",
+            "\u{FE0F}",
+            "\u{A0}\u{3000}",
+        ];
+        assert_eq!(
+            unique_table_names(&blanks),
+            ["sheet1", "sheet2", "sheet3", "sheet4", "sheet5"]
+        );
+        // Joiners stay between visible characters and go at the ends and beside spaces.
+        assert_eq!(clean_name("\u{200C}a\u{200C}b\u{200C}"), "a\u{200C}b");
+        assert_eq!(clean_name("a \u{200D} b"), "a  b");
+        // Names that differ only by what was removed or normalised are the same name.
+        let same = ["Sales", "Sa\u{200B}les", "Sales\u{A0}", "sales\u{2800}"];
+        assert_eq!(
+            unique_table_names(&same),
+            ["Sales", "Sales_2", "Sales_3", "sales_4"]
+        );
+        // A manifest refuses a blank name and one with an invisible character.
+        let mut m = Manifest::new(vec![TableInfo {
+            name: "ok".into(),
+            rows: 1,
+            parts: 1,
+            columns: vec![ColumnInfo {
+                name: "a".into(),
+                column_type: ColumnType::String,
+                uncompressed_bytes: 1,
+                in_memory_bytes: 40,
+            }],
+        }]);
+        assert!(m.to_json().is_ok());
+        for bad in [" ", "\u{A0}", "a\u{3164}"] {
+            m.tables[0].columns[0].name = bad.into();
+            assert!(m.to_json().is_err(), "{bad:?}");
         }
     }
 }

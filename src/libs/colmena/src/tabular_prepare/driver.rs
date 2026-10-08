@@ -78,6 +78,15 @@ pub const JOB_GRACE: Duration = Duration::from_secs(90);
 
 const _: () = assert!(TERMINAL_STEP.as_secs() * (MAX_OWNER_STEPS as u64) < JOB_GRACE.as_secs());
 
+/// The most bytes of Parquet parts one preparation may store: 1 GiB, the size of the
+/// largest source the product accepts (the upload limit). A prepared copy is smaller than
+/// its source (a 1 GiB CSV prepared to 297 MB in the spike), so a legitimate source never
+/// comes near it; what does is an input that decodes to far more than it weighs, such as
+/// a 128 KiB shared string referenced by every cell of a million rows (about a terabyte of
+/// text from a small upload). Time (300 s) ends that too, but only after hours of work are
+/// paid for in storage; this ends it by what it stores, with its own reason.
+pub const MAX_PREPARED_BYTES: u64 = 1024 * 1024 * 1024;
+
 /// Time a preparation may take before it stops itself.
 pub const PREP_TIMEOUT: Duration = Duration::from_secs(300);
 
@@ -98,6 +107,9 @@ pub mod reason {
     pub const TABLE_TOO_LARGE: &str = "table_too_large";
     /// Anything else: a defect, never the file's fault.
     pub const INTERNAL: &str = "internal";
+    /// The parts stored passed [`super::MAX_PREPARED_BYTES`]: the source decodes to far
+    /// more than it weighs.
+    pub const OUTPUT_TOO_LARGE: &str = "output_too_large";
     /// A workbook over a size limit (bytes, sheets, rows, columns, cells or shared
     /// text): the user is told to export it as CSV.
     pub const XLSX_TOO_LARGE: &str = "xlsx_too_large";
@@ -128,6 +140,8 @@ pub struct PrepareEnv {
     /// before a byte is read (a larger one fails with `xlsx_too_large`; 0 refuses
     /// every workbook).
     pub xlsx_max_bytes: u64,
+    /// The most bytes of parts one preparation may store (see [`MAX_PREPARED_BYTES`]).
+    pub max_prepared_bytes: u64,
 }
 
 impl PrepareEnv {
@@ -144,6 +158,7 @@ impl PrepareEnv {
             budget: PREP_TIMEOUT,
             writer: WriterConfig::default(),
             xlsx_max_bytes: MAX_XLSX_BYTES,
+            max_prepared_bytes: MAX_PREPARED_BYTES,
         }
     }
 
@@ -169,6 +184,11 @@ impl PrepareEnv {
 
     pub fn with_writer(mut self, writer: WriterConfig) -> Self {
         self.writer = writer;
+        self
+    }
+
+    pub fn with_max_prepared_bytes(mut self, max: u64) -> Self {
+        self.max_prepared_bytes = max;
         self
     }
 
@@ -350,6 +370,14 @@ fn classify_xlsx(e: &XlsxError) -> (&'static str, String) {
     }
 }
 
+/// The reason when the parts stored passed their cap: fixed words, no size of the file.
+fn output_too_large() -> (&'static str, String) {
+    (
+        reason::OUTPUT_TOO_LARGE,
+        "the prepared tables are larger than the limit; export fewer rows or columns".to_string(),
+    )
+}
+
 /// The reason when the registry, not the storage, failed while the job listed keys
 /// or confirmed its row: a defect or an outage on our side, never the file's.
 fn registry_failure() -> (&'static str, String) {
@@ -492,6 +520,12 @@ struct OwnedSink {
     /// Per table, parts `0..n` are listed in the row already.
     tracked_parts: std::sync::Mutex<std::collections::HashMap<usize, usize>>,
     manifest_tracked: AtomicBool,
+    /// Bytes of each part as last stored (a restart overwrites a part: it counts once),
+    /// and the most allowed in all.
+    stored: std::sync::Mutex<std::collections::HashMap<String, u64>>,
+    max_stored: u64,
+    /// A part was refused for passing `max_stored`.
+    too_big: AtomicBool,
 }
 
 /// How many part keys are listed in the row ahead of the part being written. The
@@ -561,6 +595,17 @@ impl OwnedSink {
 #[async_trait]
 impl PartSink for OwnedSink {
     async fn put(&self, path: &str, data: Bytes) -> Result<(), SinkError> {
+        // Parts count against the cap; the manifest, which is small, does not.
+        if path != MANIFEST_PATH {
+            let mut stored = self.stored.lock().unwrap_or_else(|p| p.into_inner());
+            stored.insert(path.to_string(), data.len() as u64);
+            if stored.values().sum::<u64>() > self.max_stored {
+                self.too_big.store(true, Ordering::SeqCst);
+                return Err(SinkError(
+                    "the prepared parts passed their size limit".into(),
+                ));
+            }
+        }
         match self.track_for(path).await {
             Ok(true) => self.inner.put(path, data).await,
             Ok(false) => {
@@ -696,6 +741,9 @@ async fn run_prepare(
         registry_failed: AtomicBool::new(false),
         tracked_parts: std::sync::Mutex::new(std::collections::HashMap::new()),
         manifest_tracked: AtomicBool::new(false),
+        stored: Default::default(),
+        max_stored: env.max_prepared_bytes,
+        too_big: AtomicBool::new(false),
     });
     if kind == Kind::Xlsx && req.size_bytes > env.xlsx_max_bytes {
         // Over the cap by the size the host declared: nothing is read.
@@ -890,6 +938,8 @@ async fn run_prepare(
             }
             let (code, detail) = if sink.registry_failed.load(Ordering::SeqCst) {
                 registry_failure()
+            } else if sink.too_big.load(Ordering::SeqCst) {
+                output_too_large()
             } else {
                 classify(&failure.error)
             };
@@ -2755,6 +2805,9 @@ pub(crate) mod cases {
             registry_failed: AtomicBool::new(false),
             tracked_parts: std::sync::Mutex::new(std::collections::HashMap::new()),
             manifest_tracked: AtomicBool::new(false),
+            stored: Default::default(),
+            max_stored: u64::MAX,
+            too_big: AtomicBool::new(false),
         };
         let data = Bytes::from_static(b"x");
         sink.put("t0/part-00000.parquet", data.clone())

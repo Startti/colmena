@@ -89,6 +89,10 @@ fn workbook() -> Vec<u8> {
         .build()
 }
 
+fn manifest_len(table: &crate::tabular_prepare::driver::PreparedTable) -> u64 {
+    table.manifest.to_json().map_or(0, |j| j.len() as u64)
+}
+
 fn objects_but_source(storage: &PlacedStorage, source: &str) -> Vec<String> {
     storage.keys().into_iter().filter(|k| k != source).collect()
 }
@@ -557,6 +561,53 @@ async fn no_path_asks_the_adapter_to_delete_with_an_empty_list() {
     let keys = vec![format!("{}/t0/part-00000.parquet", root_of(&other))];
     delete_best_effort(&env, &req, &keys, true).await;
     assert_eq!(hook.cleanups.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn the_prepared_parts_are_capped_in_all_with_their_own_reason_and_sentence() {
+    let (registry, _dir) = sqlite().await;
+    let bytes = workbook();
+    let size = bytes.len() as u64;
+    // What the workbook prepares to, as the row keeps it.
+    let source1 = source();
+    let storage = PlacedStorage::with_source(&source1, bytes.clone());
+    let PrepareOutcome::Ready(table) =
+        prepare_xlsx(&env(registry.clone(), storage), &request(&source1, size))
+            .await
+            .unwrap()
+    else {
+        panic!("expected a ready workbook");
+    };
+    let total = table.prepared_bytes - manifest_len(&table);
+    // At the cap it is ready; one byte under, it is refused with its own reason, and what
+    // was stored is deleted.
+    let source2 = source();
+    let storage = PlacedStorage::with_source(&source2, bytes.clone());
+    let env_at = env(registry.clone(), storage).with_max_prepared_bytes(total);
+    assert!(matches!(
+        prepare_xlsx(&env_at, &request(&source2, size))
+            .await
+            .unwrap(),
+        PrepareOutcome::Ready(_)
+    ));
+    let source3 = source();
+    let storage = PlacedStorage::with_source(&source3, bytes);
+    let env_under = env(registry.clone(), storage.clone()).with_max_prepared_bytes(total - 1);
+    let PrepareOutcome::Failed(f) = prepare_xlsx(&env_under, &request(&source3, size))
+        .await
+        .unwrap()
+    else {
+        panic!("expected a recorded failure");
+    };
+    assert_eq!(f.code, reason::OUTPUT_TOO_LARGE);
+    assert_eq!(
+        f.detail,
+        "the prepared tables are larger than the limit; export fewer rows or columns"
+    );
+    assert!(objects_but_source(&storage, &source3).is_empty());
+    let row = registry.get(&source3).await.unwrap().unwrap();
+    assert_eq!(row.error_code.as_deref(), Some("output_too_large"));
+    assert_eq!(crate::tabular_prepare::driver::MAX_PREPARED_BYTES, 1 << 30);
 }
 
 /// A sheet with a title above its table, and a plain one.
