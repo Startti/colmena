@@ -360,7 +360,8 @@ fn start(args: ServeArgs) -> Result<(), (i32, String)> {
         }
         return Err((EXIT_NOT_READY, "the jail self-test failed".into()));
     }
-    let exec = SubprocessExecutor::new(cfg.clone(), args.max_timeout).map_err(|e| (2, e.0))?;
+    let exec =
+        SubprocessExecutor::new_for_serving(cfg.clone(), args.max_timeout).map_err(|e| (2, e.0))?;
     let (exec, token) = (Arc::new(exec), token.map(Arc::new));
     let (ready, max_timeout) = (Arc::default(), args.max_timeout);
     let state = AppState {

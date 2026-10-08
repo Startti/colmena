@@ -421,6 +421,24 @@ impl SubprocessExecutor {
         Self::unchecked(cfg, max_timeout)
     }
 
+    /// [`Self::new`] for an executor that is about to serve: first reclaims what a
+    /// killed predecessor left in the staging root (prepared customer data and
+    /// mounted volumes, which nothing else removes). Not part of `new` because a
+    /// sweep cannot tell a leftover from a call in flight: it is for the one
+    /// executor that owns its root, at the one moment it starts.
+    pub fn new_for_serving(
+        cfg: SubprocessConfig,
+        max_timeout: Duration,
+    ) -> Result<Self, ExecutorConfigError> {
+        let executor = Self::new(cfg, max_timeout)?;
+        if let Some(root) = &executor.cfg.staging_root {
+            if let Err(e) = super::staging::sweep_staging_root(root) {
+                tracing::error!(target: T_PYTHON_EXEC, error = %e, "cannot sweep the staging root");
+            }
+        }
+        Ok(executor)
+    }
+
     /// [`Self::new`] without its checks, for the unit tests' stand-in
     /// templates, which run without root.
     pub(super) fn unchecked(

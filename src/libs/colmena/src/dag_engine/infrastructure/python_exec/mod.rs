@@ -176,7 +176,7 @@ impl Dispatcher {
             ExecutorKind::InProcess => inprocess.clone(),
             #[cfg(target_os = "linux")]
             ExecutorKind::Subprocess => {
-                let exec = Arc::new(subprocess::SubprocessExecutor::new(
+                let exec = Arc::new(subprocess::SubprocessExecutor::new_for_serving(
                     cfg.subprocess.clone(),
                     cfg.max_timeout,
                 )?);
