@@ -126,10 +126,43 @@ fn namespace_inode(ns: &str) -> io::Result<u64> {
     Ok(std::fs::metadata(format!("/proc/self/ns/{ns}"))?.ino())
 }
 
-fn mount_count() -> io::Result<usize> {
-    Ok(std::fs::read_to_string("/proc/self/mountinfo")?
-        .lines()
-        .count())
+/// The mounts of this namespace, not counting those under `except`: with a
+/// staging root, calls in flight mount and unmount their output volumes there
+/// while a template starts (a restart, a second slot warming), and those are not
+/// mounts the probe left behind.
+fn mount_count(except: Option<&Path>) -> io::Result<usize> {
+    let table = std::fs::read_to_string("/proc/self/mountinfo")?;
+    Ok(mounts_outside(&table, except))
+}
+
+/// The lines of a `mountinfo` table whose mount point is not at or below `except`
+/// (a path test, not a prefix test: `/srv/stx` is not below `/srv/st`).
+fn mounts_outside(table: &str, except: Option<&Path>) -> usize {
+    let under = |line: &str| {
+        let point = line.split(' ').nth(4).map(unescape_mount_point);
+        matches!((except, point), (Some(root), Some(p)) if Path::new(&p).starts_with(root))
+    };
+    table.lines().filter(|l| !under(l)).count()
+}
+
+/// Whether a `mountinfo` table shows no mount added since `before` were counted:
+/// the mounts at or below `except` (the staging root, where calls in flight mount
+/// and unmount their volumes at any moment) are not the probe's and not counted.
+/// A pure function of the table, so the rule is proven without any timing.
+fn mounts_unchanged(table: &str, except: Option<&Path>, before: usize) -> bool {
+    mounts_outside(table, except) <= before
+}
+
+/// The octal escapes `mountinfo` uses for space, tab, newline and backslash.
+fn unescape_mount_point(field: &str) -> String {
+    [
+        ("\\040", " "),
+        ("\\011", "\t"),
+        ("\\012", "\n"),
+        ("\\134", "\\"),
+    ]
+    .iter()
+    .fold(field.to_string(), |acc, (from, to)| acc.replace(from, to))
 }
 
 /// Besides the channel only 0, 1 and 2 are open, and they are the null device.
@@ -479,7 +512,8 @@ fn setup(
         .map(|(_, ns)| namespace_inode(ns))
         .collect::<io::Result<_>>()
         .map_err(|e| setup_error("namespace_unreadable", e))?;
-    let mounts = mount_count().map_err(|e| setup_error("mounts_unreadable", e))?;
+    let mounts = mount_count(spec.staging_root.as_deref())
+        .map_err(|e| setup_error("mounts_unreadable", e))?;
     let vm_size = jail::vm_size_bytes().map_err(|e| setup_error("vm_size_unreadable", e))?;
     let before = Before {
         loopback_port,
@@ -527,7 +561,8 @@ pub fn run(spec: &JailSpec) -> Result<Vec<LayerCheck>, Vec<LayerCheck>> {
     // The probe's mounts stayed where it made them: the template's /tmp and
     // mount table are as they were.
     let kept = std::fs::metadata("/tmp").is_ok_and(|m| m.dev() == before.tmp_dev)
-        && mount_count().is_ok_and(|n| n <= before.mounts);
+        && std::fs::read_to_string("/proc/self/mountinfo")
+            .is_ok_and(|t| mounts_unchanged(&t, spec.staging_root.as_deref(), before.mounts));
     checks.push(check("host_mounts", kept, "unchanged", "mounts_leaked"));
     let layers: BTreeSet<&str> = checks.iter().map(|c| c.layer.as_str()).collect();
     let complete = layers == LAYERS.iter().copied().collect();
@@ -588,6 +623,67 @@ mod tests {
         let dev = dev("  eth0: 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0\n");
         assert!(!only_loopback(&interface_names(&dev)));
         assert!(!only_loopback(&[]));
+    }
+
+    #[test]
+    fn mounts_under_the_staging_root_are_not_counted() {
+        let table_lines = |except: Option<&Path>| mount_count(except).unwrap();
+        assert!(table_lines(None) > 0);
+        assert_eq!(table_lines(Some(Path::new("/"))), 0);
+        // Two reads of a table other tests of this process may be changing: the
+        // counts agree on some attempt (an exclusion of a root that holds nothing
+        // changes nothing).
+        let agree =
+            (0..50).any(|_| table_lines(None) == table_lines(Some(Path::new("/nonexistent-root"))));
+        assert!(agree);
+        assert_eq!(unescape_mount_point("/a\\040b\\134c"), "/a b\\c");
+    }
+
+    /// The check of a template that started while calls were mounting: mounts that
+    /// come and go under the staging root change nothing, one anywhere else is a
+    /// leak. Deterministic: the "later" table is given, not raced.
+    #[test]
+    fn a_mount_under_the_staging_root_appearing_later_is_not_a_leak() {
+        let line = |point: &str| format!("36 1 0:30 / {point} rw,nosuid - tmpfs tmpfs rw\n");
+        let root = Path::new("/srv/st");
+        let first: String = ["/", "/proc", "/tmp"].iter().map(|p| line(p)).collect();
+        let before = mounts_outside(&first, Some(root));
+        assert_eq!(before, 3);
+        let with_call = format!(
+            "{first}{}{}",
+            line("/srv/st/ab12/out"),
+            line("/srv/st/cd34/out")
+        );
+        assert!(mounts_unchanged(&with_call, Some(root), before));
+        // The same table with no staging root configured counts them: a leak.
+        assert!(!mounts_unchanged(&with_call, None, before));
+        // A mount outside the root is a leak, whatever else comes and goes.
+        let leaked = format!("{with_call}{}", line("/mnt/x"));
+        assert!(!mounts_unchanged(&leaked, Some(root), before));
+        // Calls that finished meanwhile are not a leak either.
+        assert!(mounts_unchanged(&first, Some(root), before));
+    }
+
+    /// Only the mounts at or below the root are left out: a sibling sharing the
+    /// prefix, the root's parent and an escaped path are told apart.
+    #[test]
+    fn the_exclusion_is_by_path_not_by_prefix() {
+        let line = |point: &str| format!("36 1 0:30 / {point} rw,nosuid - tmpfs tmpfs rw\n");
+        let table: String = [
+            "/",
+            "/srv",
+            "/srv/st",
+            "/srv/st/a/out",
+            "/srv/stx/out",
+            "/srv/st\\040y/out",
+        ]
+        .iter()
+        .map(|p| line(p))
+        .collect();
+        let root = Path::new("/srv/st");
+        // Outside: "/", "/srv", "/srv/stx/out", "/srv/st y/out" (a different dir).
+        assert_eq!(mounts_outside(&table, Some(root)), 4);
+        assert_eq!(mounts_outside(&table, None), 6);
     }
 
     #[test]

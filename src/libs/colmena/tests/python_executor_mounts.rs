@@ -24,15 +24,17 @@ fn enabled() -> bool {
     std::env::var("COLMENA_PYEXEC_JAIL_TESTS").as_deref() == Ok("1")
 }
 
-/// A canonical staging root of its own.
-fn root() -> Option<(tempfile::TempDir, PathBuf)> {
-    if !enabled() {
-        eprintln!("skipped: set COLMENA_PYEXEC_JAIL_TESTS=1 (Linux, root, CAP_SYS_ADMIN)");
-        return None;
+/// A directory name no other test or earlier run used.
+fn unique(prefix: &str) -> String {
+    format!("{prefix}-{}", uuid::Uuid::new_v4().simple())
+}
+
+/// Removes its directory when the test ends, pass or fail.
+struct Scrap(PathBuf);
+impl Drop for Scrap {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
     }
-    let tmp = tempfile::tempdir().unwrap();
-    let root = tmp.path().canonicalize().unwrap();
-    Some((tmp, root))
 }
 
 fn mounted(path: &Path) -> bool {
@@ -96,7 +98,6 @@ fn dropping_the_call_unmounts_and_removes_everything() {
     drop(staged);
     assert!(!mounted(&out));
     assert!(!call_dir.exists(), "{call_dir:?} was left behind");
-    assert_eq!(std::fs::read_dir(&root).unwrap().count(), 0);
 }
 
 #[test]
@@ -113,9 +114,11 @@ fn release_twice_is_fine_and_each_call_has_its_own_directories() {
 #[test]
 fn a_root_that_is_a_link_is_refused() {
     let Some((_t, root)) = root() else { return };
-    let real = root.join("real");
+    let real = root.join(unique("real"));
+    let _scrap = Scrap(real.clone());
     std::fs::create_dir(&real).unwrap();
-    let link = root.join("link");
+    let link = root.join(unique("link"));
+    let _scrap_link = Scrap(link.clone());
     std::os::unix::fs::symlink(&real, &link).unwrap();
     assert!(StagedCall::create(&link, 1).is_err());
     assert_eq!(std::fs::read_dir(&real).unwrap().count(), 0);
@@ -132,12 +135,14 @@ fn an_output_that_is_not_a_bound_volume_is_refused() {
     // Declared smaller than the volume really is.
     assert!(check_out_volume(&dirs, 1).is_err());
     // A plain directory on the staging volume is not a bound volume.
-    let plain = root.join("plain");
+    let plain_id = unique("plain");
+    let plain = root.join(&plain_id);
+    let _scrap = Scrap(plain.clone());
     for d in ["", "data", "out"] {
         std::fs::create_dir_all(plain.join(d)).unwrap();
     }
     std::fs::set_permissions(&plain, std::os::unix::fs::PermissionsExt::from_mode(0o700)).unwrap();
-    let plain_dirs = open_call_dirs(&root, "plain").unwrap();
+    let plain_dirs = open_call_dirs(&root, &plain_id).unwrap();
     assert!(check_out_volume(&plain_dirs, 1024).is_err());
 }
 
@@ -145,7 +150,13 @@ fn an_output_that_is_not_a_bound_volume_is_refused() {
 /// directory: refused for that reason alone.
 #[test]
 fn an_output_on_the_volume_of_the_call_directory_is_refused() {
-    let Some((_t, root)) = root() else { return };
+    // Mounts a tmpfs over its own directory, which the other tests' templates
+    // would count: it runs alone.
+    let Some(_alone) = Root::exclusive() else {
+        return;
+    };
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().canonicalize().unwrap();
     struct Unmount(PathBuf);
     impl Drop for Unmount {
         fn drop(&mut self) {
@@ -183,45 +194,87 @@ fn an_output_on_the_volume_of_the_call_directory_is_refused() {
 // mode (full Python) by the subprocess executor.
 // ---------------------------------------------------------------------------
 
-/// A staging root outside `/tmp` (the jail's own `/tmp` would hide it anyway)
-/// and outside the default hidden paths, so that hiding it is the jail's doing.
+/// The staging root every test of this suite shares, outside `/tmp` (the jail's
+/// own `/tmp` would hide it anyway) and outside the default hidden paths, so that
+/// hiding it is the jail's doing. One root for all, because the self-test of every
+/// template ignores the mounts under ITS root and counts the rest: tests running
+/// side by side in different roots would read as leaks to each other.
+static SHARED_ROOT: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
+/// The mount table is global to the suite: a self-test without a staging root
+/// counts every mount, so the tests that run it hold this exclusively while the
+/// tests that mount hold it shared.
+static MOUNT_TABLE: std::sync::RwLock<()> = std::sync::RwLock::new(());
+
 struct Root {
     path: PathBuf,
+    exclusive: bool,
+    _lock: Box<dyn std::any::Any>,
 }
 
 impl Root {
     fn new() -> Option<Self> {
+        Self::with(false)
+    }
+
+    /// For the tests that read the whole mount table.
+    fn exclusive() -> Option<Self> {
+        Self::with(true)
+    }
+
+    fn with(exclusive: bool) -> Option<Self> {
         if !enabled() {
             eprintln!("skipped: set COLMENA_PYEXEC_JAIL_TESTS=1 (Linux, root, CAP_SYS_ADMIN)");
             return None;
         }
-        let path = PathBuf::from(format!(
-            "/var/lib/colmena-mounts-test-{}",
-            uuid::Uuid::new_v4().simple()
-        ));
-        std::fs::DirBuilder::new()
-            .mode(0o700)
-            .create(&path)
-            .unwrap();
-        Some(Root { path })
+        let lock: Box<dyn std::any::Any> = match exclusive {
+            true => Box::new(MOUNT_TABLE.write().unwrap_or_else(|e| e.into_inner())),
+            false => Box::new(MOUNT_TABLE.read().unwrap_or_else(|e| e.into_inner())),
+        };
+        let path = SHARED_ROOT.get_or_init(|| {
+            let path = PathBuf::from("/var/lib/colmena-mounts-test");
+            let made = std::fs::DirBuilder::new().mode(0o700).create(&path);
+            assert!(made.is_ok() || path.is_dir(), "{made:?}");
+            path
+        });
+        Some(Root {
+            path: path.clone(),
+            exclusive,
+            _lock: lock,
+        })
     }
 }
 
-impl Drop for Root {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.path);
-    }
+/// An executor with no staging root. Its template counts EVERY mount of the host
+/// while it starts, so only a test that holds the mount table alone may have one:
+/// any other test mounting an output volume at that moment would read as a leak.
+fn executor_without_root(alone: &Root) -> SubprocessExecutor {
+    assert!(
+        alone.exclusive,
+        "an unrooted executor needs Root::exclusive()"
+    );
+    build_executor(None)
 }
 
 fn executor(root: Option<&Root>) -> SubprocessExecutor {
+    build_executor(root.map(|r| r.path.clone()))
+}
+
+/// A range of slot uids no other executor or self-test of this process uses: one
+/// counter for all of them, a hundred uids apiece.
+fn next_uid_base() -> u32 {
+    static NEXT: AtomicU32 = AtomicU32::new(0);
+    30000 + 100 * NEXT.fetch_add(1, Ordering::Relaxed)
+}
+
+fn build_executor(staging_root: Option<PathBuf>) -> SubprocessExecutor {
     pyo3::Python::initialize();
     let mut cfg = SubprocessConfig::from_lookup(&|_: &str| None::<String>).unwrap();
     cfg.bin = PathBuf::from(env!("CARGO_BIN_EXE_python_executor"));
     cfg.slots = 1;
-    static NEXT: AtomicU32 = AtomicU32::new(0);
-    cfg.uid_base = 60000 + 100 * NEXT.fetch_add(1, Ordering::Relaxed);
+    cfg.uid_base = next_uid_base();
     cfg.max_response_bytes = 1 << 20;
-    cfg.staging_root = root.map(|r| r.path.clone());
+    cfg.staging_root = staging_root;
     SubprocessExecutor::new(cfg, Duration::from_secs(60)).unwrap()
 }
 
@@ -247,6 +300,13 @@ async fn run_staged(
 ) -> Result<Value, PythonRunError> {
     let result = ex.run_staged(req(code), mounts).await;
     result.map(|r| r.output.unwrap_or_default())
+}
+
+/// The shared staging root, with the suite's lock held for the test.
+fn root() -> Option<(Root, PathBuf)> {
+    let root = Root::new()?;
+    let path = root.path.clone();
+    Some((root, path))
 }
 
 /// Files laid out by the trusted side, which runs as root: a world-writable
@@ -440,8 +500,10 @@ output = {
 /// A call asking for mounts without a staging root never starts a child.
 #[tokio::test]
 async fn mounts_without_a_staging_root_are_refused() {
-    let Some(_root) = Root::new() else { return };
-    let ex = executor(None);
+    let Some(root) = Root::exclusive() else {
+        return;
+    };
+    let ex = executor_without_root(&root);
     let mounts = CallMounts {
         stage_id: "a".repeat(32),
         out_mb: 1,
@@ -482,4 +544,51 @@ async fn a_call_the_jail_cannot_trust_ends_before_any_code_runs() {
     // The same executor still serves a valid call afterwards.
     let ok = run_staged(&ex, staged.mounts(), "output = 1").await;
     assert_eq!(ok.unwrap(), json!(1));
+}
+
+// ---------------------------------------------------------------------------
+// The startup self-test and calls that mount while a template starts.
+// ---------------------------------------------------------------------------
+
+fn self_test(root: &Root) -> (bool, Vec<Value>) {
+    let mut cmd = std::process::Command::new(env!("CARGO_BIN_EXE_python_executor"));
+    cmd.arg("self-test").arg("--uid-base");
+    cmd.arg(next_uid_base().to_string());
+    cmd.arg("--staging-root").arg(&root.path);
+    let out = cmd.output().unwrap();
+    let lines = String::from_utf8(out.stdout).unwrap();
+    let checks = lines
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    (out.status.success(), checks)
+}
+
+/// Calls in flight mount and unmount their output volumes under the staging root
+/// while a template starts (a restart, another slot warming). The self-test's
+/// "no mount added to the template's namespace" check must not read those as
+/// mounts the probe left behind, or a template cannot start while any call runs.
+#[test]
+fn the_self_test_ignores_mounts_of_calls_in_flight() {
+    let Some(root) = Root::new() else { return };
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    // Several threads, so that a mount is nearly always in flight.
+    let churn: Vec<_> = (0..3)
+        .map(|_| {
+            let (stop, path) = (stop.clone(), root.path.clone());
+            std::thread::spawn(move || {
+                while !stop.load(Ordering::Relaxed) {
+                    drop(StagedCall::create(&path, 1).unwrap());
+                }
+            })
+        })
+        .collect();
+    for _ in 0..25 {
+        let (ok, checks) = self_test(&root);
+        assert!(ok, "{checks:?}");
+    }
+    stop.store(true, Ordering::Relaxed);
+    for t in churn {
+        t.join().unwrap();
+    }
 }

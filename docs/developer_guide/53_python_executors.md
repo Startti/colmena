@@ -214,7 +214,8 @@ read-only `/dev/null` and cannot be opened), a private `/tmp`, the syscall filte
 refused with `EPERM`; on x86_64 an x32-numbered socket call too), no network (DNS, loopback, link-local and a public
 address unreachable, though with the filter `socket()` is refused before any route is tried; only `lo` and the
 kernel's per-namespace fallback tunnel devices listed) and, from the template
-once the probe is done, no mount added to its namespace. Each result is a JSON line `{layer, ok, reason, errno?}`
+once the probe is done, no mount added to its namespace (not counting mounts under the staging root: calls in flight
+mount and unmount their output volumes there while a template starts, and a template must still start). Each result is a JSON line `{layer, ok, reason, errno?}`
 with fixed reason codes. A report that does not carry exactly these layers fails as `incomplete_report`; a template
 that cannot read its own namespaces, mounts or size fails as `namespace_unreadable`, `mounts_unreadable` or
 `vm_size_unreadable`. A configured path the slot uid
