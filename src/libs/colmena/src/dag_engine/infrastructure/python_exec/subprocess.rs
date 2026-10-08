@@ -65,6 +65,9 @@ const EVENTS: &[&str] = &[
     "socket_permissions_failed",
     "accept_failed",
     "self_test_failed",
+    "mounts_disabled",
+    "arrow_pool_not_system",
+    "arrow_pool_unreadable",
 ];
 const NUMBER_KEYS: &[&str] = &[
     "pid",
@@ -74,7 +77,7 @@ const NUMBER_KEYS: &[&str] = &[
     "errno",
     "threads",
 ];
-const NAME_KEYS: &[&str] = &["error_type", "module", "layer", "reason"];
+const NAME_KEYS: &[&str] = &["error_type", "module", "layer", "reason", "backend"];
 /// Host variables the template gets on top of `TEMPLATE_ENV`, so text
 /// encodings match the in-process interpreter. CPython takes only `LC_CTYPE`
 /// from the environment at startup, which `LC_ALL` overrides and `LANG` backs.
@@ -114,6 +117,8 @@ struct Template {
     child: Child,
     socket: PathBuf,
     dir: PathBuf,
+    /// Why this template cannot offer run mounts, from its own startup checks.
+    mounts_disabled: Option<String>,
 }
 
 impl Drop for Template {
@@ -505,6 +510,14 @@ impl SubprocessExecutor {
         }
     }
 
+    /// Why the running template cannot offer run mounts, if it cannot.
+    async fn mounts_disabled(&self) -> Option<String> {
+        match &*self.state.lock().await {
+            State::Running(t) => t.mounts_disabled.clone(),
+            _ => None,
+        }
+    }
+
     async fn start(&self) -> Result<Template, String> {
         let (tx, rx) = tokio::sync::oneshot::channel();
         let (cfg, dropped) = (self.cfg.clone(), self.stderr_dropped.clone());
@@ -562,6 +575,13 @@ impl SubprocessExecutor {
         }
         let slot = self.take_slot().await?;
         let socket = self.socket_path().await.map_err(RawFailure::Unavailable)?;
+        if mounts.is_some() {
+            if let Some(reason) = self.mounts_disabled().await {
+                return Err(RawFailure::Unavailable(format!(
+                    "PythonExecutorError: run mounts are disabled on this executor ({reason}); see its startup log"
+                )));
+            }
+        }
         let mut conn = UnixStream::connect(&socket).await.map_err(|e| {
             RawFailure::Unavailable(format!(
                 "PythonExecutorError: cannot reach the Python template process: {e}"
@@ -684,7 +704,12 @@ fn start_template(cfg: &SubprocessConfig, dropped: Arc<AtomicU64>) -> Result<Tem
         let _ = std::fs::remove_dir_all(&dir);
         format!("PythonExecutorError: cannot start the Python template process: {e}")
     })?;
-    let mut t = Template { child, socket, dir };
+    let mut t = Template {
+        child,
+        socket,
+        dir,
+        mounts_disabled: None,
+    };
     let stderr = t.child.stderr.take().expect("stderr is piped");
     let stdout = t.child.stdout.take().expect("stdout is piped");
     let (ready_tx, ready) = mpsc::channel();
@@ -695,8 +720,15 @@ fn start_template(cfg: &SubprocessConfig, dropped: Arc<AtomicU64>) -> Result<Tem
             named("python-template-stdout").spawn(move || {
                 let mut out = BufReader::new(stdout);
                 let mut first = String::new();
-                let read = out.by_ref().take(64).read_line(&mut first);
-                let _ = ready_tx.send(read.is_ok() && first.trim_end() == "READY");
+                let mut read = out.by_ref().take(96).read_line(&mut first);
+                // An optional line before READY: run mounts are unavailable.
+                let off = mounts_disabled_reason(&first);
+                if off.is_some() {
+                    first.clear();
+                    read = out.by_ref().take(64).read_line(&mut first);
+                }
+                let ok = read.is_ok() && first.trim_end() == "READY";
+                let _ = ready_tx.send(ok.then_some(off));
                 // Children inherit this pipe: keep it drained so none blocks on it.
                 let _ = std::io::copy(&mut out, &mut std::io::sink());
             })
@@ -704,7 +736,11 @@ fn start_template(cfg: &SubprocessConfig, dropped: Arc<AtomicU64>) -> Result<Tem
         .map_err(|e| {
             format!("PythonExecutorError: cannot read the Python template process: {e}")
         })?;
-    if ready.recv_timeout(READY_TIMEOUT).unwrap_or(false) {
+    if let Ok(Some(off)) = ready.recv_timeout(READY_TIMEOUT) {
+        if let Some(reason) = &off {
+            tracing::error!(target: T_PYTHON_EXEC, reason = %reason, "python template ready WITHOUT run mounts");
+        }
+        t.mounts_disabled = off;
         tracing::info!(target: T_PYTHON_EXEC, pid = t.child.id(), "python template ready");
         return Ok(t);
     }
@@ -715,6 +751,18 @@ fn start_template(cfg: &SubprocessConfig, dropped: Arc<AtomicU64>) -> Result<Tem
         _ => "PythonExecutorError: the Python template process did not become ready",
     }
     .to_string())
+}
+
+/// The reason on a `MOUNTS_DISABLED <reason>` line: 1 to 64 letters, digits and
+/// underscores, nothing else.
+fn mounts_disabled_reason(line: &str) -> Option<String> {
+    let reason = line.trim_end().strip_prefix("MOUNTS_DISABLED ")?;
+    let plain = !reason.is_empty()
+        && reason.len() <= 64
+        && reason
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_');
+    plain.then(|| reason.to_string())
 }
 
 /// `TEMPLATE_ENV` plus the host's `LOCALE_VARS`; nothing else of `host`.
@@ -1134,6 +1182,52 @@ mod tests {
         assert!(ex.state.try_lock().is_err(), "the start is not under way");
         let local = Arc::new(InProcessExecutor);
         Dispatcher::new(ModesPolicy::Restricted, Duration::from_secs(60), ex, local)
+    }
+
+    /// A template that reports its mounts capability disabled still serves plain
+    /// calls (it printed READY); a call that asks for mounts is refused with a
+    /// typed error naming the reason, and no child is started for it.
+    #[tokio::test]
+    async fn a_template_with_mounts_disabled_refuses_only_mounts_calls() {
+        let (dir, ex) = fake("echo MOUNTS_DISABLED staging_unusable\necho READY\nexec sleep 30");
+        let mut cfg = ex.config().clone();
+        cfg.staging_root = Some(dir.path().to_path_buf());
+        let ex = SubprocessExecutor::unchecked(cfg, Duration::from_secs(60)).unwrap();
+        ex.warm().await.unwrap();
+        let mounts = CallMounts {
+            stage_id: "a".repeat(32),
+            out_mb: 1,
+        };
+        let req = PythonRunRequest {
+            code: "output = 1".into(),
+            mode: "none".into(),
+            timeout: None,
+            inputs: Default::default(),
+        };
+        let err = ex.run_staged(req, mounts).await.unwrap_err().to_string();
+        assert!(
+            err.contains("disabled") && err.contains("staging_unusable"),
+            "{err}"
+        );
+        assert_eq!(starts(&dir), 1, "no second template for the refusal");
+    }
+
+    #[test]
+    fn only_a_plain_reason_is_read_from_the_template() {
+        assert_eq!(
+            mounts_disabled_reason("MOUNTS_DISABLED staging_unusable\n"),
+            Some("staging_unusable".into())
+        );
+        for bad in [
+            "READY",
+            "MOUNTS_DISABLED",
+            "MOUNTS_DISABLED a b",
+            "MOUNTS_DISABLED ../x",
+            "MOUNTS_DISABLED ",
+            &format!("MOUNTS_DISABLED {}", "x".repeat(65)),
+        ] {
+            assert_eq!(mounts_disabled_reason(bad), None, "{bad}");
+        }
     }
 
     /// Waiting joins the start under way: it returns once the template has

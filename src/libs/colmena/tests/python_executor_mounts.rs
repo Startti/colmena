@@ -1199,3 +1199,57 @@ async fn calls_start_correctly_while_other_calls_come_and_go() {
     stop.store(true, Ordering::Relaxed);
     churn.join().unwrap();
 }
+
+// ---------------------------------------------------------------------------
+// A broken staging setup disables the mounts capability, not the executor.
+// ---------------------------------------------------------------------------
+
+/// A staging root on a read-only filesystem: the self-test's staged call cannot
+/// be made. Plain calls keep working; calls that ask for mounts are refused with
+/// a typed error naming the reason.
+#[tokio::test]
+async fn a_broken_staging_root_disables_mounts_and_not_plain_calls() {
+    let Some(good) = Root::exclusive() else {
+        return;
+    };
+    let tmp = tempfile::tempdir().unwrap();
+    let broken = tmp.path().canonicalize().unwrap();
+    let rc = unsafe {
+        libc::mount(
+            c"tmpfs".as_ptr(),
+            std::ffi::CString::new(broken.to_str().unwrap())
+                .unwrap()
+                .as_ptr(),
+            c"tmpfs".as_ptr(),
+            libc::MS_RDONLY,
+            c"size=1m".as_ptr() as *const libc::c_void,
+        )
+    };
+    assert_eq!(rc, 0, "{}", std::io::Error::last_os_error());
+    struct Unmount(PathBuf);
+    impl Drop for Unmount {
+        fn drop(&mut self) {
+            let c = std::ffi::CString::new(self.0.to_str().unwrap()).unwrap();
+            unsafe { libc::umount2(c.as_ptr(), libc::MNT_DETACH) };
+        }
+    }
+    let _guard = Unmount(broken.clone());
+    let mut cfg = SubprocessConfig::from_lookup(&|_: &str| None::<String>).unwrap();
+    cfg.bin = PathBuf::from(env!("CARGO_BIN_EXE_python_executor"));
+    cfg.slots = 1;
+    cfg.uid_base = 64000;
+    cfg.staging_root = Some(broken.clone());
+    let ex = SubprocessExecutor::new(cfg, Duration::from_secs(60)).unwrap();
+    assert_eq!(run_plain(&ex, "output = 1").await.unwrap(), json!(1));
+    // A perfectly good staged call, made elsewhere: the executor still refuses it.
+    let staged = StagedCall::create(&good.path, 1).unwrap();
+    let err = run_staged(&ex, staged.mounts(), "output = 2")
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(
+        err.contains("disabled") && err.contains("staging_unusable"),
+        "{err}"
+    );
+    assert_eq!(run_plain(&ex, "output = 3").await.unwrap(), json!(3));
+}
