@@ -16,11 +16,20 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 /// The only environment the template (and every child) starts with.
+///
+/// `JE_ARROW_MALLOC_CONF` is the setting string of the jemalloc that pyarrow's
+/// x86_64 wheels bundle, which otherwise starts a `jemalloc_bg_thd` thread the
+/// moment `import pyarrow` runs (pandas 1.5.3 imports it when installed): the
+/// template would then have two threads and refuse to start, for every call.
+/// Without that thread jemalloc purges unused pages from the allocating thread
+/// instead of a timer; nothing else changes. The aarch64 wheels have no such
+/// thread, and the variable is ignored there and when pyarrow is absent.
 pub const TEMPLATE_ENV: &[(&str, &str)] = &[
     ("PATH", "/usr/local/bin:/usr/bin:/bin"),
     ("OPENBLAS_NUM_THREADS", "1"),
     ("OMP_NUM_THREADS", "1"),
     ("MKL_NUM_THREADS", "1"),
+    ("JE_ARROW_MALLOC_CONF", "background_thread:false"),
 ];
 
 /// Added to the template's environment, and so to every call's, only when the
@@ -371,6 +380,55 @@ mod tests {
             assert!(result.is_ok());
             assert_eq!(asked, 0, "pyarrow was imported to be checked");
         });
+    }
+
+    /// What the template's warm imports do to its thread count, in a fresh Python
+    /// with exactly the template's environment (plus the staged executor's Arrow
+    /// variables, the larger of the two): pyarrow's x86_64 wheels bundle a jemalloc
+    /// that starts `jemalloc_bg_thd` during `import pyarrow` unless
+    /// `TEMPLATE_ENV` turns it off, and a second thread makes the template refuse
+    /// to start. This runs where the failure shows (x86_64 with pyarrow installed);
+    /// where pyarrow is missing it is skipped unless the environment says it is
+    /// expected (`COLMENA_PYEXEC_EXPECT_PYARROW=1`).
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn importing_pyarrow_leaves_the_template_environment_single_threaded() {
+        let code = "import sys\n\
+            def threads():\n\
+            \treturn int([l for l in open('/proc/self/status') if l.startswith('Threads:')][0].split()[1])\n\
+            try:\n\
+            \timport pyarrow\n\
+            except ImportError:\n\
+            \tprint('absent'); sys.exit(0)\n\
+            import pandas, numpy, scipy.stats\n\
+            print(threads())";
+        let out = std::process::Command::new("python3")
+            .env_clear()
+            .envs(TEMPLATE_ENV.iter().chain(ARROW_ENV).copied())
+            .args(["-c", code])
+            .output()
+            .expect("python3 runs");
+        let text = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        if text.trim() == "absent" {
+            let expected = std::env::var("COLMENA_PYEXEC_EXPECT_PYARROW").as_deref() == Ok("1");
+            assert!(!expected, "pyarrow is expected here but is not installed");
+            eprintln!("skipped: pyarrow is not installed");
+            return;
+        }
+        assert_eq!(text.trim(), "1", "the warm imports started a thread");
+    }
+
+    /// The setting that keeps that thread away is part of the fixed environment
+    /// every template and call gets, with or without a staging root.
+    #[test]
+    fn the_fixed_environment_turns_off_the_arrow_jemalloc_thread() {
+        assert!(TEMPLATE_ENV.contains(&("JE_ARROW_MALLOC_CONF", "background_thread:false")));
+        assert!(!ARROW_ENV.iter().any(|(k, _)| *k == "JE_ARROW_MALLOC_CONF"));
     }
 
     /// Only a forked child is single-threaded under the multi-threaded test
