@@ -23,6 +23,25 @@ use thiserror::Error;
 /// Sheets a workbook may have. It is the number of tables a manifest holds.
 pub const MAX_SHEETS: usize = crate::tabular_prepare::manifest::MAX_TABLES;
 
+/// Elements open at once in any part. The deepest part this reads (a rich-text
+/// shared string) is seven deep.
+pub const MAX_DEPTH: usize = 32;
+
+/// Bytes of an element's name.
+pub const MAX_NAME_BYTES: usize = 256;
+
+/// Attributes of a tag this reader will look through.
+pub const MAX_ATTRIBUTES: usize = 64;
+
+/// Declared size of a part other than the sheets and the shared strings: the
+/// workbook, its relationships and the styles (at most 65,536 styles of a few
+/// dozen bytes each and as many custom formats).
+pub const MAX_SMALL_PART_BYTES: u64 = 16 * 1024 * 1024;
+
+/// Declared size of a worksheet part: the pre-check's per-entry limit (2 GiB),
+/// within the job's running budget of inflated bytes.
+pub const MAX_SHEET_PART_BYTES: u64 = crate::tabular_prepare::precheck::MAX_ENTRY_BYTES;
+
 /// Bytes the XML parser may buffer for one event (a tag or a text node).
 pub const MAX_TOKEN_BYTES: u64 = 1024 * 1024;
 
@@ -111,6 +130,8 @@ pub struct Guarded<R> {
     filled: usize,
     since: u64,
     limit: u64,
+    /// Elements open at this point of the part.
+    depth: usize,
 }
 
 impl<R: Read> Guarded<R> {
@@ -122,6 +143,7 @@ impl<R: Read> Guarded<R> {
             filled: 0,
             since: 0,
             limit,
+            depth: 0,
         }
     }
 
@@ -225,12 +247,15 @@ impl Package {
     /// found at the offset it validated (its local header already compared with the
     /// central directory) and only its raw bytes are handed to the decoder, so no
     /// other directory is ever discovered or allocated.
-    pub fn xml(&mut self, name: &str) -> Result<XmlPart<'_>, XlsxError> {
+    pub fn xml(&mut self, name: &str, max_declared: u64) -> Result<XmlPart<'_>, XlsxError> {
         let entry = self
             .summary
             .entry(name)
             .ok_or(XlsxError::Invalid(Invalid::Xml))?
             .clone();
+        if entry.uncompressed > max_declared {
+            return Err(XlsxError::Archive(ArchiveError::EntryTooLarge));
+        }
         self.file
             .seek(SeekFrom::Start(entry.data_offset))
             .map_err(|_| XlsxError::Local)?;
@@ -256,7 +281,23 @@ pub fn next_event<'b, R: Read>(
 ) -> Result<Event<'b>, XlsxError> {
     buf.clear();
     let event = reader.read_event_into(buf).map_err(|e| xml_failure(&e))?;
-    reader.get_mut().reset();
+    let guard = reader.get_mut();
+    guard.reset();
+    match &event {
+        Event::Start(e) | Event::Empty(e) if e.name().as_ref().len() > MAX_NAME_BYTES => {
+            return Err(XlsxError::Invalid(Invalid::TokenTooLong));
+        }
+        Event::Start(_) => {
+            // The parser keeps every open element's name until it is closed, so
+            // what it holds is bounded by the depth times the name length.
+            guard.depth += 1;
+            if guard.depth > MAX_DEPTH {
+                return Err(XlsxError::Invalid(Invalid::TooDeep));
+            }
+        }
+        Event::End(_) => guard.depth = guard.depth.saturating_sub(1),
+        _ => {}
+    }
     Ok(event)
 }
 
@@ -270,7 +311,15 @@ pub fn text_of(raw: &[u8]) -> Result<std::borrow::Cow<'_, str>, XlsxError> {
 
 /// The value of the attribute whose local name is `local` (`id` finds `r:id`).
 pub fn attribute(e: &BytesStart, local: &[u8]) -> Result<Option<String>, XlsxError> {
-    for attr in e.attributes() {
+    // The parser's duplicate-attribute check compares each attribute with every
+    // earlier one (quadratic in a tag with tens of thousands); the count is capped
+    // instead and the check turned off.
+    let mut attributes = e.attributes();
+    attributes.with_checks(false);
+    for (i, attr) in attributes.enumerate() {
+        if i >= MAX_ATTRIBUTES {
+            return Err(XlsxError::Invalid(Invalid::TooManyAttributes));
+        }
         let attr = attr.map_err(|_| XlsxError::Invalid(Invalid::Xml))?;
         if attr.key.local_name().as_ref() == local {
             return text_of(&attr.value).map(|v| Some(v.into_owned()));
@@ -380,14 +429,14 @@ mod tests {
         let good = build(&[Entry::stored("a.xml", b"<a><b>hi</b></a>")]);
         let mut pkg = package_of(good, &limits).await.unwrap();
         assert!(pkg.has("a.xml") && !pkg.has("b.xml"));
-        let mut part = pkg.xml("a.xml").unwrap();
+        let mut part = pkg.xml("a.xml", MAX_SMALL_PART_BYTES).unwrap();
         let mut buf = Vec::new();
         assert!(matches!(
             part.read_event_into(&mut buf).unwrap(),
             Event::Start(_)
         ));
         drop(part);
-        assert!(pkg.xml("b.xml").is_err());
+        assert!(pkg.xml("b.xml", MAX_SMALL_PART_BYTES).is_err());
         let bad = build(&[Entry::stored("../a.xml", b"x")]);
         let r = package_of(bad, &limits).await;
         assert!(matches!(r, Err(XlsxError::Archive(ArchiveError::BadName))));
@@ -423,7 +472,7 @@ mod tests {
         zip_bytes[local + 22..local + 26].copy_from_slice(&50_000u32.to_le_bytes());
         zip_bytes[central + 24..central + 28].copy_from_slice(&50_000u32.to_le_bytes());
         let mut pkg = package_of(zip_bytes, &XlsxLimits::default()).await.unwrap();
-        let mut part = pkg.xml("a.xml").unwrap();
+        let mut part = pkg.xml("a.xml", MAX_SMALL_PART_BYTES).unwrap();
         let mut buf = Vec::new();
         let err = loop {
             match part.read_event_into(&mut buf) {

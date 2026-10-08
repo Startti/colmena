@@ -933,6 +933,22 @@ part as an XML reader under **two guards**, because the pre-check only reads hea
   parse loop resets it after every event. A test shows the parser buffering less than the
   limit plus one 16 KiB buffer of a 50 KiB node.
 
+**What the parser holds, whatever the XML.** `Guarded` resets per event, so it bounds one
+token but not the elements left open: the parser keeps the name of every open element until it
+is closed (about nine bytes of bookkeeping for a three-byte `<a>`), so millions of unclosed
+elements, padded to pass the ratio rule, would be gigabytes. Every part read goes through
+`next_event`, which therefore caps the **nesting depth at 32** (the deepest part read, a
+rich-text shared string, is seven) and **an element name at 256 bytes**: what the parser holds
+for open elements is at most 32 x 256 bytes. `attribute()` caps **the attributes of a tag at
+64** and turns off the parser's duplicate-attribute check, which compares each attribute with
+every earlier one (about 2 x 10^8 comparisons for 20,000 attributes in one 1 MiB tag, repeatable
+for every tag of a part). Each kind of part has a **declared-size cap of its own** instead of
+the 2 GiB per-entry limit: 16 MiB for the workbook, its relationships and the styles
+(`MAX_SMALL_PART_BYTES`), 128 MiB for the shared strings, and for a sheet the per-entry limit,
+2 GiB (`MAX_SHEET_PART_BYTES`), inside the job's running budget. `tests/xlsx_hostile_memory.rs`
+reads 3,000,000 unclosed elements as each kind of part and asserts the refusal (`TooDeep`)
+costs under 2 MiB.
+
 **One reading of the archive.** The part is found at the offset the pre-check validated (its
 local header already compared with the central directory) and only its raw bytes go to a
 decoder (`flate2`, or none for a stored part), under `Limited`, which also checks the part's

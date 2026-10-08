@@ -129,7 +129,7 @@ pub(crate) fn read_shared_strings_with(
         ends: Vec::with_capacity(entries),
     };
     let (mut in_si, mut in_t, mut in_phonetic) = (false, false, false);
-    let mut reader = pkg.xml(part)?;
+    let mut reader = pkg.xml(part, MAX_SHARED_STRINGS_XML_BYTES)?;
     let mut buf = Vec::new();
     loop {
         match next_event(&mut reader, &mut buf)? {
