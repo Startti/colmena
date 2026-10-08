@@ -744,10 +744,8 @@ async fn run_prepare(
             Kind::Xlsx => convert_xlsx(&xlsx_source, sink, env.writer, &control)
                 .await
                 .map(|converted| {
-                    let raw: Vec<&str> =
-                        converted.tables.iter().map(|s| s.sheet.as_str()).collect();
-                    let names = unique_table_names(&raw);
-                    let tables = names
+                    let tables = converted
+                        .table_names
                         .into_iter()
                         .zip(converted.tables)
                         .map(|(name, sheet)| (name, sheet.table))
