@@ -545,6 +545,61 @@ async fn a_call_the_jail_cannot_trust_ends_before_any_code_runs() {
     let ok = run_staged(&ex, staged.mounts(), "output = 1").await;
     assert_eq!(ok.unwrap(), json!(1));
 }
+/// Only this call's directory is reachable: its bind. The staging root is
+/// covered, the call directory and another call's files are nowhere, and `..`
+/// of `/data` is the jail's root, not the directory the data came from.
+#[tokio::test]
+async fn nothing_but_this_calls_data_is_reachable() {
+    let Some(root) = Root::new() else { return };
+    let ex = executor(Some(&root));
+    let mine = StagedCall::create(&root.path, 1).unwrap();
+    let other = StagedCall::create(&root.path, 1).unwrap();
+    std::fs::write(mine.data_dir().join("mine.txt"), "m").unwrap();
+    std::fs::write(other.data_dir().join("secret-other.txt"), "s").unwrap();
+    let code = format!(
+        r#"
+import os
+root, mine, other = {root:?}, {mine:?}, {other:?}
+found = []
+for d, dirs, files in os.walk('/', onerror=lambda e: None):
+    dirs[:] = [x for x in dirs if os.path.join(d, x) not in ('/proc', '/sys', '/dev')]
+    if 'secret-other.txt' in files:
+        found.append(d)
+output = {{
+  'root_listing': os.listdir(root),
+  'my_dir_exists': os.path.exists(root + '/' + mine),
+  'other_dir_exists': os.path.exists(root + '/' + other),
+  'found_other_file': found,
+  'dotdot_is_root': sorted(os.listdir('/data/..')) == sorted(os.listdir('/')),
+}}
+"#,
+        root = root.path.to_str().unwrap(),
+        mine = mine.id(),
+        other = other.id()
+    );
+    let out = run_staged(&ex, mine.mounts(), &code).await.unwrap();
+    assert_eq!(
+        out,
+        json!({"root_listing": [], "my_dir_exists": false, "other_dir_exists": false,
+               "found_other_file": [], "dotdot_is_root": true})
+    );
+}
+
+/// With a staging root configured, even a call without mounts cannot see it.
+#[tokio::test]
+async fn the_staging_root_is_hidden_from_a_call_without_mounts() {
+    let Some(root) = Root::new() else { return };
+    let ex = executor(Some(&root));
+    let staged = StagedCall::create(&root.path, 1).unwrap();
+    std::fs::write(staged.data_dir().join("a.txt"), "hello").unwrap();
+    let code = format!(
+        "import os\nroot = {:?}\noutput = [os.listdir(root), os.path.exists(root + '/' + {:?}), os.listdir('/data') if os.path.exists('/data') else [], os.path.exists('/out')]",
+        root.path.to_str().unwrap(),
+        staged.id()
+    );
+    let out = run_plain(&ex, &code).await.unwrap();
+    assert_eq!(out, json!([[], false, [], false]));
+}
 
 // ---------------------------------------------------------------------------
 // The startup self-test and calls that mount while a template starts.
