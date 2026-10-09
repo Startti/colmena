@@ -92,10 +92,38 @@ def _ct_pyarrow():
     return pd, opt('pyarrow'), opt('pyarrow.parquet')
 
 
+def _ct_dates_fit(pa, table):
+    # pandas 1.5 stores dates as datetime64[ns], and pyarrow wraps a date outside
+    # 1677-09-22..2262-04-11 into a WRONG date without an error: look before converting.
+    import datetime
+    lo, hi = datetime.date(1677, 9, 22), datetime.date(2262, 4, 11)
+    pc = _ct_optional('pyarrow.compute')
+    for field in table.schema:
+        if pa.types.is_date(field.type):
+            mm = pc.min_max(table.column(field.name))
+            first, last = mm['min'].as_py(), mm['max'].as_py()
+            if first is not None and (first < lo or last > hi):
+                return False
+    return True
+
+
+def _ct_optional(name):
+    import pandas as pd
+    return pd.compat._optional.import_optional_dependency(name)
+
+
 def _ct_frame(pd, pa, table):
     # No Python date objects (about ten times the memory) and no object columns for
-    # booleans with nulls.
-    return table.to_pandas(date_as_object=False, types_mapper={pa.bool_(): pd.BooleanDtype()}.get)
+    # booleans with nulls. Dates or timestamps that datetime64[ns] cannot hold (a
+    # 9999-12-31 sentinel, a year before 1677) must not wrap or fail the read: that
+    # read keeps Python objects for them (heavier; the estimate does not know).
+    mapper = {pa.bool_(): pd.BooleanDtype()}.get
+    if _ct_dates_fit(pa, table):
+        try:
+            return table.to_pandas(date_as_object=False, types_mapper=mapper)
+        except Exception:
+            pass
+    return table.to_pandas(date_as_object=True, timestamp_as_object=True, types_mapper=mapper)
 
 
 def _ct_path(t, part):
@@ -112,11 +140,18 @@ def _ct_read(t, part, columns, filters):
 
 
 def _ct_head(t, n, columns):
-    # Only the rows asked for are decoded: the first batch of `n` rows, not the whole part.
+    # Only the rows asked for are decoded: batches of `n` rows, taken until `n` rows
+    # exist (a row group boundary can make the first batch shorter), never the part.
     pd, pa, pq = _ct_pyarrow()
+    batches, have = [], 0
     for batch in pq.ParquetFile(_ct_path(t, 0)).iter_batches(batch_size=n, columns=columns, use_threads=False):
-        return _ct_frame(pd, pa, pa.Table.from_batches([batch])).head(n)
-    return _ct_frame(pd, pa, pq.read_table(_ct_path(t, 0), columns=columns)).head(n)
+        batches.append(batch)
+        have += batch.num_rows
+        if have >= n:
+            break
+    if not batches:
+        return _ct_frame(pd, pa, pq.read_table(_ct_path(t, 0), columns=columns)).head(n)
+    return _ct_frame(pd, pa, pa.Table.from_batches(batches)).head(n)
 
 
 class _Table:

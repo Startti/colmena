@@ -2517,7 +2517,13 @@ impl ExecutableNode for LlmNode {
         // One answer for the whole turn: is the large-file tool served (switch on,
         // runtime wired)? It decides the refusals' wording and, with a host-owned
         // row in the catalog, whether the tool is offered with the large-file text.
-        let large_tool_served = self.large_tabular_enabled() && self.large_runtime.get().is_some();
+        let large_tool_served = crate::llm::domain::large_tabular::tool_served(
+            self.large_tabular_enabled(),
+            self.large_runtime.get().is_some(),
+            configured_aliases.contains(
+                crate::dag_engine::infrastructure::nodes::llm_synthetic_tools::attachment_run_python::ATTACHMENT_RUN_PYTHON_TOOL_NAME,
+            ),
+        );
         let attachment_catalog: Vec<crate::llm::domain::ConversationAttachment> =
             if attachments_enabled {
                 if let (Some(reg), Some(sid)) =
@@ -2671,7 +2677,7 @@ impl ExecutableNode for LlmNode {
             // Large tabular (dark behind COLMENA_LARGE_TABULAR): a call over a
             // host-owned large file runs over its prepared tables. Nothing is
             // wired with the switch off or without a runtime.
-            if self.large_tabular_enabled() {
+            if large_tool_served {
                 if let Some(runtime) = self.large_runtime.get() {
                     executor = executor.with_large_tabular(runtime.clone());
                 }

@@ -29,7 +29,7 @@ use std::io::{self, BufRead, BufReader, Read};
 use std::os::unix::fs::DirBuilderExt;
 use std::os::unix::io::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::process::ExitStatusExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStderr, Command, Stdio};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
@@ -331,42 +331,92 @@ fn kill_uid(uid: u32) -> Result<(), NotStopped> {
     })
 }
 
+/// A stop that never succeeds: set on a slot whose uid could not be confirmed empty,
+/// so that freeing it retires it (the existing path for a slot that cannot be stopped).
+fn refuse_to_stop(_uid: u32) -> Result<(), NotStopped> {
+    Err(NotStopped::default())
+}
+
 /// Longest [`confirm_uid_gone`] waits for the processes to leave `/proc`.
 const CONFIRM_WAIT: Duration = Duration::from_secs(2);
 
-/// Whether a process other than a zombie runs as `uid`. Reads the host's `/proc`
-/// (the executor runs outside the jail); a `/proc` that cannot be read says "yes":
-/// when it cannot be known, it is not confirmed.
-fn uid_has_processes(uid: u32) -> bool {
-    let Ok(dir) = std::fs::read_dir("/proc") else {
-        return true;
+/// What a scan of `/proc` found for a uid.
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+enum Procs {
+    /// No live task runs as it.
+    Gone,
+    /// One does.
+    Alive,
+    /// Something could not be read for a reason other than "it vanished": not
+    /// known, so not confirmed.
+    Unknown,
+}
+
+/// Reads one `status`: `Ok(None)` when the task is gone (ENOENT/ESRCH, which is
+/// what is hoped for), `Err` for anything else (hidepid, a restricted ptrace,
+/// EIO): that is "cannot tell", never "gone".
+fn read_status(path: &Path) -> Result<Option<String>, ()> {
+    match std::fs::read_to_string(path) {
+        Ok(text) => Ok(Some(text)),
+        Err(e) if matches!(e.raw_os_error(), Some(libc::ENOENT | libc::ESRCH)) => Ok(None),
+        Err(_) => Err(()),
+    }
+}
+
+fn status_is_live_of(status: &str, uid: u32) -> bool {
+    let zombie = status
+        .lines()
+        .any(|l| l.starts_with("State:") && l.contains('Z'));
+    let ours = status
+        .lines()
+        .find_map(|l| l.strip_prefix("Uid:"))
+        .is_some_and(|rest| {
+            rest.split_whitespace()
+                .next()
+                .and_then(|f| f.parse::<u32>().ok())
+                == Some(uid)
+        });
+    ours && !zombie
+}
+
+/// Whether a LIVE task runs as `uid` under `proc` (the host's `/proc`; the executor
+/// runs outside the jail). Every task of every process is looked at: a zombie
+/// group leader with live sibling threads is NOT gone.
+fn scan_uid(proc: &Path, uid: u32) -> Procs {
+    let Ok(dir) = std::fs::read_dir(proc) else {
+        return Procs::Unknown;
     };
+    let mut unknown = false;
     for entry in dir.flatten() {
         let name = entry.file_name();
         if !name.to_string_lossy().bytes().all(|b| b.is_ascii_digit()) {
             continue;
         }
-        let Ok(status) = std::fs::read_to_string(entry.path().join("status")) else {
-            // Gone between the listing and the read, which is what is hoped for.
-            continue;
+        let tasks = match std::fs::read_dir(entry.path().join("task")) {
+            Ok(t) => t,
+            Err(e) if matches!(e.raw_os_error(), Some(libc::ENOENT | libc::ESRCH)) => continue,
+            Err(_) => {
+                unknown = true;
+                continue;
+            }
         };
-        let zombie = status
-            .lines()
-            .any(|l| l.starts_with("State:") && l.contains('Z'));
-        let ours = status
-            .lines()
-            .find_map(|l| l.strip_prefix("Uid:"))
-            .is_some_and(|rest| {
-                rest.split_whitespace()
-                    .next()
-                    .and_then(|f| f.parse::<u32>().ok())
-                    == Some(uid)
-            });
-        if ours && !zombie {
-            return true;
+        for task in tasks.flatten() {
+            match read_status(&task.path().join("status")) {
+                Ok(Some(text)) if status_is_live_of(&text, uid) => return Procs::Alive,
+                Ok(_) => {}
+                Err(()) => unknown = true,
+            }
         }
     }
-    false
+    if unknown {
+        Procs::Unknown
+    } else {
+        Procs::Gone
+    }
+}
+
+fn uid_has_processes(uid: u32) -> Procs {
+    scan_uid(Path::new("/proc"), uid)
 }
 
 /// Blocking. Stops every process of `uid` (again) and waits, up to `wait`, until
@@ -377,8 +427,11 @@ fn confirm_uid_gone(stop: fn(u32) -> Result<(), NotStopped>, uid: u32, wait: Dur
     }
     let end = Instant::now() + wait;
     loop {
-        if !uid_has_processes(uid) {
-            return true;
+        match uid_has_processes(uid) {
+            Procs::Gone => return true,
+            // Not knowing is not confirming, and waiting will not make it known.
+            Procs::Unknown => return false,
+            Procs::Alive => {}
         }
         if Instant::now() >= end {
             return false;
@@ -833,6 +886,11 @@ impl SubprocessExecutor {
                     .await
                     .unwrap_or(false);
             if !gone {
+                // The slot is RETIRED, not returned: its uid may still have a process.
+                // Its own stop fails from now on, which is what retires a slot.
+                if let Some((_, slot)) = child.live.as_mut() {
+                    slot.stop = refuse_to_stop;
+                }
                 tracing::error!(target: T_PYTHON_EXEC, "could not confirm every process of a call exited");
                 return Err(RawFailure::Unavailable(
                     "PythonExecutorError: could not confirm that the call's processes ended".into(),
@@ -1548,6 +1606,56 @@ mod tests {
             "this very process runs as {me}"
         );
         assert!(started.elapsed() >= Duration::from_millis(150));
-        assert!(uid_has_processes(me) && !uid_has_processes(nobody));
+        assert!(uid_has_processes(me) == Procs::Alive && uid_has_processes(nobody) == Procs::Gone);
+    }
+
+    /// A fake `/proc`: `pid` with the given tasks `(tid, State line, Uid)`.
+    #[allow(clippy::type_complexity)]
+    fn fake_proc(entries: &[(u32, &[(u32, &str, u32)])]) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        for (pid, tasks) in entries {
+            for (tid, state, uid) in *tasks {
+                let t = dir
+                    .path()
+                    .join(pid.to_string())
+                    .join("task")
+                    .join(tid.to_string());
+                std::fs::create_dir_all(&t).unwrap();
+                std::fs::write(
+                    t.join("status"),
+                    format!("State:\t{state}\nUid:\t{uid}\t{uid}\t{uid}\t{uid}\n"),
+                )
+                .unwrap();
+            }
+        }
+        dir
+    }
+
+    #[test]
+    fn a_scan_counts_live_threads_of_a_zombie_leader_and_fails_closed() {
+        // A zombie leader with a live sibling thread of the uid: NOT gone.
+        let p = fake_proc(&[(10, &[(10, "Z (zombie)", 777), (11, "S (sleeping)", 777)])]);
+        assert_eq!(scan_uid(p.path(), 777), Procs::Alive);
+        // Only zombies, or another uid: gone.
+        let p = fake_proc(&[
+            (10, &[(10, "Z (zombie)", 777)]),
+            (12, &[(12, "R (running)", 1000)]),
+        ]);
+        assert_eq!(scan_uid(p.path(), 777), Procs::Gone);
+        // A task whose status cannot be read for a reason other than vanishing
+        // (here a directory where the file should be): cannot be confirmed.
+        let p = fake_proc(&[(10, &[(10, "S (sleeping)", 1000)])]);
+        std::fs::remove_file(p.path().join("10/task/10/status")).unwrap();
+        std::fs::create_dir(p.path().join("10/task/10/status")).unwrap();
+        assert_eq!(scan_uid(p.path(), 777), Procs::Unknown);
+        // A task that vanished between the listing and the read is what is hoped for.
+        let p = fake_proc(&[(10, &[(10, "S (sleeping)", 1000)])]);
+        std::fs::remove_file(p.path().join("10/task/10/status")).unwrap();
+        assert_eq!(scan_uid(p.path(), 777), Procs::Gone);
+        // A /proc that cannot be listed at all is unknown.
+        assert_eq!(
+            scan_uid(Path::new("/nonexistent-proc"), 777),
+            Procs::Unknown
+        );
     }
 }

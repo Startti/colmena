@@ -91,6 +91,16 @@ pub(super) async fn create_file(path: &Path) -> Result<tokio::fs::File, RunRefus
     Ok(file)
 }
 
+/// A part the registry tracks that the storage says it does not have (the adapters
+/// answer `InvalidInput` for a missing object) is a damaged copy; any other failure is
+/// the storage's moment.
+pub(super) fn damaged_or_storage(e: crate::storage::domain::StorageError) -> RunRefusal {
+    match e {
+        crate::storage::domain::StorageError::InvalidInput(_) => RunRefusal::CopyDamaged,
+        _ => RunRefusal::Storage,
+    }
+}
+
 /// Ends a file the call will read: everything written, flushed and synced, with
 /// every error reported. A file left to its drop can lose its tail silently.
 async fn finish<W>(file: &mut W) -> Result<(), RunRefusal>
@@ -134,7 +144,7 @@ async fn copy_part(
     let mut stream = tokio::time::timeout(wait(limits.idle), storage.read_stream(key))
         .await
         .map_err(|_| RunRefusal::Storage)?
-        .map_err(|_| RunRefusal::Storage)?;
+        .map_err(damaged_or_storage)?;
     let declared = stream.size_bytes;
     let part_over = RunRefusal::OverBudget(Budget::Part {
         limit_bytes: limits.part_bytes,
@@ -763,5 +773,36 @@ mod tests {
         assert_eq!(err, RunRefusal::Storage);
         assert!(started.elapsed() < std::time::Duration::from_secs(3));
         assert!(entries(dir.path()).is_empty());
+    }
+
+    /// A part the registry tracks that the storage no longer has is a damaged copy
+    /// (permanent until it is prepared again); any other storage failure is a moment.
+    #[tokio::test]
+    async fn a_missing_part_is_a_damaged_copy_and_other_failures_are_storage() {
+        let p = prepared(&[("sales", 2)], 4).await;
+        let plan = plan_of(&p).await;
+        p.storage
+            .objects
+            .lock()
+            .unwrap()
+            .remove(&plan.part_key(0, 1).unwrap());
+        let dir = tempfile::tempdir().unwrap();
+        let err = stage_tables(&*p.storage, &plan, &[0], dir.path(), Default::default())
+            .await
+            .unwrap_err();
+        assert_eq!(err, RunRefusal::CopyDamaged);
+        assert!(entries(dir.path()).is_empty());
+        assert!(!err.retryable() && err.message().contains("prepared again"));
+        let p = prepared(&[("sales", 1)], 4).await;
+        let plan = plan_of(&p).await;
+        p.storage
+            .broken
+            .lock()
+            .unwrap()
+            .push(plan.part_key(0, 0).unwrap());
+        let err = stage_tables(&*p.storage, &plan, &[0], dir.path(), Default::default())
+            .await
+            .unwrap_err();
+        assert_eq!(err, RunRefusal::Storage);
     }
 }

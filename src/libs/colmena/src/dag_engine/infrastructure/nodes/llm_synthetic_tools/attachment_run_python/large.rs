@@ -6,7 +6,7 @@
 //! [`RunRefusal`](crate::tabular_run::refusal::RunRefusal): a sentence and a code,
 //! no key, no path, no adapter text.
 
-use super::{err_envelope, truncate, AttachmentRunPythonArgs, OUTPUT_BYTE_CAP};
+use super::{truncate, AttachmentRunPythonArgs, OUTPUT_BYTE_CAP};
 use crate::dag_engine::infrastructure::dag_tool_executor::LargeTarget;
 use crate::llm::domain::ToolResult;
 use crate::tabular_run::refusal::{RunRefusal, SESSION_MAX_BYTES, SESSION_MAX_FILES};
@@ -211,13 +211,18 @@ async fn dispatch_bounded(
         // The call's future was dropped: the request is closed, the child killed
         // and the volume given back by their own drop guards.
         Err(_) => {
-            return err_envelope(
+            // Cut by the call's clock, in the phase the runtime had reached. The same
+            // code repeats the same wait, so this is not retryable as it is.
+            return retryable_error(
                 call_id,
                 format!(
-                "the large-file call did not finish within {}s and was stopped; nothing was kept",
-                budget.as_secs()
-            ),
-            )
+                    "the large-file call did not finish within {}s and was stopped {}; nothing was kept. \
+                     Reduce the work: aggregate, read fewer columns, or iterate parts() and combine",
+                    budget.as_secs(),
+                    phase.describe()
+                ),
+                false,
+            );
         }
     };
     let duration_ms = started.elapsed().as_millis() as u64;
@@ -311,15 +316,21 @@ async fn dispatch_bounded(
                 error: Some(truncate(&text, OUTPUT_BYTE_CAP)),
             },
         ),
+        // The same code takes the same time again: it is not retryable as it is.
         Err(LargeRunError::Timeout { secs }) => retryable_error(
             call_id,
-            format!("code execution exceeded {secs}s timeout"),
-            true,
+            format!(
+                "code execution exceeded {secs}s timeout. Reduce the work: aggregate, read fewer columns, or iterate parts() and combine"
+            ),
+            false,
         ),
-        Err(LargeRunError::Internal) => retryable_error(
+        Err(LargeRunError::Internal { retryable }) => retryable_error(
             call_id,
-            "the large-file executor failed; try again, and if it keeps failing the file cannot be analysed here".to_string(),
-            true,
+            match retryable {
+                true => "the large-file executor failed; try again, and if it keeps failing the file cannot be analysed here".to_string(),
+                false => "the large-file executor is not set up to run this; it cannot be analysed here".to_string(),
+            },
+            retryable,
         ),
     }
 }
@@ -840,5 +851,63 @@ mod tests {
         assert_eq!(out["emitted"][0]["document_id"], "generated/out.csv");
         settle().await;
         assert!(p.storage.deleted.lock().unwrap().is_empty());
+    }
+
+    /// The cut-off answer says where the call was and is not retryable as it is; so
+    /// are a timeout of the code and a setup failure of the executor.
+    #[tokio::test]
+    async fn the_cut_off_and_timeout_answers_carry_retryable_and_the_phase() {
+        let p = prepared(&[("sales", 1)], 4).await;
+        let exec = Recorder::ok(json!(1));
+        *exec.delay.lock().unwrap() = Some(std::time::Duration::from_secs(30));
+        let (ex, target, _e) = slow_target(&p, exec).await;
+        let result = super::dispatch_bounded(
+            &ex,
+            "c1",
+            &args(),
+            "{}",
+            target,
+            std::time::Duration::from_secs(1),
+            std::time::Duration::from_secs(2),
+        )
+        .await;
+        let out: Value = serde_json::from_str(&result.output).unwrap();
+        assert_eq!(out["retryable"], false);
+        let text = out["error"].as_str().unwrap();
+        assert!(
+            text.contains("while staging the data, running the code"),
+            "{text}"
+        );
+        assert!(text.contains("parts()"), "{text}");
+        for (error, retryable) in [
+            (
+                crate::dag_engine::domain::python_executor::PythonRunError::Timeout,
+                false,
+            ),
+            (
+                crate::dag_engine::domain::python_executor::PythonRunError::Internal(
+                    "PythonExecutorError: this executor has no staging directory configured".into(),
+                ),
+                false,
+            ),
+            (
+                crate::dag_engine::domain::python_executor::PythonRunError::Internal(
+                    "PythonExecutorError: connection reset".into(),
+                ),
+                true,
+            ),
+        ] {
+            let p = prepared(&[("sales", 1)], 4).await;
+            let ex = executor(
+                true,
+                Some(Arc::new(runtime(
+                    &p,
+                    Recorder::answering(Err(MountedError::Run(error))),
+                    true,
+                ))),
+            );
+            let out = body(&ex, r#"{"attachment_id":"doc-1","code":"pass"}"#).await;
+            assert_eq!(out["retryable"], retryable, "{out}");
+        }
     }
 }

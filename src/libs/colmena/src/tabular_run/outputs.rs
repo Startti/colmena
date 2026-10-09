@@ -51,27 +51,173 @@ impl OutputGuard {
         self.storage = None;
     }
 
-    /// The keys held (for rollback of what was registered).
+    /// The keys held.
     pub fn keys(&self) -> &[String] {
         &self.keys
     }
+
+    /// Hands the cleanup to a ledger that also owns the registry rows: this guard no
+    /// longer deletes anything by itself.
+    pub fn into_ledger(mut self, rows: Option<RowRegistry>) -> OutputLedger {
+        let storage = self
+            .storage
+            .take()
+            .expect("an uncommitted guard holds its storage");
+        let entries = std::mem::take(&mut self.keys)
+            .into_iter()
+            .map(|k| (k, false))
+            .collect();
+        OutputLedger {
+            storage,
+            rows,
+            entries,
+            done: false,
+        }
+    }
+}
+
+/// How long one step of a cleanup (a row removal, an object delete) may take, and how
+/// many times a delete is tried.
+const CLEANUP_STEP: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Runs `work` on the runtime if there is one, else on a thread of its own with a
+/// small runtime: a cleanup that can only run from `Drop` must not be skipped because
+/// no runtime is current.
+fn run_detached<F: std::future::Future<Output = ()> + Send + 'static>(work: F) {
+    match tokio::runtime::Handle::try_current() {
+        Ok(rt) => {
+            rt.spawn(work);
+        }
+        Err(_) => {
+            let _ = std::thread::Builder::new()
+                .name("colmena-output-cleanup".into())
+                .spawn(move || {
+                    if let Ok(rt) = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                    {
+                        rt.block_on(work);
+                    }
+                });
+        }
+    }
+}
+
+/// Deletes `key`, bounded in time and tried twice; a failure is logged (never the key).
+async fn delete_object(storage: &dyn OutputStorageRepository, key: &str) -> bool {
+    for _ in 0..2 {
+        if let Ok(Ok(())) = tokio::time::timeout(CLEANUP_STEP, storage.delete(key)).await {
+            return true;
+        }
+    }
+    tracing::warn!(target: "colmena::tabular_run", "a stored output could not be deleted");
+    false
 }
 
 fn delete_in_background(storage: Arc<dyn OutputStorageRepository>, keys: Vec<String>) {
     if keys.is_empty() {
         return;
     }
-    let Ok(rt) = tokio::runtime::Handle::try_current() else {
-        tracing::warn!(target: "colmena::tabular_run", count = keys.len(), "stored outputs could not be deleted: no runtime");
-        return;
-    };
-    rt.spawn(async move {
+    run_detached(async move {
         for key in keys {
-            if storage.delete(&key).await.is_err() {
-                tracing::warn!(target: "colmena::tabular_run", "a stored output could not be deleted");
-            }
+            delete_object(&*storage, &key).await;
         }
     });
+}
+
+/// The registry a ledger removes rows from.
+pub type RowRegistry = (Arc<dyn crate::llm::domain::AttachmentRegistry>, String);
+
+/// One owner of everything a call created for its returned files: the objects it
+/// stored and the registry rows it made. Dropped (or rolled back) without
+/// [`OutputLedger::commit`], it removes the ROWS first and the OBJECTS second, and
+/// never deletes an object whose row it could not remove (that pair is left whole
+/// and reported as kept). The cleanup runs from `Drop` too, spawned and bounded.
+pub struct OutputLedger {
+    storage: Arc<dyn OutputStorageRepository>,
+    rows: Option<RowRegistry>,
+    entries: Vec<(String, bool)>,
+    done: bool,
+}
+
+/// Undoes `entries` (key, row made?): rows first, then objects. Returns the entries
+/// that could not be undone because their row would not go: both are left in place.
+async fn undo(
+    storage: &dyn OutputStorageRepository,
+    rows: Option<&RowRegistry>,
+    entries: Vec<(String, bool)>,
+) -> Vec<(String, bool)> {
+    let mut stuck = vec![];
+    let mut objects = vec![];
+    for (key, registered) in entries.into_iter().rev() {
+        if registered {
+            let removed = match rows {
+                Some((registry, session)) => matches!(
+                    tokio::time::timeout(
+                        CLEANUP_STEP,
+                        registry.delete_attachment_for_provider(
+                            session,
+                            &key,
+                            crate::llm::domain::ProviderKind::Generated,
+                        )
+                    )
+                    .await,
+                    Ok(Ok(()))
+                ),
+                None => false,
+            };
+            if !removed {
+                tracing::warn!(target: "colmena::tabular_run", "a registered output row could not be removed; it and its object are left in place");
+                stuck.push((key, true));
+                continue;
+            }
+        }
+        objects.push(key);
+    }
+    for key in objects {
+        delete_object(storage, &key).await;
+    }
+    stuck
+}
+
+impl OutputLedger {
+    /// A row for `key` was made.
+    pub fn note_registered(&mut self, key: &str) {
+        if let Some(e) = self.entries.iter_mut().find(|e| e.0 == key) {
+            e.1 = true;
+        }
+    }
+
+    /// Everything is registered: keep it all.
+    pub fn commit(mut self) {
+        self.done = true;
+        self.entries.clear();
+    }
+
+    /// Undoes it now. Returns the keys whose row could not be removed: those stay,
+    /// whole (row and object), and are kept in fact.
+    pub async fn rollback(mut self) -> Vec<String> {
+        self.done = true;
+        let entries = std::mem::take(&mut self.entries);
+        undo(&*self.storage, self.rows.as_ref(), entries)
+            .await
+            .into_iter()
+            .map(|e| e.0)
+            .collect()
+    }
+}
+
+impl Drop for OutputLedger {
+    fn drop(&mut self) {
+        if self.done || self.entries.is_empty() {
+            return;
+        }
+        let (storage, rows) = (self.storage.clone(), self.rows.take());
+        let entries = std::mem::take(&mut self.entries);
+        run_detached(async move {
+            undo(&*storage, rows.as_ref(), entries).await;
+        });
+    }
 }
 
 impl Drop for OutputGuard {
@@ -101,6 +247,24 @@ pub struct StoreSink {
     per_store: std::time::Duration,
     total: std::time::Duration,
     begun: Mutex<Option<tokio::time::Instant>>,
+    /// Unique to this call: prefixes every stored file name.
+    call_id: String,
+}
+
+/// Logs, when dropped armed, that a store did not finish: an object named `filename`
+/// may remain and its key is not known, so no cleanup can name it. (A host's orphan
+/// sweep of generated objects is what reaches it; the unique name finds it.)
+struct OrphanWatch {
+    filename: String,
+    armed: bool,
+}
+
+impl Drop for OrphanWatch {
+    fn drop(&mut self) {
+        if self.armed {
+            tracing::warn!(target: "colmena::tabular_run", orphan_filename = %self.filename, "an output store did not finish; an object with this name may remain");
+        }
+    }
 }
 
 impl StoreSink {
@@ -117,6 +281,7 @@ impl StoreSink {
             per_store: std::time::Duration::from_secs(60),
             total: super::runtime::COLLECT_BUDGET,
             begun: Mutex::new(None),
+            call_id: uuid::Uuid::new_v4().simple().to_string()[..12].to_string(),
         }
     }
 
@@ -197,13 +362,21 @@ impl OutputSink for StoreSink {
         if left.is_zero() {
             return Err(RunRefusal::Storage);
         }
+        // A name no other call shares, so the key a storage derives from it cannot repeat
+        // between calls (a later call's cleanup can never name an earlier call's object),
+        // and an object left by a store that was cut can be found by it.
+        let unique = format!("{}-{name}", self.call_id);
+        let mut watch = OrphanWatch {
+            filename: unique.clone(),
+            armed: true,
+        };
         let stored = tokio::time::timeout(
             self.per_store.min(left),
             self.storage.store_stream(StoreStreamRequest {
                 stream: Box::pin(chunks(file.into_file(), size)),
                 size_hint: Some(size),
                 mime_type: mime.to_string(),
-                filename: name.clone(),
+                filename: unique.clone(),
                 session_id: self.session_id.clone(),
                 agent_session_id: self.agent_session_id.clone(),
                 placement: StorePlacement::Generated,
@@ -212,6 +385,7 @@ impl OutputSink for StoreSink {
         .await
         .map_err(|_| RunRefusal::Storage)?
         .map_err(|_| RunRefusal::Storage)?;
+        watch.armed = false;
         self.stored
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -236,6 +410,7 @@ mod tests {
     #[derive(Default)]
     struct Capturing {
         got: Mutex<Vec<(String, Vec<u8>)>>,
+        names: Mutex<Vec<String>>,
         biggest: Mutex<usize>,
     }
 
@@ -265,9 +440,11 @@ mod tests {
                 *big = (*big).max(chunk.len());
                 all.extend_from_slice(&chunk);
             }
-            let key = format!("generated/{}", req.filename);
+            self.names.lock().unwrap().push(req.filename.clone());
+            let plain = super::super::testkit::strip_call_prefix(&req.filename).to_string();
+            let key = format!("generated/{plain}");
             let size = all.len() as u64;
-            self.got.lock().unwrap().push((req.filename.clone(), all));
+            self.got.lock().unwrap().push((plain, all));
             Ok(StoredOutput {
                 storage_key: key,
                 mime_type: req.mime_type,
@@ -366,7 +543,7 @@ mod tests {
                 &self,
                 req: StoreStreamRequest,
             ) -> Result<StoredOutput, StorageError> {
-                if req.filename.starts_with("slow") {
+                if req.filename.contains("slow") {
                     tokio::time::sleep(Duration::from_secs(30)).await;
                 }
                 self.0.store_stream(req).await
@@ -390,5 +567,23 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(20)).await;
         let err = sink.accept(one(d.path(), "b.csv", b"y")).await.unwrap_err();
         assert_eq!(err, RunRefusal::Storage);
+    }
+
+    /// Two calls that return the same file name store under different names, so a
+    /// key a storage derives from the name cannot repeat between calls.
+    #[tokio::test]
+    async fn the_same_file_name_in_two_calls_is_stored_under_two_names() {
+        let d = tempfile::tempdir().unwrap();
+        let storage = Arc::new(Capturing::default());
+        for _ in 0..2 {
+            let sink = StoreSink::new(storage.clone(), None, None);
+            sink.accept(one(d.path(), "out.csv", b"x")).await.unwrap();
+        }
+        let names = storage.names.lock().unwrap().clone();
+        assert_eq!(names.len(), 2);
+        assert_ne!(names[0], names[1]);
+        assert!(names
+            .iter()
+            .all(|n| n.ends_with("-out.csv") && n.len() == "out.csv".len() + 13));
     }
 }

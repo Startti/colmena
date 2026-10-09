@@ -96,6 +96,9 @@ pub enum RejectReason {
     /// More than one name for the file.
     HardLinked,
     TooLarge,
+    /// Another name in the volume is the same ignoring case: neither is kept (the same
+    /// rule on every executor, and no file system's case rule can decide which wins).
+    NameCollision,
     /// Past the file count.
     OverFileCount,
     /// Past the total size.
@@ -112,6 +115,7 @@ impl RejectReason {
             "NotARegularFile" => Self::NotARegularFile,
             "HardLinked" => Self::HardLinked,
             "TooLarge" => Self::TooLarge,
+            "NameCollision" => Self::NameCollision,
             "OverFileCount" => Self::OverFileCount,
             "OverTotal" => Self::OverTotal,
             _ => Self::Unreadable,
@@ -286,6 +290,13 @@ pub fn collect_out(out_dir: &Path, limits: CollectLimits) -> io::Result<Collecte
         return Ok(done);
     }
     let mut total = 0u64;
+    // Names that are the same ignoring case: none of them is kept.
+    let mut by_lower: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    for raw in &names {
+        if let Some((name, _)) = checked_name(raw) {
+            *by_lower.entry(name.to_lowercase()).or_default() += 1;
+        }
+    }
     for raw in names {
         let Some((name, format)) = checked_name(&raw) else {
             done.rejected.push(Rejection {
@@ -294,6 +305,13 @@ pub fn collect_out(out_dir: &Path, limits: CollectLimits) -> io::Result<Collecte
             });
             continue;
         };
+        if by_lower.get(&name.to_lowercase()).copied().unwrap_or(0) > 1 {
+            done.rejected.push(Rejection {
+                name: Some(name),
+                reason: RejectReason::NameCollision,
+            });
+            continue;
+        }
         let reject = |done: &mut Collected, reason| {
             done.rejected.push(Rejection {
                 name: Some(name.clone()),
@@ -642,5 +660,35 @@ mod tests {
         // Stops one past the limit.
         let mut many = (0..).map(|i| Ok(Some(format!("f{i}").into_bytes())));
         assert_eq!(drain(|| many.next().unwrap(), 3).unwrap().len(), 4);
+    }
+
+    /// Names that differ only in case keep none of the colliding names, on every
+    /// executor (the collector decides, not the server's or the client's file system).
+    #[test]
+    fn names_that_differ_only_in_case_are_all_rejected_and_listed() {
+        let d = tempfile::tempdir().unwrap();
+        put(d.path(), "Result.csv", b"1");
+        // A file system that folds case (macOS's default) cannot hold both names.
+        let both = std::fs::write(d.path().join("result.csv"), b"2").is_ok()
+            && std::fs::read_dir(d.path()).unwrap().count() == 2;
+        put(d.path(), "other.csv", b"3");
+        let c = collect_out(d.path(), CollectLimits::default()).unwrap();
+        if both {
+            assert_eq!(names(&c), ["other.csv"]);
+            assert_eq!(reasons(&c), [RejectReason::NameCollision; 2]);
+            assert_eq!(
+                c.rejected
+                    .iter()
+                    .filter_map(|r| r.name.as_deref())
+                    .collect::<Vec<_>>(),
+                ["Result.csv", "result.csv"]
+            );
+        } else {
+            assert_eq!(names(&c), ["Result.csv", "other.csv"]);
+        }
+        assert_eq!(
+            RejectReason::from_wire("NameCollision"),
+            RejectReason::NameCollision
+        );
     }
 }

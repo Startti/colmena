@@ -326,6 +326,12 @@ exchange it stops the call's uid again (blocking pool) and waits up to 2 s until
 result is returned only then; if the stop fails or something still runs, the call fails with an executor error and the result is discarded
 (the slot's own stop, which frees it, only logs when it fails). `tabular_run::local` uses it. `run_staged` and `run` are unchanged.
 
+The confirmation fails closed. `/proc` is scanned task by task: a zombie group leader with a live sibling thread of the uid is NOT gone; a
+status that cannot be read for a reason other than ENOENT/ESRCH (hidepid, a restricted ptrace, EIO) is "cannot tell" and is not confirmed. When it
+is not confirmed the slot is RETIRED, not returned to the pool (its stop is replaced by one that refuses, which is the existing path for a slot that
+cannot be stopped), and the 2 s wait runs on the blocking pool. The `/v2/run` server uses `run_staged_confirmed` too, before it reads `/out`.
+Not proven end to end: the retirement is exercised by the scan's tests only, because the stop of a real slot cannot be made to fail from outside.
+
 The proofs are in `tests/tabular_run_mounts.rs` (Linux, root and `CAP_SYS_ADMIN`, enabled with
 `COLMENA_PYEXEC_JAIL_TESTS=1` like the other jail suites; each test prints a skip line otherwise): the code lists and reads
 the staged parts at `/data` and cannot write there; pandas reads a staged Parquet part in `restricted` mode with pyarrow

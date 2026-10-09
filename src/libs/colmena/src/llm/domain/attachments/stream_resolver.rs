@@ -55,8 +55,8 @@ pub enum AttachmentResolveError {
     /// whole into memory (see
     /// [`resolve_for_buffering`](AttachmentStreamResolver::resolve_for_buffering)).
     /// Displays the large-file refusal text.
-    #[error("{}", crate::llm::domain::large_tabular::refusal_text())]
-    HostObject,
+    #[error("{}", crate::llm::domain::large_tabular::refusal_text_for(*large_tool_served))]
+    HostObject { large_tool_served: bool },
 }
 
 #[async_trait]

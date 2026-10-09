@@ -271,3 +271,36 @@ async fn the_refusal_points_at_the_tool_only_when_it_is_served() {
         );
     }
 }
+
+/// The wiring and the wording are decided together: with the switch on and a
+/// runtime wired but `attachment_run_python` NOT among the node's tools, nothing
+/// points the model at it and the call is not routed.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_node_that_does_not_offer_the_tool_never_points_at_it() {
+    use crate::llm::domain::large_tabular::refusal_text_for;
+    let db = tempfile::NamedTempFile::new().unwrap();
+    let url = format!("sqlite://{}", db.path().display());
+    let reg = registry_with_storage(Some(Arc::new(CountingStorage::default())));
+    reg.set_large_tabular(true);
+    run_turn(&reg, &url, vec![entry()], &RecordingModel::new(2))
+        .await
+        .unwrap();
+    let p = prepared(&[("sales", 1)], 4).await;
+    reg.set_large_tabular_runtime(Arc::new(runtime(&p, Recorder::ok(Value::Null), true)));
+    std::mem::forget(p);
+    let model = RecordingModel::scripted(vec![
+        ScriptedResponse::ToolCall {
+            id: "c1".into(),
+            tool_name: "load_attachment".into(),
+            arguments: json!({"document_id": "doc-big"}),
+        },
+        ScriptedResponse::Text("ok".into()),
+    ]);
+    run_turn_with_tools(&reg, &url, vec![], Value::Null, &model)
+        .await
+        .unwrap();
+    let seen = model.seen();
+    assert!(seen.contains(refusal_text_for(false)), "{seen}");
+    assert!(!seen.contains("attachment_run_python"), "{seen}");
+}

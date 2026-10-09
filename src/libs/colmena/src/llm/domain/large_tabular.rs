@@ -31,6 +31,14 @@ pub fn refusal_text_for(tool_available: bool) -> &'static str {
     }
 }
 
+/// THE decision whether the large-file tool is served for a turn: the switch is on,
+/// a runtime is wired AND the node actually offers `attachment_run_python`. Every
+/// message that points the model at the tool, and the routing itself, use this one
+/// function, so no message names a tool the model was not given.
+pub fn tool_served(switch_on: bool, runtime_wired: bool, tool_configured: bool) -> bool {
+    switch_on && runtime_wired && tool_configured
+}
+
 /// What a tool that cannot read a large file whole tells the model, as a tool
 /// error and before reading any byte.
 pub fn refusal_text() -> &'static str {
@@ -307,5 +315,20 @@ mod tests {
         assert!(other.get("code").is_none());
         let not_an_object = tag_refusal(serde_json::json!("x"), refusal_text());
         assert_eq!(not_an_object, serde_json::json!("x"));
+    }
+
+    #[test]
+    fn the_tool_is_served_only_when_all_three_hold() {
+        for (a, b, c) in [
+            (true, true, true),
+            (false, true, true),
+            (true, false, true),
+            (true, true, false),
+            (false, false, false),
+        ] {
+            assert_eq!(tool_served(a, b, c), a && b && c);
+        }
+        assert!(refusal_text_for(tool_served(true, true, true)).contains("attachment_run_python"));
+        assert!(!refusal_text_for(tool_served(true, true, false)).contains("attachment_run_python"));
     }
 }

@@ -1888,3 +1888,66 @@ count, nothing after the end) BEFORE the sink sees the first; a hostile or broke
 - `emit_table` names are matched with `fullmatch` (a trailing newline no longer passes); a size that cannot be read (the file is missing, or
   empty after a write) raises an error and the file is not returned, instead of reading as 0 bytes under every limit; `in` follows the same
   case rule as `tables[name]`.
+
+### Proofs that cannot pass silently
+
+- The prelude tests that need python3 with pandas, pyarrow and scipy, and the jail test that makes a Parquet part, FAIL instead of skipping
+  when `COLMENA_TABULAR_EXPECT_PANDAS=1` (set it in an environment that has the libraries, as the sandbox suite does with
+  `COLMENA_PYEXEC_EXPECT_PYARROW`); without it they print a skip line. The privileged suites print the usual
+  `skipped: set COLMENA_PYEXEC_JAIL_TESTS=1 ...` line, which the Linux job greps for; that job's step lists suites by name and these suites are
+  not in it yet (a workflow change this work did not make): add `--test tabular_run_mounts --test tabular_run_remote --test tabular_large_e2e`.
+- `tests/tabular_large_e2e.rs` runs the whole path once with nothing canned: the real tool routed to the runtime, a prepared copy verified
+  through a real registry, real Parquet parts staged, the real prelude and wrapper in the real jail on the real subprocess executor,
+  `/out` read back by the real collector, the file streamed by the real sink and registered. It asserts the result, the tables, the
+  returned file's bytes in storage, its attachment row, no key in the answer, and the volume given back.
+
+### Rates, spool, blocking work (last round)
+
+- *The minimum rate is the peer's.* The clock starts at the peer's first byte and counts only the time spent waiting on it; the receiver's own time
+  writing what it got, the executor's backpressure and a call's mounting are not counted (a late first byte is bounded by the idle limit and the
+  phase budgets instead). The client's download rule is therefore plain 256 KiB/s after 15 s.
+- *Header sizing:* the pre-flight check uses the real header (its `timeout_ms` included) and names what overflowed: the table list (name fewer
+  tables) or the code (shorten it).
+- *The response spool is bounded:* at most two responses spool at once (a counting limit), so a memory-backed temp directory holds at most
+  2 x 128 MiB; the open and unlink run on the blocking pool.
+- *Blocking work off the async workers:* `collect_out` runs on the blocking pool in the local executor as well as the server, and the server's
+  "output ended early" send is bounded like the others.
+
+### Names and dates (last round)
+
+- *One rule for names that differ only in case, on every executor:* the collector keeps NONE of the colliding names and lists each in `not_kept`
+  (`NameCollision`); the server and the client no longer disagree (the client's own rejection of a duplicate stays as a defence).
+- *Table names:* `select` (the tool's `tables` argument) resolves a name like the prelude's lookup: exact first, else the single case-insensitive match;
+  two variants and no exact match are ambiguous and refused.
+- *Dates outside 1677-09-22..2262-04-11:* pandas 1.5 with `date_as_object=False` WRAPS such a date into a wrong one without an error (the test found
+  `9999-12-31` coming back as 1816). Before converting, date columns' min and max are checked; out of range, that read keeps Python date and timestamp
+  objects (heavier; the estimate does not know). `head(n)` accumulates batches until `n` rows exist.
+
+### Classification, completed
+
+- *A damaged copy:* a part the registry tracks that storage says it does not have (the adapters answer `InvalidInput` for a missing object) is
+  `CopyDamaged` (`large_tabular_damaged`, NOT retryable as it is: "it will be prepared again"), in the local stager and the remote producer. The runtime
+  then demotes the row with `mark_manifest_missing` (best effort, exactly the row observed), so the next claim prepares it again.
+- *Server answers:* `executor_not_ready` and `volume_io` have their own typed refusals (both retryable); any 400 (wire version, bad `out_mb`, bad request)
+  is `Misconfigured`, not retryable.
+- *The code's timeout* is not retryable as it is (the same code repeats the same wait) and says to reduce the work (aggregate, read fewer columns,
+  iterate `parts()`); *the call's 900 s cut-off* says which phase it was in and is not retryable as it is; an executor failure whose fixed text reads as a
+  setup problem (not configured, no staging directory) is not retryable, any other is.
+
+### One function decides the wording (`large_tabular::tool_served`)
+
+`tool_served(switch_on, runtime_wired, tool_configured)` decides, for a turn, whether the large-file tool is served; the routing, the
+`load_attachment` resolver and the whole-object fetch all use it, and the executor is wired with the runtime only when it is true, so a node that
+does not offer `attachment_run_python` never points the model at it and never routes to it. `http_request`'s `$attachment:` resolver is built once
+per process and cannot know a turn's tool list: it follows a shared flag set by the node registry (switch on AND a runtime wired), and so it can name
+the tool in a turn whose node does not offer it. That residual is stated, not hidden.
+
+### One cleanup owner for returned files (`OutputLedger`) and names unique to the call
+
+- *Rows first, objects second.* The stored objects and the registry rows a call makes belong to one `OutputLedger`. Rolled back, or dropped, it removes the ROWS first and
+  then the OBJECTS, each step bounded (30 s, a delete tried twice), and from `Drop` it runs spawned, on a small runtime of its own if none is current. A row that will
+  not go keeps its object: the pair stays whole and is reported as kept, because it is.
+- *Names unique to the call.* The port gives no key before a store (`store_stream` returns it), and what a host derives from `filename` is the host's contract; so every
+  stored name is prefixed with an id unique to the call. A key derived from the name cannot repeat between calls, a later call's cleanup can never name an earlier call's
+  object, and an object left by a store that was cut (whose key was never returned, so nothing can delete it) is logged by its unique name for the host's orphan sweep of
+  generated objects. Local adapters key by uuid; the HTTP-callback adapter's keys come from the host. The attachment row's display name is still the file's own.

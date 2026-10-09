@@ -80,13 +80,22 @@ impl PreparedTables {
         }
         let mut chosen = HashSet::new();
         for name in names {
+            // The same rule as the prelude's lookup: an exact name first, else the one
+            // table that matches ignoring case; two that match only ignoring case are
+            // ambiguous and neither is guessed.
+            let exact = self.manifest.tables.iter().position(|t| &t.name == name);
             let wanted = name.to_lowercase();
-            match self
+            let mut folded = self
                 .manifest
                 .tables
                 .iter()
-                .position(|t| t.name.to_lowercase() == wanted)
-            {
+                .enumerate()
+                .filter(|(_, t)| t.name.to_lowercase() == wanted)
+                .map(|(i, _)| i);
+            match exact.or_else(|| match (folded.next(), folded.next()) {
+                (Some(only), None) => Some(only),
+                _ => None,
+            }) {
                 Some(i) => {
                     chosen.insert(i);
                 }
@@ -663,6 +672,21 @@ mod tests {
         assert_eq!(
             still_current(&*p.registry, SOURCE, first.generation()).await,
             Some(false)
+        );
+    }
+
+    /// A name that exists exactly wins over a case-variant; two variants and no exact
+    /// match are ambiguous. Same as the prelude's `_find`.
+    #[test]
+    fn a_case_ambiguous_table_name_is_resolved_exact_first() {
+        let p = plan(&[("Sales", 1), ("sales", 1), ("Stores", 1)]);
+        let one = |n: &str| p.select(&[n.to_string()]);
+        assert_eq!(one("Sales").unwrap(), vec![0]);
+        assert_eq!(one("sales").unwrap(), vec![1]);
+        assert_eq!(one("STORES").unwrap(), vec![2]);
+        assert!(
+            matches!(one("SALES"), Err(RunRefusal::NoSuchTable { .. })),
+            "two variants, no exact match"
         );
     }
 }
