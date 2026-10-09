@@ -451,7 +451,10 @@ impl HashMapNodeRegistry {
             self.llm_large_tabular
                 .load(std::sync::atomic::Ordering::Relaxed),
             self.llm_large_runtime.get().is_some(),
-            true,
+            // This resolver is shared by every node, including `http_request`, which
+            // cannot know which tools the calling node offers: it never names the
+            // tool. The LLM node's own paths, which do know, say it.
+            false,
         );
         self.large_tool_flag
             .store(served, std::sync::atomic::Ordering::Relaxed);
@@ -639,6 +642,16 @@ mod registry_tavily_tests {
         assert!(reg.llm_large_tabular.load(Relaxed));
         reg.set_large_tabular(false);
         assert!(!reg.llm_large_tabular.load(Relaxed));
+    }
+
+    /// The resolver the nodes share (`http_request` among them) cannot know which tools
+    /// the calling node offers, so it never claims the large-file tool is served.
+    #[test]
+    fn the_shared_resolver_never_names_a_tool_it_cannot_know_the_node_offers() {
+        use std::sync::atomic::Ordering::Relaxed;
+        let reg = build_registry();
+        reg.set_large_tabular(true);
+        assert!(!reg.large_tool_flag.load(Relaxed));
     }
 
     #[test]

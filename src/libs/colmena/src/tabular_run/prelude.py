@@ -19,6 +19,8 @@ _CT_MIB = 1024 * 1024
 # nullable booleans (a value and a mask byte each), so these factors are what the frame is.
 _CT_FACTOR = {'int': 1, 'float': 1, 'bool': 16, 'date': 2, 'timestamp': 1, 'string': 1}
 _CT_STRING_OVERHEAD = 57
+# A column that datetime64[ns] cannot hold stays Python objects: bytes per row.
+_CT_OBJECT_BYTES = {'date': 40, 'timestamp': 56}
 # Arrow's table and the pandas frame built from it exist together for a moment.
 _CT_PEAK = 2
 
@@ -46,7 +48,11 @@ def _ct_estimate(t, columns):
     by_name = {c['name']: c for c in t['columns']}
     for name in columns:
         c = by_name[name]
-        size = c['in_memory_bytes'] * _CT_FACTOR[c['type']]
+        if c['type'] in ('date', 'timestamp') and _ct_object_column(t, name):
+            # Python objects: a date or datetime plus the pointer to it, per row.
+            size = rows * _CT_OBJECT_BYTES[c['type']]
+        else:
+            size = c['in_memory_bytes'] * _CT_FACTOR[c['type']]
         if c['type'] == 'string':
             size += rows * _CT_STRING_OVERHEAD
         total += size
@@ -92,38 +98,144 @@ def _ct_pyarrow():
     return pd, opt('pyarrow'), opt('pyarrow.parquet')
 
 
-def _ct_dates_fit(pa, table):
-    # pandas 1.5 stores dates as datetime64[ns], and pyarrow wraps a date outside
-    # 1677-09-22..2262-04-11 into a WRONG date without an error: look before converting.
-    import datetime
-    lo, hi = datetime.date(1677, 9, 22), datetime.date(2262, 4, 11)
-    pc = _ct_optional('pyarrow.compute')
-    for field in table.schema:
-        if pa.types.is_date(field.type):
-            mm = pc.min_max(table.column(field.name))
-            first, last = mm['min'].as_py(), mm['max'].as_py()
-            if first is not None and (first < lo or last > hi):
-                return False
-    return True
-
-
 def _ct_optional(name):
     import pandas as pd
     return pd.compat._optional.import_optional_dependency(name)
 
 
-def _ct_frame(pd, pa, table):
+# Microseconds either side of 1970 that datetime64[ns] holds (about 1677-09-22 to 2262-04-11).
+_CT_US_MAX = 9223372036854775
+_ct_object_cache = {}
+
+
+def _ct_is_time(pa, ty):
+    # A date, or a timestamp not already in nanoseconds (those always fit).
+    return pa.types.is_date(ty) or (pa.types.is_timestamp(ty) and ty.unit != 'ns')
+
+
+def _ct_time_bearing(pa, ty):
+    if _ct_is_time(pa, ty):
+        return True
+    if pa.types.is_list(ty) or pa.types.is_large_list(ty) or pa.types.is_fixed_size_list(ty):
+        return _ct_time_bearing(pa, ty.value_type)
+    if pa.types.is_struct(ty):
+        return any(_ct_time_bearing(pa, ty.field(i).type) for i in range(ty.num_fields))
+    if pa.types.is_map(ty):
+        return _ct_time_bearing(pa, ty.key_type) or _ct_time_bearing(pa, ty.item_type)
+    return False
+
+
+def _ct_leaf_times(pa, arr):
+    # The date and timestamp arrays inside `arr`, nested ones included.
+    ty = arr.type
+    if _ct_is_time(pa, ty):
+        yield arr
+    elif pa.types.is_list(ty) or pa.types.is_large_list(ty) or pa.types.is_fixed_size_list(ty):
+        for leaf in _ct_leaf_times(pa, arr.flatten()):
+            yield leaf
+    elif pa.types.is_struct(ty):
+        for i in range(ty.num_fields):
+            for leaf in _ct_leaf_times(pa, arr.field(i)):
+                yield leaf
+    elif pa.types.is_map(ty):
+        for sub in (arr.keys, arr.items):
+            for leaf in _ct_leaf_times(pa, sub):
+                yield leaf
+
+
+def _ct_leaf_fits(pa, pc, arr):
+    ty = arr.type
+    if pa.types.is_date32(ty):
+        ints, per_us = arr.cast(pa.int32()), 86400 * 10 ** 6
+    elif pa.types.is_date64(ty):
+        ints, per_us = arr.cast(pa.int64()), 1000
+    else:
+        ints, per_us = arr.cast(pa.int64()), {'s': 10 ** 6, 'ms': 1000, 'us': 1}[ty.unit]
+    mm = pc.min_max(ints)
+    lo, hi = mm['min'].as_py(), mm['max'].as_py()
+    return lo is None or (lo * per_us >= -_CT_US_MAX and hi * per_us <= _CT_US_MAX)
+
+
+def _ct_us_of(value):
+    import datetime
+    if isinstance(value, datetime.datetime):
+        epoch = datetime.datetime(1970, 1, 1, tzinfo=datetime.timezone.utc if value.tzinfo else None)
+        d = value - epoch
+        return (d.days * 86400 + d.seconds) * 10 ** 6 + d.microseconds
+    if isinstance(value, datetime.date):
+        return (value.toordinal() - 719163) * 86400 * 10 ** 6
+    return None
+
+
+def _ct_stats_fit(pf, name):
+    # From the footer alone: True / False, or None when it cannot say (no statistics for
+    # some row group, a nested column, a value of an unknown kind).
+    md = pf.metadata
+    index = [i for i in range(md.num_columns) if md.schema.column(i).path == name]
+    if len(index) != 1:
+        return None
+    for r in range(md.num_row_groups):
+        st = md.row_group(r).column(index[0]).statistics
+        if st is None or not st.has_min_max:
+            return None
+        for value in (st.min, st.max):
+            us = _ct_us_of(value)
+            if us is None:
+                return None
+            if abs(us) > _CT_US_MAX:
+                return False
+    return True
+
+
+def _ct_object_column(t, name):
+    # Decided ONCE per table and column, for all its parts: does a date or timestamp
+    # in it fall outside datetime64[ns]? pandas would wrap such a value into a wrong
+    # one, so the column stays Python objects in every part (consistent dtype), and
+    # only that column. The footer's statistics decide; a part without them is scanned
+    # (that column alone, one chunk at a time).
+    key = (t['index'], name)
+    if key in _ct_object_cache:
+        return _ct_object_cache[key]
+    kinds = {c['name']: c['type'] for c in t.get('columns', [])}
+    if name in kinds and kinds[name] not in ('date', 'timestamp'):
+        return False
+    pd, pa, pq = _ct_pyarrow()
+    pc = _ct_optional('pyarrow.compute')
+    field = pq.read_schema(_ct_path(t, 0)).field(name)
+    objects = False
+    if _ct_time_bearing(pa, field.type):
+        flat = _ct_is_time(pa, field.type)
+        for part in range(t['parts']):
+            fit = _ct_stats_fit(pq.ParquetFile(_ct_path(t, part)), name) if flat else None
+            if fit is None:
+                column = pq.read_table(_ct_path(t, part), columns=[name]).column(0)
+                fit = all(
+                    _ct_leaf_fits(pa, pc, leaf)
+                    for chunk in column.chunks
+                    for leaf in _ct_leaf_times(pa, chunk)
+                )
+            if not fit:
+                objects = True
+                break
+    _ct_object_cache[key] = objects
+    return objects
+
+
+def _ct_frame(pd, pa, table, t):
     # No Python date objects (about ten times the memory) and no object columns for
-    # booleans with nulls. Dates or timestamps that datetime64[ns] cannot hold (a
-    # 9999-12-31 sentinel, a year before 1677) must not wrap or fail the read: that
-    # read keeps Python objects for them (heavier; the estimate does not know).
+    # booleans with nulls. A date or timestamp column datetime64[ns] cannot hold (a
+    # 9999-12-31 sentinel, a year before 1677) stays Python objects, that column only
+    # and in every part. Nothing is caught here: an out-of-memory is the call's.
     mapper = {pa.bool_(): pd.BooleanDtype()}.get
-    if _ct_dates_fit(pa, table):
-        try:
-            return table.to_pandas(date_as_object=False, types_mapper=mapper)
-        except Exception:
-            pass
-    return table.to_pandas(date_as_object=True, timestamp_as_object=True, types_mapper=mapper)
+    objects = [n for n in table.column_names if _ct_object_column(t, n)]
+    if not objects:
+        return table.to_pandas(date_as_object=False, types_mapper=mapper)
+    held = table.select(objects).to_pandas(date_as_object=True, timestamp_as_object=True, types_mapper=mapper)
+    rest = [n for n in table.column_names if n not in objects]
+    if not rest:
+        return held
+    frame = table.select(rest).to_pandas(date_as_object=False, types_mapper=mapper)
+    return pd.concat([frame, held], axis=1)[table.column_names]
 
 
 def _ct_path(t, part):
@@ -136,7 +248,7 @@ def _ct_read(t, part, columns, filters):
         _ct_path(t, part), columns=columns, filters=filters,
         use_threads=False, pre_buffer=False, memory_map=False,
     )
-    return _ct_frame(pd, pa, table)
+    return _ct_frame(pd, pa, table, t)
 
 
 def _ct_head(t, n, columns):
@@ -150,8 +262,8 @@ def _ct_head(t, n, columns):
         if have >= n:
             break
     if not batches:
-        return _ct_frame(pd, pa, pq.read_table(_ct_path(t, 0), columns=columns)).head(n)
-    return _ct_frame(pd, pa, pa.Table.from_batches(batches)).head(n)
+        return _ct_frame(pd, pa, pq.read_table(_ct_path(t, 0), columns=columns), t).head(n)
+    return _ct_frame(pd, pa, pa.Table.from_batches(batches), t).head(n)
 
 
 class _Table:
@@ -234,6 +346,14 @@ class _Table:
         return '<table %s: %d rows, %d columns, %d parts>' % (t['name'], t['rows'], len(t['columns']), t['parts'])
 
 
+def _ct_schema_column(t, c):
+    out = {'name': c['name'], 'type': c['type']}
+    if c['type'] in ('date', 'timestamp'):
+        # What the column is when read: Python objects when datetime64[ns] cannot hold it.
+        out['dtype'] = 'object' if _ct_object_column(t, c['name']) else 'datetime64[ns]'
+    return out
+
+
 class _Tables:
     def __init__(self, tables):
         self._tables = list(tables)
@@ -255,7 +375,7 @@ class _Tables:
         t = self._find(name)
         return {
             'name': t['name'], 'rows': t['rows'], 'parts': t['parts'],
-            'columns': [{'name': c['name'], 'type': c['type']} for c in t['columns']],
+            'columns': [_ct_schema_column(t, c) for c in t['columns']],
         }
 
     def __getitem__(self, name):

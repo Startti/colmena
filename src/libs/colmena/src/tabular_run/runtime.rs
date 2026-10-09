@@ -7,9 +7,11 @@
 //! never read.
 
 use super::collect::RejectReason;
-use super::mounted::{MountedCall, MountedError, MountedExecutor, OUT_MIB};
+use super::mounted::{MountedCall, MountedError, MountedExecutor, OutputSink, OUT_MIB};
 use super::outputs::{OutputGuard, StoreSink};
-use super::prelude::{prelude_inputs, tables_summary, unwrap_emitted, wrap_large_code};
+use super::prelude::{
+    prelude_inputs, skipped_summary, tables_summary, unwrap_emitted, wrap_large_code,
+};
 use super::refusal::{FailureReason, RunRefusal, Unavailable};
 use super::stage::StageLimits;
 use super::verify::{still_current, verify_prepared};
@@ -92,6 +94,10 @@ pub struct LargeRunRequest {
     pub agent_session_id: Option<String>,
     /// Updated as the call moves on, so a cut-off can say where it was.
     pub phase: std::sync::Arc<PhaseCell>,
+    /// False when the conversation is already at its limit of returned files: the call
+    /// still runs, but files it returns are not stored (nothing is uploaded to be
+    /// deleted), and the answer says so.
+    pub keep_files: bool,
 }
 
 /// A file the code returned, stored and described.
@@ -116,6 +122,8 @@ pub struct LargeRunOutput {
     pub result: Value,
     /// Names, rows and column types of the tables the code could read.
     pub tables: Value,
+    /// Sheets of a workbook that are not tables, and why (`Null` when none).
+    pub skipped: Value,
     /// The files the code returned, already in storage.
     pub emitted: Vec<EmittedOutput>,
     /// What was written to the output volume and not kept, and why, as text
@@ -293,7 +301,7 @@ impl LargeTabularRuntime {
             tables: &chosen,
             limits: self.config.limits,
             out_mb: self.config.out_mb,
-            sink: Some(&sink),
+            sink: req.keep_files.then_some(&sink as &dyn OutputSink),
         };
         match self.executor.run_with_mounts(call, mounted).await {
             Ok(done) => {
@@ -331,6 +339,11 @@ impl LargeTabularRuntime {
                         None => format!("a file with an invalid name: {}", reason_text(r.reason)),
                     })
                     .collect();
+                if !req.keep_files {
+                    // Said whether or not the code returned a file: it was known before
+                    // the run, and the files of this call were not stored.
+                    not_kept.push(RunRefusal::SessionQuota.message());
+                }
                 if done.too_many_entries {
                     not_kept.push(
                         "the output folder held too many entries, so nothing was kept".into(),
@@ -340,6 +353,7 @@ impl LargeTabularRuntime {
                     stdout: done.result.stdout,
                     result,
                     tables: tables_summary(plan.manifest(), &chosen),
+                    skipped: skipped_summary(plan.manifest()),
                     emitted,
                     not_kept,
                     guard,
@@ -399,6 +413,7 @@ mod tests {
             session_id: Some("s1".into()),
             agent_session_id: Some("a1".into()),
             phase: Default::default(),
+            keep_files: true,
         }
     }
 

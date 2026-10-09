@@ -590,3 +590,26 @@ If the `/proc` scan cannot work at all here (it does not list this very
 process), that is decided once, when the executor is built: run mounts are off,
 with the reason `proc_scan_unusable` in the startup log and in the refusal, and
 plain calls are untouched.
+
+## The response spool is admitted before the call is sent
+
+A remote `/v2/run` response that returns files is spooled to unlinked temporary
+files before it is handed to the sinks. Room for that (two spools per process, so
+the temp directory holds at most 2 x 128 MiB) is taken BEFORE the call is sent,
+as part of admission: a call that cannot get it within 2 s is refused as busy
+(the retryable volumes budget) and nothing is sent. The room is released as soon
+as the spool is complete and validated, not after the sinks have uploaded, so a
+slow upload does not hold up the next call and a finished run never waits for
+room after the server ran its code.
+
+## Jail suites that start their own executors take turns on the host
+
+A template's start-up self-test compares the host's mount table before and after;
+another executor starting its template, or mounting a call's volume, in the same
+container at that moment reads as a leaked mount (`self_test_failed`,
+`mounts_leaked`) and the template does not start. That is a property of running
+several executors in one mount namespace, which a deployment does not do. The
+suites that start executors in parallel tests (`tabular_run_mounts`,
+`tabular_run_remote`, `tabular_large_e2e`) therefore mark every test
+`#[serial(host_mounts)]` and give each executor its own staging root and uid
+range, so they pass in any order and in parallel runs of the test binary.

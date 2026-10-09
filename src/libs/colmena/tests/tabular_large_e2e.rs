@@ -150,6 +150,7 @@ fn part(dir: &std::path::Path, name: &str, lo: i32, hi: i32) -> Option<Vec<u8>> 
 }
 
 #[derive(Clone, Copy, PartialEq)]
+#[repr(u32)]
 enum Kind {
     /// Everything, one file returned.
     Whole,
@@ -157,8 +158,10 @@ enum Kind {
     Quota,
     /// Two files; the second registration fails.
     Rollback,
-    /// The code runs past its budget.
+    /// The code runs past its own budget.
     Timeout,
+    /// The whole call runs past the tool's clock (shortened here from 900 s).
+    Budget,
 }
 
 /// The registry, but the second `upsert` fails: a failure between two registrations.
@@ -239,21 +242,31 @@ impl AttachmentRegistry for FailsSecondUpsert {
 }
 
 #[tokio::test]
+#[serial_test::serial(host_mounts)]
 async fn the_whole_path_runs_with_nothing_canned() {
     scenario(Kind::Whole).await;
 }
 
 #[tokio::test]
+#[serial_test::serial(host_mounts)]
 async fn at_the_quota_the_result_is_returned_and_no_file_is_kept() {
     scenario(Kind::Quota).await;
 }
 
 #[tokio::test]
+#[serial_test::serial(host_mounts)]
 async fn a_failed_second_registration_rolls_both_files_back() {
     scenario(Kind::Rollback).await;
 }
 
 #[tokio::test]
+#[serial_test::serial(host_mounts)]
+async fn a_call_past_the_tools_clock_is_cut_off_and_gives_everything_back() {
+    scenario(Kind::Budget).await;
+}
+
+#[tokio::test]
+#[serial_test::serial(host_mounts)]
 async fn code_past_its_budget_is_cut_off_and_the_volume_is_given_back() {
     scenario(Kind::Timeout).await;
 }
@@ -342,16 +355,25 @@ async fn scenario(kind: Kind) {
         .unwrap();
 
     // The real executor in the real jail, as the runtime's mounted executor.
-    let staging = PathBuf::from("/var/lib/colmena-tabular-e2e-test");
+    // Its own root and uid range per scenario: the scenarios run in parallel.
+    let index = kind as u32;
+    let staging = PathBuf::from(format!(
+        "/var/lib/colmena-tabular-e2e-test-{}-{index}",
+        std::process::id()
+    ));
     let made = std::fs::DirBuilder::new().mode(0o700).create(&staging);
     assert!(made.is_ok() || staging.is_dir(), "{made:?}");
     let mut cfg = SubprocessConfig::from_lookup(&|_: &str| None::<String>).unwrap();
     cfg.bin = PathBuf::from(env!("CARGO_BIN_EXE_python_executor"));
     cfg.slots = 1;
-    cfg.uid_base = 63000;
+    cfg.uid_base = 63000 + 100 * index;
     cfg.max_response_bytes = 1 << 20;
     cfg.staging_root = Some(staging.clone());
     let exec = Arc::new(SubprocessExecutor::new(cfg, Duration::from_secs(60)).unwrap());
+    // A template's start-up self-test looks at the host's mounts, so another scenario's
+    // template start or volume mount at that moment reads as a leak: the tests of this
+    // file take turns on the host (`serial`), each with its own root and uid range.
+    exec.warm().await.unwrap();
     let config = PrepareConfig {
         large_tabular: true,
         ..PrepareConfig::default()
@@ -424,18 +446,21 @@ async fn scenario(kind: Kind) {
         }),
         _ => attachments.clone(),
     };
-    let executor = DagToolExecutor::new(Arc::new(NoNodes), Default::default())
+    let mut executor = DagToolExecutor::new(Arc::new(NoNodes), Default::default())
         .with_attachments(vec![row])
         .with_attachment_storage(storage.clone())
         .with_attachment_registry(registry_for_tool)
         .with_agent_session_id(Some("agent_1".into()))
         .with_large_tabular(Arc::new(runtime));
+    if kind == Kind::Budget {
+        executor = executor.with_large_call_budget(Duration::from_secs(2));
+    }
     let code = match kind {
         Kind::Rollback => {
             "emit_table(tables['sales'].head(2, columns=['a']), 'one')\n\
              emit_table(tables['sales'].head(3, columns=['a']), 'two')\nresult = 1"
         }
-        Kind::Timeout => "while True:\n    pass",
+        Kind::Timeout | Kind::Budget => "while True:\n    pass",
         Kind::Quota => "emit_table(tables['sales'].head(3, columns=['a']), 'top')\nresult = 7",
         Kind::Whole => {
             "emit_table(tables['sales'].head(3, columns=['a']), 'top')\n\
@@ -485,6 +510,14 @@ async fn scenario(kind: Kind) {
                 "{rows:?}"
             );
             assert_eq!(storage.deleted.lock().unwrap().len(), 2);
+        }
+        Kind::Budget => {
+            // Cut by the call's clock, not the code's: the answer names the clock and
+            // the phase it reached, keeps nothing and is not retryable as it is.
+            assert_eq!(answer["retryable"], false, "{answer}");
+            let text = answer["error"].as_str().unwrap();
+            assert!(text.contains("did not finish within 2s"), "{answer}");
+            assert!(text.contains("nothing was kept"), "{answer}");
         }
         Kind::Timeout => {
             assert_eq!(answer["retryable"], false, "{answer}");

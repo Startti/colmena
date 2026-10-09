@@ -32,6 +32,18 @@ impl DagToolExecutor {
         self
     }
 
+    /// Builder: a shorter clock for a large-file call than the tool's own 900 s, so a
+    /// test can prove the cut-off end to end. Not for production wiring.
+    #[doc(hidden)]
+    pub fn with_large_call_budget(mut self, budget: std::time::Duration) -> Self {
+        self.large_call_budget = Some(budget);
+        self
+    }
+
+    pub(crate) fn large_call_budget(&self) -> Option<std::time::Duration> {
+        self.large_call_budget
+    }
+
     /// The large path for `document_id`, or `None` when the call keeps its
     /// usual path: no runtime is wired, the row is not in the catalog snapshot,
     /// or it is not a host-owned reference.

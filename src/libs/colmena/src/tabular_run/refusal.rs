@@ -29,6 +29,7 @@ pub enum FailureReason {
     TableTooLarge,
     ArchiveLimit,
     XlsxTooLarge,
+    OutputTooLarge,
     Abandoned,
     Internal,
 }
@@ -40,8 +41,10 @@ impl FailureReason {
             "storage" => Self::Storage,
             "unreadable_file" => Self::UnreadableFile,
             "table_too_large" => Self::TableTooLarge,
-            "archive-limit" => Self::ArchiveLimit,
+            // The converter writes `archive_limit`; the older spelling is still read.
+            "archive_limit" | "archive-limit" => Self::ArchiveLimit,
             "xlsx_too_large" => Self::XlsxTooLarge,
+            "output_too_large" => Self::OutputTooLarge,
             "abandoned" => Self::Abandoned,
             _ => Self::Internal,
         }
@@ -55,6 +58,7 @@ impl FailureReason {
             Self::TableTooLarge => "it has too many columns or sheets to describe",
             Self::ArchiveLimit => "the spreadsheet archive is over a safety limit",
             Self::XlsxTooLarge => "the spreadsheet is too large; export it as CSV",
+            Self::OutputTooLarge => "it holds far more data than its size suggests",
             Self::Abandoned => "the conversion stopped without finishing",
             Self::Internal => "an internal error stopped the conversion",
         }
@@ -107,6 +111,9 @@ pub enum Unavailable {
     NotReady,
     /// The staging volume's I/O failed.
     VolumeIo,
+    /// The executor refused this service's credentials (401/403): a setup problem
+    /// that retrying cannot fix.
+    Rejected,
     /// The executor is set up in a way that can never work (an output size it
     /// refuses): a configuration error, not a moment to wait out.
     Misconfigured,
@@ -298,6 +305,11 @@ impl RunRefusal {
             Self::Unavailable(Unavailable::VolumeIo) => {
                 "the large-file executor could not make its working volume; retry later".to_string()
             }
+            Self::Unavailable(Unavailable::Rejected) => {
+                "the large-file executor rejected this service's credentials; this is a setup problem \
+                 that retrying will not fix, so the file cannot be analysed here"
+                    .to_string()
+            }
             Self::Unavailable(Unavailable::Misconfigured) => {
                 "large-file analysis is misconfigured on this executor and cannot run here".to_string()
             }
@@ -383,12 +395,30 @@ mod tests {
             Unavailable::Registry,
             Unavailable::Executor,
             Unavailable::Misconfigured,
+            Unavailable::Rejected,
             Unavailable::NotReady,
             Unavailable::VolumeIo,
         ] {
             all.push(RunRefusal::Unavailable(u));
         }
         all
+    }
+
+    /// The converter's reason codes, as written, read as the same reasons (the status
+    /// endpoint's older `archive-limit` spelling too); an unknown code is `Internal`.
+    #[test]
+    fn the_converters_failure_codes_are_read() {
+        for (code, reason) in [
+            ("archive_limit", FailureReason::ArchiveLimit),
+            ("archive-limit", FailureReason::ArchiveLimit),
+            ("xlsx_too_large", FailureReason::XlsxTooLarge),
+            ("output_too_large", FailureReason::OutputTooLarge),
+            ("table_too_large", FailureReason::TableTooLarge),
+            ("something_new", FailureReason::Internal),
+        ] {
+            assert_eq!(FailureReason::from_code(code), reason, "{code}");
+            assert!(!reason.text().is_empty());
+        }
     }
 
     /// A refusal is for the model to act on: it has a sentence, a stable code,
@@ -513,6 +543,7 @@ mod tests {
             RunRefusal::Unavailable(Unavailable::MountsDisabled),
             RunRefusal::Unavailable(Unavailable::Unsupported),
             RunRefusal::Unavailable(Unavailable::Misconfigured),
+            RunRefusal::Unavailable(Unavailable::Rejected),
         ];
         for r in &yes {
             assert!(r.retryable(), "{r:?}");

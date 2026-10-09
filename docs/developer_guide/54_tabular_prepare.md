@@ -1976,3 +1976,54 @@ prepares it again. Three rules keep that from hurting a healthy file:
   call prepare a large file again. The choice is a per-process cool-down rather
   than a counter in the row because a completed preparation resets the row's
   attempts; it is not shared between processes.
+
+## The output ledger is cancel-safe and treats unknown outcomes as unknown
+
+The ledger that owns the objects and registry rows of a call's returned files:
+
+- Marks a row "may exist" BEFORE the registry is asked to make it. An upsert that
+  committed but errored, timed out or was cut off is undone like any other
+  (removing a row that is not there is a no-op).
+- Keeps every entry until its step is confirmed. A rollback whose future is
+  dropped midway leaves the remaining entries to `Drop`, which finishes them.
+- Re-reads the row when a delete's outcome is unknown (an error or a timeout).
+  Only a row confirmed absent lets the object go; otherwise the pair is left whole
+  and reported as kept.
+- Runs outside the conversation's lock: the lock covers the usage read and the
+  registrations only, each bounded (10 s; 15 s to get the lock), and the rollback
+  after it.
+- Runs inside the call's clock: `keep_outputs` is part of the future the progress
+  ticker bounds, so a registry that stops answering is cut with the rest.
+
+## Date and timestamp columns are decided once per table
+
+pandas 1.5 holds dates as `datetime64[ns]` (1677-09-22 to 2262-04-11) and wraps
+a value outside it. The prelude therefore decides, once per table and column,
+whether the column can be read as `datetime64[ns]` in EVERY part:
+
+- Only date columns and timestamp columns not already in nanoseconds are looked at
+  (the manifest's type says which). The footer's row-group statistics decide;
+  a part without them, or a nested column, is scanned (that column alone).
+- A column that does not fit stays Python objects in every part, so its dtype does
+  not change between parts; the other date columns of the read stay `datetime64`.
+- The read estimate uses the object size for such a column (40 bytes a row for a
+  date, 56 for a timestamp) and `tables.schema(name)` reports each date or
+  timestamp column's `dtype` as read (`datetime64[ns]` or `object`).
+- Nothing is caught while converting: a `MemoryError` is the call's.
+
+The manifest only has flat column types today; nested date types in a part are
+still checked (lists, structs and maps are flattened for the check).
+
+## Wording and classification of the remaining refusals
+
+- A conversation already at its limit of returned files is told so with the answer
+  (the call still runs, and its files are not stored at all, so nothing is uploaded
+  to be deleted). A call that only crosses the limit is told its files "would
+  exceed" it, with the number kept so far.
+- Rejected credentials (401/403) are a typed, permanent setup problem
+  (`large_tabular_unavailable`, `retryable: false`), never "retry later".
+- An upload cut on the way is answered by the server as `503` with
+  `refusal: upload_interrupted` and is retryable; only a request that is
+  malformed (`400`) is a setup problem.
+- The refusal shared by nodes that cannot know which tools the calling node offers
+  (the `http_request` `$attachment:` resolver) never names `attachment_run_python`.
