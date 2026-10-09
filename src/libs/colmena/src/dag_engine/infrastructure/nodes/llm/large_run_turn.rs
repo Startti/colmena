@@ -171,7 +171,7 @@ async fn files_the_code_returns_become_engine_owned_attachments() {
         "{seen}"
     );
     assert!(
-        seen.contains("\"rows\":2") && seen.contains("\"result\":7"),
+        seen.contains("\"rows_reported_by_code\":2") && seen.contains("\"result\":7"),
         "{seen}"
     );
     assert!(
@@ -202,4 +202,72 @@ async fn files_the_code_returns_become_engine_owned_attachments() {
         ("text/csv", Some(6))
     );
     assert_eq!(storage.reads() + storage.stores(), 0);
+}
+
+/// Switch on and a runtime wired, but this turn has only a small file: the tool
+/// is exactly what it always was (no large-file text, no `tables` argument), and
+/// the refusals do not point at it.
+#[tokio::test]
+#[serial_test::serial]
+async fn the_tool_is_unchanged_on_a_turn_with_only_a_small_file() {
+    use base64::{engine::general_purpose::STANDARD, Engine as _};
+    let db = tempfile::NamedTempFile::new().unwrap();
+    let url = format!("sqlite://{}", db.path().display());
+    let storage = Arc::new(CountingStorage::default());
+    let reg = registry_with_storage(Some(storage));
+    reg.set_large_tabular(true);
+    let p = prepared(&[("sales", 1)], 4).await;
+    reg.set_large_tabular_runtime(Arc::new(runtime(&p, Recorder::ok(Value::Null), true)));
+    let small = json!({"id": "doc-s", "mime_type": "text/csv", "filename": "s.csv",
+                       "size_bytes": 8, "data": STANDARD.encode(b"a,b\n1,2\n")});
+    let model = RecordingModel::scripted(vec![ScriptedResponse::Text("ok".into())]);
+    run_turn_with_tools(&reg, &url, vec![small], tools(), &model)
+        .await
+        .unwrap();
+    let offered = model.tools_offered().join("\n");
+    assert!(offered.contains("attachment_run_python"), "{offered}");
+    assert!(!offered.contains("Large files (over 50 MiB)"), "{offered}");
+    assert!(!offered.contains("\"tables\":{"), "{offered}");
+}
+
+/// One source of truth for the wording: with the tool served the refusals send
+/// the model to it; without, they say it is not available.
+#[tokio::test]
+#[serial_test::serial]
+async fn the_refusal_points_at_the_tool_only_when_it_is_served() {
+    use crate::llm::domain::large_tabular::refusal_text_for;
+    for served in [true, false] {
+        let db = tempfile::NamedTempFile::new().unwrap();
+        let url = format!("sqlite://{}", db.path().display());
+        let reg = registry_with_storage(Some(Arc::new(CountingStorage::default())));
+        reg.set_large_tabular(true);
+        run_turn(&reg, &url, vec![entry()], &RecordingModel::new(2))
+            .await
+            .unwrap();
+        if served {
+            let p = prepared(&[("sales", 1)], 4).await;
+            reg.set_large_tabular_runtime(Arc::new(runtime(&p, Recorder::ok(Value::Null), true)));
+            std::mem::forget(p);
+        }
+        let model = RecordingModel::scripted(vec![
+            ScriptedResponse::ToolCall {
+                id: "c1".into(),
+                tool_name: "load_attachment".into(),
+                arguments: json!({"document_id": "doc-big"}),
+            },
+            ScriptedResponse::Text("ok".into()),
+        ]);
+        run_turn_with_tools(&reg, &url, vec![], tools(), &model)
+            .await
+            .unwrap();
+        let seen = model.seen();
+        assert!(
+            seen.contains(refusal_text_for(served)),
+            "served={served}: {seen}"
+        );
+        assert!(
+            !seen.contains(refusal_text_for(!served)),
+            "served={served}: {seen}"
+        );
+    }
 }

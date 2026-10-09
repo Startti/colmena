@@ -7,7 +7,7 @@
 //! that is too large for one call is refused from the row's recorded size,
 //! before any part is opened.
 
-use super::refusal::{Budget, FailureReason, Invalid, RunRefusal, Unavailable};
+use super::refusal::{FailureReason, Invalid, RunRefusal, Unavailable};
 use crate::storage::domain::OutputStorageRepository;
 use crate::tabular_prepare::manifest::{
     part_path, Manifest, TableInfo, MANIFEST_MAX_BYTES, MANIFEST_PATH,
@@ -136,6 +136,12 @@ async fn read_capped(
     Ok(out)
 }
 
+/// The manifest's table list is the row's, byte for byte. A list that cannot be
+/// serialised, or a row without one, is a mismatch, never a match.
+fn same_table_list(manifest: &Manifest, recorded: Option<&str>) -> bool {
+    matches!((manifest.tables_json(), recorded), (Ok(ours), Some(theirs)) if ours == theirs)
+}
+
 /// Verifies the prepared copy of `source_key` through the registry, then reads
 /// and checks its manifest. Returns the plan, or a refusal the model can read.
 ///
@@ -162,13 +168,9 @@ pub async fn verify_prepared(
     }
     let prepared_bytes = u64::try_from(row.prepared_bytes.unwrap_or(-1))
         .map_err(|_| RunRefusal::Invalid(Invalid::Record))?;
-    // Before a single object is opened: a copy too large for one call is
-    // refused on what the row says it holds.
-    if prepared_bytes > DATA_MAX_BYTES {
-        return Err(RunRefusal::OverBudget(Budget::Data {
-            limit_bytes: DATA_MAX_BYTES,
-        }));
-    }
+    // The call's data limit is applied at staging, to the tables actually chosen
+    // and on the sizes their parts declare: a whole-copy cap here would refuse a
+    // file whose chosen tables fit.
 
     let bytes = read_capped(
         storage,
@@ -180,7 +182,7 @@ pub async fn verify_prepared(
     let manifest =
         Manifest::from_json(&bytes).map_err(|_| RunRefusal::Invalid(Invalid::Manifest))?;
     // The registry and the storage must tell the same story.
-    if manifest.tables_json().ok().as_deref() != row.tables_json.as_deref() {
+    if !same_table_list(&manifest, row.tables_json.as_deref()) {
         return Err(RunRefusal::Invalid(Invalid::Manifest));
     }
     let tracked: HashSet<&str> = row.blob_keys.iter().map(String::as_str).collect();
@@ -359,30 +361,40 @@ mod tests {
         assert!(p.storage.reads.lock().unwrap().is_empty());
     }
 
+    /// The data limit is not applied to the whole copy here: a file whose chosen
+    /// tables fit must not be refused for the size of the others.
     #[tokio::test]
-    async fn a_copy_recorded_over_the_data_limit_is_refused_before_any_read() {
+    async fn a_copy_recorded_over_the_data_limit_still_verifies() {
         let p = prepared_with(&[("sales", 1)], 10, FORMAT_VERSION, |info| {
-            info.prepared_bytes = DATA_MAX_BYTES as i64 + 1;
-        })
-        .await;
-        let err = verify_prepared(&*p.registry, &*p.storage, SOURCE)
-            .await
-            .unwrap_err();
-        assert_eq!(
-            err,
-            RunRefusal::OverBudget(Budget::Data {
-                limit_bytes: DATA_MAX_BYTES
-            })
-        );
-        assert!(p.storage.reads.lock().unwrap().is_empty());
-        // Exactly at the limit is not over it.
-        let p = prepared_with(&[("sales", 1)], 10, FORMAT_VERSION, |info| {
-            info.prepared_bytes = DATA_MAX_BYTES as i64;
+            info.prepared_bytes = DATA_MAX_BYTES as i64 * 3;
         })
         .await;
         assert!(verify_prepared(&*p.registry, &*p.storage, SOURCE)
             .await
             .is_ok());
+    }
+
+    #[test]
+    fn a_table_list_that_cannot_be_serialised_or_is_absent_never_matches() {
+        let ok = crate::tabular_run::testkit::manifest_with(&[("sales", 1)]);
+        let text = ok.tables_json().unwrap();
+        assert!(same_table_list(&ok, Some(&text)));
+        assert!(!same_table_list(&ok, None), "no recorded list");
+        assert!(!same_table_list(&ok, Some("[]")));
+        // Too many columns for the registry row: serialisation fails on our side too.
+        let mut huge = ok.clone();
+        huge.tables[0].columns = (0..3000)
+            .map(|i| {
+                let mut c = huge.tables[0].columns[0].clone();
+                c.name = format!("column_number_{i:05}");
+                c
+            })
+            .collect();
+        assert!(huge.tables_json().is_err());
+        assert!(
+            !same_table_list(&huge, None),
+            "Err on our side and None on theirs is not a match"
+        );
     }
 
     #[tokio::test]

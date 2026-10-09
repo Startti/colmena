@@ -10,6 +10,7 @@ use super::collect::{collect_out, CollectLimits};
 use super::mounted::{MountedCall, MountedError, MountedExecutor, MountedResult};
 use super::refusal::{Budget, RunRefusal, Unavailable};
 use super::stage::stage_tables;
+use super::volume::Volume;
 use crate::dag_engine::domain::python_executor::PythonRunRequest;
 use crate::dag_engine::infrastructure::python_exec::staging::StageError;
 use crate::dag_engine::infrastructure::python_exec::subprocess::SubprocessExecutor;
@@ -25,9 +26,9 @@ pub fn refuse_stage(e: &StageError) -> RunRefusal {
         // The executor started without run mounts (the root's lock, its capabilities):
         // it says so instead of staging calls it cannot serve.
         StageError::MountsDisabled(_) => RunRefusal::Unavailable(Unavailable::MountsDisabled),
-        StageError::InvalidSize(_) | StageError::Io(_) => {
-            RunRefusal::Unavailable(Unavailable::Executor)
-        }
+        // An output size the executor itself refuses can never work: setup, not a wait.
+        StageError::InvalidSize(_) => RunRefusal::Unavailable(Unavailable::Misconfigured),
+        StageError::Io(_) => RunRefusal::Unavailable(Unavailable::Executor),
     }
 }
 
@@ -38,22 +39,22 @@ impl MountedExecutor for SubprocessExecutor {
         req: PythonRunRequest,
         call: MountedCall<'_>,
     ) -> Result<MountedResult, MountedError> {
-        let staged_call = self.stage_call(call.out_mb).map_err(|e| {
+        let staged_call = Volume::new(self.stage_call(call.out_mb).map_err(|e| {
             tracing::warn!(target: T_PYTHON_EXEC, error = %e, "could not stage a call with mounts");
             MountedError::Refused(refuse_stage(&e))
-        })?;
+        })?);
         let outcome = async {
             let staged = stage_tables(
                 call.storage,
                 call.plan,
                 call.tables,
-                &staged_call.data_dir(),
+                &staged_call.get().data_dir(),
                 call.limits,
             )
             .await
             .map_err(MountedError::Refused)?;
             let result = self
-                .run_staged(req, staged_call.mounts())
+                .run_staged(req, staged_call.get().mounts())
                 .await
                 .map_err(MountedError::Run)?;
             // The child is dead (SIGKILL to its uid before `run_staged` returns)
@@ -66,9 +67,10 @@ impl MountedExecutor for SubprocessExecutor {
                 too_many_entries: false,
             };
             if let Some(sink) = call.sink {
-                let found = collect_out(&staged_call.out_dir(), CollectLimits::default()).map_err(
-                    |_| MountedError::Refused(RunRefusal::Unavailable(Unavailable::Executor)),
-                )?;
+                let found = collect_out(&staged_call.get().out_dir(), CollectLimits::default())
+                    .map_err(|_| {
+                        MountedError::Refused(RunRefusal::Unavailable(Unavailable::Executor))
+                    })?;
                 done.rejected = found.rejected;
                 done.too_many_entries = found.too_many_entries;
                 for file in found.files {
@@ -82,7 +84,10 @@ impl MountedExecutor for SubprocessExecutor {
         .await;
         // The volume is unmounted and the directories removed off the async
         // worker, and before this returns, so the budget share is given back.
-        let _ = tokio::task::spawn_blocking(move || drop(staged_call)).await;
+        // Back on the blocking pool and before this returns; a path that never
+        // gets here (an error, a panic, the future dropped) goes through `Drop`,
+        // which hands it to the same pool.
+        staged_call.release().await;
         outcome
     }
 }
@@ -111,7 +116,10 @@ mod tests {
         assert!(!refusal.message().contains("secret"));
         assert_eq!(
             refuse_stage(&StageError::InvalidSize(0)),
-            RunRefusal::Unavailable(Unavailable::Executor)
+            RunRefusal::Unavailable(Unavailable::Misconfigured)
         );
+        assert!(!refuse_stage(&StageError::InvalidSize(0)).retryable());
+        assert!(!refuse_stage(&StageError::NoStagingRoot).retryable());
+        assert!(refuse_stage(&over).retryable());
     }
 }

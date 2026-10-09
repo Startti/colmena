@@ -201,25 +201,59 @@ fn list(dir: &File, limit: usize) -> io::Result<Vec<Vec<u8>>> {
         drop(unsafe { OwnedFd::from_raw_fd(copy) });
         return Err(e);
     }
+    // `readdir` returns null at the end AND on an error; only errno tells them apart.
+    let names = drain(
+        || {
+            // SAFETY: `stream` is a live directory stream; errno is cleared first.
+            unsafe { *errno_location() = 0 };
+            let entry = unsafe { libc::readdir(stream) };
+            if entry.is_null() {
+                return match unsafe { *errno_location() } {
+                    0 => Ok(None),
+                    e => Err(io::Error::from_raw_os_error(e)),
+                };
+            }
+            Ok(Some(
+                unsafe { CStr::from_ptr((*entry).d_name.as_ptr()) }
+                    .to_bytes()
+                    .to_vec(),
+            ))
+        },
+        limit,
+    );
+    unsafe { libc::closedir(stream) };
+    let mut names = names?;
+    names.sort();
+    Ok(names)
+}
+
+#[cfg(target_os = "linux")]
+unsafe fn errno_location() -> *mut libc::c_int {
+    libc::__errno_location()
+}
+
+#[cfg(not(target_os = "linux"))]
+unsafe fn errno_location() -> *mut libc::c_int {
+    libc::__error()
+}
+
+/// The names `next` yields, `.` and `..` skipped, stopping one past `limit`. An
+/// error from `next` fails the whole listing: a directory that could not be read
+/// to its end is not "a directory with fewer entries".
+fn drain(
+    mut next: impl FnMut() -> io::Result<Option<Vec<u8>>>,
+    limit: usize,
+) -> io::Result<Vec<Vec<u8>>> {
     let mut names = vec![];
-    loop {
-        // SAFETY: `stream` is a live directory stream; `readdir` returns null at
-        // the end, or on error (which this walk treats as the end).
-        let entry = unsafe { libc::readdir(stream) };
-        if entry.is_null() {
-            break;
-        }
-        let name = unsafe { CStr::from_ptr((*entry).d_name.as_ptr()) }.to_bytes();
+    while let Some(name) = next()? {
         if name == b"." || name == b".." {
             continue;
         }
-        names.push(name.to_vec());
+        names.push(name);
         if names.len() > limit {
             break;
         }
     }
-    unsafe { libc::closedir(stream) };
-    names.sort();
     Ok(names)
 }
 
@@ -579,5 +613,34 @@ mod tests {
         assert_eq!(l.file_bytes, 64 * 1024 * 1024);
         assert_eq!(l.total_bytes, 2 * l.file_bytes);
         assert_eq!(l.max_entries, 64);
+    }
+
+    /// A listing that fails part-way fails as a whole: entries must not go
+    /// missing silently on an I/O error.
+    #[test]
+    fn a_listing_error_fails_the_collection_instead_of_ending_the_listing() {
+        let mut steps = vec![
+            Ok(Some(b".".to_vec())),
+            Ok(Some(b"a.csv".to_vec())),
+            Err(io::Error::from_raw_os_error(libc::EIO)),
+            Ok(Some(b"b.csv".to_vec())),
+            Ok(None),
+        ]
+        .into_iter();
+        let got = drain(|| steps.next().unwrap(), 64);
+        assert_eq!(got.unwrap_err().raw_os_error(), Some(libc::EIO));
+        let mut ok = vec![
+            Ok(Some(b"..".to_vec())),
+            Ok(Some(b"a.csv".to_vec())),
+            Ok(None),
+        ]
+        .into_iter();
+        assert_eq!(
+            drain(|| ok.next().unwrap(), 64).unwrap(),
+            [b"a.csv".to_vec()]
+        );
+        // Stops one past the limit.
+        let mut many = (0..).map(|i| Ok(Some(format!("f{i}").into_bytes())));
+        assert_eq!(drain(|| many.next().unwrap(), 3).unwrap().len(), 4);
     }
 }

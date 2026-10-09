@@ -113,6 +113,7 @@ async fn produce(
     if !send(frame(&entry)).await || !send(Bytes::from(manifest)).await {
         return Err(gone());
     }
+    let deadline = tokio::time::Instant::now() + limits.total_time;
     let mut parts = 0usize;
     for &t in call.tables {
         let table = call
@@ -138,8 +139,13 @@ async fn produce(
             }
             if total.saturating_add(declared) > limits.total_bytes {
                 abort(&tx).await;
-                return Err(RunRefusal::OverBudget(Budget::Data {
-                    limit_bytes: limits.total_bytes,
+                return Err(RunRefusal::OverBudget(match call.tables.len() <= 1 {
+                    true => Budget::Table {
+                        limit_bytes: limits.total_bytes,
+                    },
+                    false => Budget::Data {
+                        limit_bytes: limits.total_bytes,
+                    },
                 }));
             }
             let entry = serde_json::to_vec(&FileEntry {
@@ -152,7 +158,10 @@ async fn produce(
             }
             let mut sent = 0u64;
             loop {
-                let next = tokio::time::timeout(IDLE_TIMEOUT, stream.stream.next()).await;
+                let wait = limits
+                    .idle
+                    .min(deadline.saturating_duration_since(tokio::time::Instant::now()));
+                let next = tokio::time::timeout(wait, stream.stream.next()).await;
                 let Ok(next) = next else {
                     abort(&tx).await;
                     return Err(RunRefusal::Storage);
@@ -172,9 +181,10 @@ async fn produce(
                     return Err(gone());
                 }
             }
+            // Ended early but cleanly: the storage cut the transfer (retryable).
             if sent != declared {
                 abort(&tx).await;
-                return Err(RunRefusal::Invalid(Invalid::Parts));
+                return Err(RunRefusal::Storage);
             }
             total += declared;
             parts += 1;
@@ -281,7 +291,40 @@ impl MountedExecutor for RemoteExecutor {
             .await
             .map_err(|text| MountedError::Run(PythonRunError::Internal(text)))?;
         let (client, base, max_timeout) = self.transport();
+        // A probe: the same header with `probe` set, answered before any data is
+        // read. What the server would refuse (no route, no staging root, mounts
+        // off, no free volume) is known BEFORE storage is read or a byte
+        // uploaded; a refused upload can look like a dropped connection, which
+        // says nothing. 204 is the one answer that lets the call go on. A volume
+        // taken in between is still refused, then as "unavailable, retry".
         let timeout = req.timeout.unwrap_or(max_timeout).min(max_timeout);
+        let head = CallHeader {
+            v: WIRE_V2,
+            code: String::new(),
+            mode: req.mode.clone(),
+            timeout_ms: 1000,
+            inputs: serde_json::Map::new(),
+            out_mb: call.out_mb,
+            probe: true,
+        };
+        let mut body = frame(&serde_json::to_vec(&head).map_err(|_| unavailable())?).to_vec();
+        body.extend_from_slice(&end_frame());
+        let probe = client
+            .post(endpoint(base, "v2/run"))
+            .body(body)
+            .timeout(IDLE_TIMEOUT);
+        let probe = self.authorized(probe).await.map_err(MountedError::Run)?;
+        let probed = probe.send().await.map_err(|_| unavailable())?;
+        if probed.status().as_u16() != 204 {
+            let status = probed.status().as_u16();
+            let retry = probed.headers().contains_key(reqwest::header::RETRY_AFTER);
+            let body = probed
+                .bytes()
+                .await
+                .ok()
+                .and_then(|b| serde_json::from_slice::<Refusal>(&b).ok());
+            return Err(refusal_of(status, retry, body));
+        }
         let header = serde_json::to_vec(&CallHeader {
             v: WIRE_V2,
             code: req.code,
@@ -289,6 +332,7 @@ impl MountedExecutor for RemoteExecutor {
             timeout_ms: u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX),
             inputs: req.inputs,
             out_mb: call.out_mb,
+            probe: false,
         })
         .map_err(|_| unavailable())?;
         let (tx, rx) = tokio::sync::mpsc::channel::<Result<Bytes, std::io::Error>>(2);
@@ -471,11 +515,11 @@ mod tests {
                 generated(total, 5, declared, l.clone(), None)
             });
             let (_, made, errored) = sent(&p, &[0], StageLimits::default()).await;
-            assert_eq!(
-                made.unwrap_err(),
-                RunRefusal::Invalid(Invalid::Parts),
-                "{total}/{declared}"
-            );
+            let expected = match total < declared {
+                true => RunRefusal::Storage,
+                false => RunRefusal::Invalid(Invalid::Parts),
+            };
+            assert_eq!(made.unwrap_err(), expected, "{total}/{declared}");
             assert!(errored, "the body was aborted");
             assert!(live.produced.load(SeqCst) as u64 <= declared.max(total));
         }
@@ -488,6 +532,7 @@ mod tests {
         let part = StageLimits {
             total_bytes: 1 << 30,
             part_bytes: 99,
+            ..StageLimits::default()
         };
         let (_, made, errored) = sent(&p, &[0], part).await;
         assert_eq!(
@@ -498,11 +543,12 @@ mod tests {
         let total = StageLimits {
             total_bytes: manifest_len + 150,
             part_bytes: 100,
+            ..StageLimits::default()
         };
         let (_, made, _) = sent(&p, &[0], total).await;
         assert_eq!(
             made.unwrap_err(),
-            RunRefusal::OverBudget(Budget::Data {
+            RunRefusal::OverBudget(Budget::Table {
                 limit_bytes: manifest_len + 150
             })
         );
@@ -512,6 +558,7 @@ mod tests {
             StageLimits {
                 total_bytes: manifest_len + 200,
                 part_bytes: 100,
+                ..StageLimits::default()
             },
         )
         .await;

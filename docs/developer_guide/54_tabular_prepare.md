@@ -1759,3 +1759,79 @@ Each returned file is registered with `DagToolExecutor::register_stored_attachme
 `generated_by:attachment_run_python`, never a host reference, so later tools can use it. Registration is fail-soft like the small
 path's: a registry that refuses is logged and the file stays in storage. The `document_id` is the engine's own handle for a generated
 object, as it is for every generated attachment; no host key or URL is in the answer.
+
+### Progress, the call's total clock, and what the design's other guards decide
+
+A routed call runs under `with_progress_ticker`: a `tool-progress` event every `TOOL_PROGRESS_INTERVAL_SECS` (10 s, stage `running`) under
+the model's tool call id, and the call is bounded at 900 s in total (the ticker's longest); past it the step is dropped (which
+closes the remote request, kills the local child and gives the volume back through their drop guards) and the answer says
+the call did not finish. Required for correctness, not a nicety: the run loop's idle watchdog cuts a stream that is silent for 300 s
+and a heavy call can be (preparation wait 240 s, run 300 s, transfers). The stage is `running` for the whole call; separate
+`preparing`/`staging`/`collecting` stages would need the runtime to report its phases and are not built. That the id matches the
+one the client finds the row by (`tool-input-available`) was not checked against a live stream.
+
+| Design item (D7) | Decision | Why |
+|---|---|---|
+| progress ticker | built, required | without events the idle watchdog (300 s) can cut a heavy call |
+| session lock (`heavy_run_locks`, 720 s lease) | safe to defer | one heavy run per session is a fairness and abuse control, not a correctness one: the executor's budget of volumes (2) already bounds heavy runs per instance with a typed `busy` refusal; the lock needs a new table in both dialects and a host decision |
+| source-removed cancel (registry row within 10 s) | safe to defer | a call that already has its data works on its own staged copy and ends within its bounds; a source deleted before the data is read fails the read with a typed storage refusal; the cost is at most a few minutes of compute |
+| `last_used_at` touch at staging | already done | `ensure_prepared` records the use |
+
+A request header may carry `probe: true`: the server answers `204` after the checks that need no data (the route, the gate, mounts,
+a free volume, a valid header) and runs nothing. The client sends one first, so what the server would refuse is known before
+storage is read or a byte uploaded: on HTTP/1.1 a server that refuses while the body is unsent can close the connection, and a
+client then sees a dropped connection, not the refusal. A volume taken between the probe and the call is still refused, then
+reported as "unavailable, retry later" (a refusal read from the early answer when the connection survives).
+
+### Staging: what the review changed
+
+- A file the call will read is finished with flush AND sync, every error reported (the manifest used to be left to its drop, so a failed
+  write could leave a truncated `/data/manifest.json`).
+- The 1 GiB data limit is applied at staging, to the tables chosen and on the sizes their parts declare, not to the whole prepared copy
+  at verification: naming fewer tables can now work. When the ONE table asked for is over the limit the refusal says so (`Budget::Table`,
+  "this table alone is larger than ...") instead of asking for fewer tables.
+- A part that sends more than it declared is a disagreement with the record (`Invalid(Parts)`, found at the first byte over); one that ends
+  cleanly but short is a storage that cut the transfer (`Storage`, retryable).
+- Every wait on storage is bounded: an idle limit per chunk (30 s) and a deadline for the whole staging (240 s), in the local stager and
+  in the remote client's body producer. A storage that stalls or trickles holds no volume past them.
+- The manifest's table list must serialise AND equal the recorded one; a row without a list never matches.
+
+### Answers: retry, fixed text, bounded result, one wording
+
+- *Retry or not.* Every refusal has `retryable` (an exhaustive `match`, so a new one cannot be left unclassified) and the tool error carries
+  it, as do the timeout and executor-failure answers. Retryable: not prepared yet, still preparing, a non-final preparation failure, the
+  executor's volumes full, a storage failure (including a stream cut short), the registry or the executor unavailable. Not retryable: switch
+  off, a file that will never be prepared, being removed, no such table, any over-budget limit (a different request is needed), any
+  `Invalid` (the record and the storage disagree; a missing part reads the same record again), no staging root, mounts disabled, an executor
+  that cannot do it, a misconfigured one (`Misconfigured`, e.g. an output size the executor refuses).
+- *Executor failures reach the model as fixed text* (`LargeRunError::Internal` carries nothing); the detail is logged, because it can name
+  the host's socket path under `/run/...`.
+- *The result is capped* like stdout (50 KiB of its JSON); past it the model gets a cut and a `result_note` saying to aggregate or use
+  `emit_table`.
+- *`tables` is read leniently, and only on the large path,* from the raw arguments (null, a string, odd members never fail the call); the
+  args struct has no such field, so a wrong type cannot fail parsing on any path. `rows`/`dtypes` of returned files are named
+  `rows_reported_by_code`/`dtypes_reported_by_code`: the code wrote the file and the report.
+- *One source of truth for the wording:* `refusal_text_for(served)` where `served` is "the switch is on and a runtime is wired for this
+  turn" (the load_attachment resolver, the whole-object fetch). The global constant stays `false`. The tool is offered with the large-file
+  text and the `tables` argument only on a turn whose catalog holds a host-owned row. Not changed: the `$attachment:` placeholder resolver
+  of `http_request` still uses the constant.
+
+A directory listing that fails part-way fails the collection (`readdir` returns null at the end and on an error; errno tells them apart),
+so entries cannot go missing silently on an I/O error.
+
+The volume of a call is held by a guard (`Volume`) that hands the release (an unmount and a removal of up to a gibibyte) to the blocking
+pool on every path: a normal end, an error, a panicking sink, the call's future dropped; the budget share goes back with it. The server
+uses the same guard. Proved on the real jail with a sink that sees the volume still held while it runs, fails, panics, and hangs until the
+call is cut.
+
+### Outputs are transactional, and there is a per-conversation quota
+
+- *Nothing is reported as kept unless it is stored AND registered.* The runtime returns the stored files with an `OutputGuard`; the holder
+  commits it after registering them, and a guard dropped without it deletes the objects. A sink dropped with outputs it never handed out
+  deletes them too. That covers a later `accept` failing, the call's 900 s clock dropping the future mid-collect, the tool future dropped
+  before registration, and a registration that fails (a missing registry or session counts: the rows already made are taken back and the
+  answer says none was kept). The deletes run on the runtime and a failed delete is logged. The remote client now hands outputs to the sink
+  only after the whole response ended correctly, and rejects a repeated name in any case.
+- *Quota:* at most 40 files and 512 MiB returned by this tool in a conversation (`SESSION_MAX_FILES`, `SESSION_MAX_BYTES`, estimates), counted
+  from the registry's rows with this tool's origin. At the quota a call is refused before it runs (`large_tabular_quota`, not retryable); a
+  call that would cross it keeps none of its files, says so, and still returns its result.

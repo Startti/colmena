@@ -884,7 +884,10 @@ impl DagToolExecutor {
         // says now and whatever the row's size or mime say. Every other row is
         // read as it always was.
         if location.host_owned {
-            return Err(crate::llm::domain::large_tabular::refusal_text().to_string());
+            return Err(crate::llm::domain::large_tabular::refusal_text_for(
+                self.large_tabular.is_some(),
+            )
+            .to_string());
         }
         storage
             .read(&location.key)
@@ -951,11 +954,16 @@ impl DagToolExecutor {
         filename: &str,
         size_bytes: u64,
         tool_name: &str,
-    ) {
+    ) -> Result<(), ()> {
         // `storage_key` is the document_id surface for downstream tools, so it
         // is registered in the session: `$attachment:<id>` and `fetch_attachment_*`
-        // only read ids the session registry knows. Fail-soft, like media nodes.
-        if let (Some(reg), Some(sid)) = (&self.attachment_registry, &self.agent_session_id) {
+        // only read ids the session registry knows. Fail-soft for the callers that
+        // ignore the result, like media nodes; a caller that must know (the large
+        // path, which keeps nothing it could not register) reads it.
+        let (Some(reg), Some(sid)) = (&self.attachment_registry, &self.agent_session_id) else {
+            return Err(());
+        };
+        {
             let key = storage_key.to_string();
             let row = crate::llm::domain::attachments::UpsertAttachmentInput {
                 agent_session_id: sid.clone(),
@@ -975,8 +983,39 @@ impl DagToolExecutor {
             };
             if let Err(e) = reg.upsert(row).await {
                 tracing::warn!(error = %e, "register_stored_attachment: registry upsert failed");
+                return Err(());
             }
         }
+        Ok(())
+    }
+
+    /// Takes back a registration made by [`Self::register_stored_attachment`]
+    /// (the row only; the caller owns the object).
+    pub(crate) async fn unregister_stored_attachment(&self, storage_key: &str) {
+        if let (Some(reg), Some(sid)) = (&self.attachment_registry, &self.agent_session_id) {
+            let _ = reg
+                .delete_attachment_for_provider(
+                    sid,
+                    storage_key,
+                    crate::llm::domain::ProviderKind::Generated,
+                )
+                .await;
+        }
+    }
+
+    /// How many files, and how many bytes, the session already holds that this
+    /// tool generated. `None` when the registry cannot say.
+    pub(crate) async fn generated_usage(&self, tool_name: &str) -> Option<(usize, u64)> {
+        let (reg, sid) = (
+            self.attachment_registry.as_ref()?,
+            self.agent_session_id.as_ref()?,
+        );
+        let mine = Some(crate::llm::domain::attachments::origin::generated_by(
+            tool_name,
+        ));
+        let rows = reg.list_for_session(sid).await.ok()?;
+        let rows = rows.iter().filter(|r| r.origin == mine);
+        Some(rows.fold((0, 0), |(n, b), r| (n + 1, b + r.size_bytes.unwrap_or(0))))
     }
 
     /// Persist freshly produced bytes (e.g. a `gdocs_export` PDF, an
@@ -1013,14 +1052,16 @@ impl DagToolExecutor {
             .store(req)
             .await
             .map_err(|e| format!("attachment_storage.store failed: {e}"))?;
-        self.register_stored_attachment(
-            &stored.storage_key,
-            &stored.mime_type,
-            &stored.filename,
-            stored.size_bytes,
-            tool_name,
-        )
-        .await;
+        // Fail-soft by design on this path (as always): the object is stored.
+        let _ = self
+            .register_stored_attachment(
+                &stored.storage_key,
+                &stored.mime_type,
+                &stored.filename,
+                stored.size_bytes,
+                tool_name,
+            )
+            .await;
         Ok(stored.storage_key)
     }
 

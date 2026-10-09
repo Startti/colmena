@@ -27,7 +27,70 @@ pub struct Emitted {
     pub storage_key: String,
 }
 
+/// Objects stored for a call that is not finished until [`OutputGuard::commit`]:
+/// dropped without it (the call failed, was cut off by the call's clock, or its
+/// future was dropped), it deletes them, so "nothing was kept" is true. The
+/// deletes run on the runtime and their failures are logged, not hidden.
+#[derive(Debug)]
+pub struct OutputGuard {
+    storage: Option<Arc<dyn OutputStorageRepository>>,
+    keys: Vec<String>,
+}
+
+impl OutputGuard {
+    fn new(storage: Arc<dyn OutputStorageRepository>, keys: Vec<String>) -> Self {
+        Self {
+            storage: Some(storage),
+            keys,
+        }
+    }
+
+    /// The call is done and the files are registered: keep them.
+    pub fn commit(mut self) {
+        self.keys.clear();
+        self.storage = None;
+    }
+
+    /// The keys held (for rollback of what was registered).
+    pub fn keys(&self) -> &[String] {
+        &self.keys
+    }
+}
+
+fn delete_in_background(storage: Arc<dyn OutputStorageRepository>, keys: Vec<String>) {
+    if keys.is_empty() {
+        return;
+    }
+    let Ok(rt) = tokio::runtime::Handle::try_current() else {
+        tracing::warn!(target: "colmena::tabular_run", count = keys.len(), "stored outputs could not be deleted: no runtime");
+        return;
+    };
+    rt.spawn(async move {
+        for key in keys {
+            if storage.delete(&key).await.is_err() {
+                tracing::warn!(target: "colmena::tabular_run", "a stored output could not be deleted");
+            }
+        }
+    });
+}
+
+impl Drop for OutputGuard {
+    fn drop(&mut self) {
+        if let Some(storage) = self.storage.take() {
+            delete_in_background(storage, std::mem::take(&mut self.keys));
+        }
+    }
+}
+
+impl std::fmt::Debug for dyn OutputStorageRepository {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("OutputStorageRepository")
+    }
+}
+
 /// A sink that stores each output with `store_stream` and remembers where.
+/// Dropped with outputs it has not handed out through [`StoreSink::take_guarded`],
+/// it deletes them.
 pub struct StoreSink {
     storage: Arc<dyn OutputStorageRepository>,
     session_id: Option<String>,
@@ -49,9 +112,20 @@ impl StoreSink {
         }
     }
 
-    /// What was stored, in the order it was accepted.
+    /// What was stored, in the order it was accepted, and the guard that deletes
+    /// it unless the caller commits.
+    pub fn take_guarded(&self) -> (Vec<Emitted>, OutputGuard) {
+        let stored = std::mem::take(&mut *self.stored.lock().unwrap_or_else(|e| e.into_inner()));
+        let keys = stored.iter().map(|e| e.storage_key.clone()).collect();
+        (stored, OutputGuard::new(self.storage.clone(), keys))
+    }
+
+    /// What was stored (for the tests that do not care about the guard).
+    #[cfg(test)]
     pub fn take(&self) -> Vec<Emitted> {
-        std::mem::take(&mut *self.stored.lock().unwrap_or_else(|e| e.into_inner()))
+        let (stored, guard) = self.take_guarded();
+        guard.commit();
+        stored
     }
 }
 
@@ -78,6 +152,16 @@ fn chunks(
             Some((Ok(Bytes::from(buf)), (file, left - got as u64)))
         },
     )
+}
+
+impl Drop for StoreSink {
+    fn drop(&mut self) {
+        let left = std::mem::take(&mut *self.stored.lock().unwrap_or_else(|e| e.into_inner()));
+        delete_in_background(
+            self.storage.clone(),
+            left.into_iter().map(|e| e.storage_key).collect(),
+        );
+    }
 }
 
 #[async_trait]

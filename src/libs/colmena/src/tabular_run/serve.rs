@@ -16,15 +16,14 @@
 
 use super::collect::{collect_out, CollectLimits};
 use super::stage::{create_file, make_dir, StageLimits};
+use super::volume::Volume;
 use super::wire::{
     frame, CallHeader, Dropped, FileEntry, OutEntry, Reader, Refusal, ResponseHeader, RunStatus,
     HEADER_TIMEOUT, IDLE_TIMEOUT, MAX_FILES_IN, TRANSFER_MAX, WIRE_V2,
 };
 use crate::dag_engine::domain::python_executor::{PythonRunError, PythonRunRequest};
 use crate::dag_engine::infrastructure::python_exec::server::AppState;
-use crate::dag_engine::infrastructure::python_exec::staging::{
-    valid_out_mb, StageError, StagedCall,
-};
+use crate::dag_engine::infrastructure::python_exec::staging::{valid_out_mb, StageError};
 use crate::dag_engine::log_policy::T_PYTHON_EXEC;
 use crate::tabular_prepare::manifest::{parse_part_path, MANIFEST_MAX_BYTES, MANIFEST_PATH};
 use axum::body::Body;
@@ -58,21 +57,6 @@ fn refuse(code: StatusCode, refusal: &str, reason: Option<String>, retry: bool) 
 
 fn bad(code: StatusCode, what: &str) -> Response {
     refuse(code, what, None, false)
-}
-
-/// The volume of a call, released off the async worker however the handler ends.
-struct Volume(Option<StagedCall>);
-
-impl Drop for Volume {
-    fn drop(&mut self) {
-        let Some(call) = self.0.take() else { return };
-        match tokio::runtime::Handle::try_current() {
-            Ok(rt) => {
-                rt.spawn_blocking(move || drop(call));
-            }
-            Err(_) => drop(call),
-        }
-    }
 }
 
 /// A request path the server will create: the manifest or a canonical part.
@@ -214,8 +198,13 @@ pub async fn run_mounts(State(st): State<AppState>, req: Request) -> Response {
         }
         Err(_) => return refuse(StatusCode::SERVICE_UNAVAILABLE, "busy", None, true),
     };
-    let volume = Volume(Some(staged));
-    let data_dir = volume.0.as_ref().expect("held").data_dir();
+    let volume = Volume::new(staged);
+    if header.probe {
+        // Would be taken now: the volume is given back and nothing is read or run.
+        drop(volume);
+        return StatusCode::NO_CONTENT.into_response();
+    }
+    let data_dir = volume.get().data_dir();
     let received = match receive(&mut reader, &data_dir, StageLimits::default()).await {
         Ok(n) => n,
         Err(response) => {
@@ -230,7 +219,7 @@ pub async fn run_mounts(State(st): State<AppState>, req: Request) -> Response {
         timeout: Some(timeout),
         inputs: header.inputs,
     };
-    let mounts = volume.0.as_ref().expect("held").mounts();
+    let mounts = volume.get().mounts();
     let outcome = st.exec.run_staged(run, mounts).await;
     let mut head = ResponseHeader {
         v: WIRE_V2,
@@ -248,7 +237,7 @@ pub async fn run_mounts(State(st): State<AppState>, req: Request) -> Response {
             head.output = done.output;
             head.stdout = done.stdout;
             // The child is dead and the volume still mounted: read what it wrote.
-            let out_dir = volume.0.as_ref().expect("held").out_dir();
+            let out_dir = volume.get().out_dir();
             match collect_out(&out_dir, CollectLimits::default()) {
                 Ok(found) => {
                     head.too_many_entries = found.too_many_entries;

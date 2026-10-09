@@ -311,6 +311,7 @@ async fn a_call_over_the_data_limit_is_refused_and_the_volume_is_given_back() {
     let limits = StageLimits {
         total_bytes: 150,
         part_bytes: 100,
+        ..StageLimits::default()
     };
     let err = ex
         .run_with_mounts(req("output = 1", "none"), call(&storage, &plan, limits))
@@ -319,7 +320,7 @@ async fn a_call_over_the_data_limit_is_refused_and_the_volume_is_given_back() {
     assert!(
         matches!(
             err,
-            MountedError::Refused(RunRefusal::OverBudget(Budget::Data { .. }))
+            MountedError::Refused(RunRefusal::OverBudget(Budget::Table { .. }))
         ),
         "{err:?}"
     );
@@ -446,4 +447,141 @@ async fn an_executor_says_why_it_cannot_take_a_mounts_call() {
         Some("no_staging_root")
     );
     assert_eq!(executor(Some(&root)).mounts_unavailable().await, None);
+}
+
+// ---- the order of things, and the volume on every path ----
+
+/// What a sink does when it is given a file.
+enum Act {
+    /// Look at the executor's budget, to see the volume is still held.
+    Observe(Arc<SubprocessExecutor>),
+    Fail,
+    Panic,
+    Hang,
+}
+
+struct ActingSink {
+    act: Act,
+    seen: Mutex<Vec<(usize, u64)>>,
+}
+
+#[async_trait]
+impl OutputSink for ActingSink {
+    async fn accept(&self, _file: OutFile) -> Result<(), RunRefusal> {
+        match &self.act {
+            Act::Observe(ex) => {
+                self.seen.lock().unwrap().push(ex.staged_in_flight());
+                Ok(())
+            }
+            Act::Fail => Err(RunRefusal::Storage),
+            Act::Panic => panic!("a sink that panics"),
+            Act::Hang => std::future::pending().await,
+        }
+    }
+}
+
+const WRITES_A_FILE: &str = "open('/out/a.csv', 'w').write('x')\noutput = 1";
+
+async fn with_sink(
+    act: impl FnOnce(Arc<SubprocessExecutor>) -> Act,
+) -> (
+    Arc<SubprocessExecutor>,
+    Arc<ActingSink>,
+    PathBuf,
+    Arc<Storage>,
+    PreparedTables,
+    tempfile::TempDir,
+) {
+    let root = staging_root().expect("enabled");
+    let ex = Arc::new(executor(Some(&root)));
+    let sink = Arc::new(ActingSink {
+        act: act(ex.clone()),
+        seen: Mutex::new(vec![]),
+    });
+    let (storage, plan, dir) = prepared(&[vec![b'a'; 10]]).await;
+    (ex, sink, root, storage, plan, dir)
+}
+
+async fn eventually_released(ex: &SubprocessExecutor, root: &PathBuf) {
+    for _ in 0..100 {
+        if ex.staged_in_flight() == (0, 0) && leftovers(root) == 0 {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    panic!("the volume was not given back: {:?}", ex.staged_in_flight());
+}
+
+/// The sink is given the outputs while the volume is still held (it is the
+/// outputs' last chance to be read), and the volume is given back after.
+#[tokio::test]
+async fn the_sink_runs_before_the_volume_is_released() {
+    if staging_root().is_none() {
+        return;
+    }
+    let (ex, sink, root, storage, plan, _d) = with_sink(Act::Observe).await;
+    let mut c = call(&storage, &plan, Default::default());
+    c.sink = Some(&*sink);
+    ex.run_with_mounts(req(WRITES_A_FILE, "none"), c)
+        .await
+        .unwrap();
+    assert_eq!(
+        sink.seen.lock().unwrap().as_slice(),
+        &[(1, 4)],
+        "held while the sink ran"
+    );
+    eventually_released(&ex, &root).await;
+}
+
+#[tokio::test]
+async fn a_sink_that_fails_still_gives_the_volume_back() {
+    if staging_root().is_none() {
+        return;
+    }
+    let (ex, sink, root, storage, plan, _d) = with_sink(|_| Act::Fail).await;
+    let mut c = call(&storage, &plan, Default::default());
+    c.sink = Some(&*sink);
+    let err = ex
+        .run_with_mounts(req(WRITES_A_FILE, "none"), c)
+        .await
+        .unwrap_err();
+    assert_eq!(err, MountedError::Refused(RunRefusal::Storage));
+    eventually_released(&ex, &root).await;
+}
+
+#[tokio::test]
+async fn a_sink_that_panics_still_gives_the_volume_back() {
+    if staging_root().is_none() {
+        return;
+    }
+    let (ex, sink, root, storage, plan, _d) = with_sink(|_| Act::Panic).await;
+    let ex2 = ex.clone();
+    let task = tokio::spawn(async move {
+        let mut c = call(&storage, &plan, Default::default());
+        c.sink = Some(&*sink);
+        ex2.run_with_mounts(req(WRITES_A_FILE, "none"), c)
+            .await
+            .map(|_| ())
+    });
+    assert!(task.await.unwrap_err().is_panic());
+    eventually_released(&ex, &root).await;
+}
+
+/// The call's future dropped while the sink waits: the volume is released from
+/// its guard, on the blocking pool, not left mounted.
+#[tokio::test]
+async fn a_call_cancelled_while_the_sink_waits_gives_the_volume_back() {
+    if staging_root().is_none() {
+        return;
+    }
+    let (ex, sink, root, storage, plan, _d) = with_sink(|_| Act::Hang).await;
+    let mut c = call(&storage, &plan, Default::default());
+    c.sink = Some(&*sink);
+    let cut = tokio::time::timeout(
+        Duration::from_secs(5),
+        ex.run_with_mounts(req(WRITES_A_FILE, "none"), c),
+    )
+    .await;
+    assert!(cut.is_err(), "still waiting on the sink when it was cut");
+    eventually_released(&ex, &root).await;
 }

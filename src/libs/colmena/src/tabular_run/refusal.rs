@@ -10,6 +10,11 @@ use crate::llm::domain::large_tabular::inert_text;
 
 pub const MIB: u64 = 1024 * 1024;
 
+/// Most files, and bytes, the tool may have returned in one conversation. Estimates
+/// (an output volume is 256 MiB and a call keeps at most 8 files of 64 MiB).
+pub const SESSION_MAX_FILES: usize = 40;
+pub const SESSION_MAX_BYTES: u64 = 512 * MIB;
+
 /// Longest table name echoed back to the model.
 const NAME_ECHO_CHARS: usize = 64;
 
@@ -63,6 +68,8 @@ pub enum Budget {
     Data { limit_bytes: u64 },
     /// One part file.
     Part { limit_bytes: u64 },
+    /// The one table asked for is over the call's data limit by itself.
+    Table { limit_bytes: u64 },
     /// Calls with run mounts already in flight on the executor.
     Volumes,
 }
@@ -95,6 +102,9 @@ pub enum Unavailable {
     Registry,
     /// Staging or running failed for a reason that is not the model's.
     Executor,
+    /// The executor is set up in a way that can never work (an output size it
+    /// refuses): a configuration error, not a moment to wait out.
+    Misconfigured,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -122,6 +132,8 @@ pub enum RunRefusal {
     Invalid(Invalid),
     /// A read of the prepared copy from storage failed.
     Storage,
+    /// The conversation already holds as many returned files as it may.
+    SessionQuota,
     Unavailable(Unavailable),
 }
 
@@ -138,7 +150,31 @@ impl RunRefusal {
             Self::NoSuchTable { .. } => "large_tabular_no_such_table",
             Self::Invalid(_) => "large_tabular_invalid",
             Self::Storage => "large_tabular_storage",
+            Self::SessionQuota => "large_tabular_quota",
             Self::Unavailable(_) => "large_tabular_unavailable",
+        }
+    }
+
+    /// Whether asking again later can work. `false` means the same request will
+    /// fail the same way until something other than time changes (the file, the
+    /// request, the environment's setup); `true` means a moment or a retry may fix it.
+    pub fn retryable(&self) -> bool {
+        match self {
+            Self::NotEnabled
+            | Self::NeverPrepared
+            | Self::NoSuchTable { .. }
+            | Self::SessionQuota => false,
+            Self::NotPrepared | Self::StillPreparing { .. } | Self::Storage => true,
+            Self::PreparationFailed { final_failure, .. } => !final_failure,
+            // The cleanup is removing the copy; it will not come back by itself.
+            Self::BeingRemoved => false,
+            // Fewer tables, or none (one table alone), is a different request.
+            Self::OverBudget(Budget::Volumes) => true,
+            Self::OverBudget(_) => false,
+            // The record and the storage disagree, a part is missing: asking again
+            // reads the same record.
+            Self::Invalid(_) => false,
+            Self::Unavailable(u) => matches!(u, Unavailable::Registry | Unavailable::Executor),
         }
     }
 
@@ -185,6 +221,11 @@ impl RunRefusal {
                  name fewer tables with the `tables` argument",
                 limit_bytes / MIB
             ),
+            Self::OverBudget(Budget::Table { limit_bytes }) => format!(
+                "this table alone is larger than the {} MiB one call can take, so it cannot be \
+                 analysed whole here; a smaller export of the file is needed",
+                limit_bytes / MIB
+            ),
             Self::OverBudget(Budget::Part { limit_bytes }) => format!(
                 "a part of the prepared tables is over its {} MiB limit, so it cannot be used",
                 limit_bytes / MIB
@@ -203,6 +244,12 @@ impl RunRefusal {
             Self::Storage => {
                 "the prepared tables could not be read from storage; retry later".to_string()
             }
+            Self::SessionQuota => format!(
+                "this conversation already holds the most files this tool may return ({} files or {} MiB); \
+                 return results in the answer instead of as files",
+                SESSION_MAX_FILES,
+                SESSION_MAX_BYTES / MIB
+            ),
             Self::Unavailable(Unavailable::NoStagingRoot) => {
                 "this environment has no staging area for large-file analysis".to_string()
             }
@@ -215,6 +262,9 @@ impl RunRefusal {
             Self::Unavailable(Unavailable::Registry) => {
                 "the preparation record could not be read; retry later".to_string()
             }
+            Self::Unavailable(Unavailable::Misconfigured) => {
+                "large-file analysis is misconfigured on this executor and cannot run here".to_string()
+            }
             Self::Unavailable(Unavailable::Executor) => {
                 "large-file analysis could not be started; retry later".to_string()
             }
@@ -226,6 +276,7 @@ impl RunRefusal {
         serde_json::json!({
             "error": self.message(),
             "code": self.code(),
+            "retryable": self.retryable(),
             "source": "execution",
         })
     }
@@ -260,6 +311,7 @@ mod tests {
             RunRefusal::OverBudget(Budget::Volumes),
             RunRefusal::NoSuchTable { name: "x".into() },
             RunRefusal::Storage,
+            RunRefusal::SessionQuota,
         ];
         for reason in [
             FailureReason::Time,
@@ -292,6 +344,7 @@ mod tests {
             Unavailable::Unsupported,
             Unavailable::Registry,
             Unavailable::Executor,
+            Unavailable::Misconfigured,
         ] {
             all.push(RunRefusal::Unavailable(u));
         }
@@ -380,5 +433,55 @@ mod tests {
             "large_tabular_failed"
         );
         assert_eq!(RunRefusal::Storage.code(), "large_tabular_storage");
+    }
+
+    /// Every case says whether asking again can work, and the table is the one
+    /// the model is told: transient things are retryable, things that will fail
+    /// the same way until something else changes are not.
+    #[test]
+    fn every_refusal_says_whether_to_retry() {
+        let yes = [
+            RunRefusal::NotPrepared,
+            RunRefusal::StillPreparing { percent: Some(3) },
+            RunRefusal::PreparationFailed {
+                reason: FailureReason::Time,
+                final_failure: false,
+            },
+            RunRefusal::OverBudget(Budget::Volumes),
+            RunRefusal::Storage,
+            RunRefusal::Unavailable(Unavailable::Registry),
+            RunRefusal::Unavailable(Unavailable::Executor),
+        ];
+        let no = [
+            RunRefusal::NotEnabled,
+            RunRefusal::NeverPrepared,
+            RunRefusal::BeingRemoved,
+            RunRefusal::NoSuchTable { name: "x".into() },
+            RunRefusal::PreparationFailed {
+                reason: FailureReason::Time,
+                final_failure: true,
+            },
+            RunRefusal::OverBudget(Budget::Data { limit_bytes: 1 }),
+            RunRefusal::OverBudget(Budget::Part { limit_bytes: 1 }),
+            RunRefusal::OverBudget(Budget::Table { limit_bytes: 1 }),
+            RunRefusal::Invalid(Invalid::Record),
+            RunRefusal::Invalid(Invalid::Parts),
+            RunRefusal::Unavailable(Unavailable::NoStagingRoot),
+            RunRefusal::Unavailable(Unavailable::MountsDisabled),
+            RunRefusal::Unavailable(Unavailable::Unsupported),
+            RunRefusal::Unavailable(Unavailable::Misconfigured),
+        ];
+        for r in &yes {
+            assert!(r.retryable(), "{r:?}");
+            assert_eq!(r.to_tool_error()["retryable"], true);
+        }
+        for r in &no {
+            assert!(!r.retryable(), "{r:?}");
+            assert_eq!(r.to_tool_error()["retryable"], false);
+        }
+        // `retryable` is an exhaustive match: a new refusal cannot be left unclassified.
+        for r in every_refusal() {
+            let _ = r.retryable();
+        }
     }
 }
