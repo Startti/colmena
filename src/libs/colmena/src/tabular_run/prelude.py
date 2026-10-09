@@ -15,7 +15,9 @@ _CT_MIB = 1024 * 1024
 # Bytes a decoded column takes in pandas relative to its Arrow size, by type
 # (docs/developer_guide/54_tabular_prepare.md, Manifest). Strings add the Python
 # object header per row.
-_CT_FACTOR = {'int': 1, 'float': 1, 'bool': 8, 'date': 2, 'timestamp': 1, 'string': 1}
+# Reads force `date_as_object=False` (a date is 8 bytes in pandas, not a Python object) and
+# nullable booleans (a value and a mask byte each), so these factors are what the frame is.
+_CT_FACTOR = {'int': 1, 'float': 1, 'bool': 16, 'date': 2, 'timestamp': 1, 'string': 1}
 _CT_STRING_OVERHEAD = 57
 # Arrow's table and the pandas frame built from it exist together for a moment.
 _CT_PEAK = 2
@@ -82,13 +84,39 @@ def _ct_filters(filters):
     return filters
 
 
-def _ct_read(t, part, columns, filters):
+def _ct_pyarrow():
+    # pyarrow is loaded by pandas; it is reached through pandas' own optional-dependency
+    # helper, so no import statement names it. The jail, not this, is the boundary.
     import pandas as pd
-    path = '%s/t%d/part-%05d.parquet' % (_ct_data_dir, t['index'], part)
-    return pd.read_parquet(
-        path, columns=columns, filters=filters,
+    opt = pd.compat._optional.import_optional_dependency
+    return pd, opt('pyarrow'), opt('pyarrow.parquet')
+
+
+def _ct_frame(pd, pa, table):
+    # No Python date objects (about ten times the memory) and no object columns for
+    # booleans with nulls.
+    return table.to_pandas(date_as_object=False, types_mapper={pa.bool_(): pd.BooleanDtype()}.get)
+
+
+def _ct_path(t, part):
+    return '%s/t%d/part-%05d.parquet' % (_ct_data_dir, t['index'], part)
+
+
+def _ct_read(t, part, columns, filters):
+    pd, pa, pq = _ct_pyarrow()
+    table = pq.read_table(
+        _ct_path(t, part), columns=columns, filters=filters,
         use_threads=False, pre_buffer=False, memory_map=False,
     )
+    return _ct_frame(pd, pa, table)
+
+
+def _ct_head(t, n, columns):
+    # Only the rows asked for are decoded: the first batch of `n` rows, not the whole part.
+    pd, pa, pq = _ct_pyarrow()
+    for batch in pq.ParquetFile(_ct_path(t, 0)).iter_batches(batch_size=n, columns=columns, use_threads=False):
+        return _ct_frame(pd, pa, pa.Table.from_batches([batch])).head(n)
+    return _ct_frame(pd, pa, pq.read_table(_ct_path(t, 0), columns=columns)).head(n)
 
 
 class _Table:
@@ -119,7 +147,7 @@ class _Table:
         if not isinstance(n, int) or n < 1 or n > 1000:
             _ct_fail("`n` must be an integer from 1 to 1000")
         cols = _ct_columns(self._t, columns, False)
-        return _ct_read(self._t, 0, cols, None).head(n)
+        return _ct_head(self._t, n, cols)
 
     def read(self, columns=None, filters=None):
         t = self._t
@@ -141,6 +169,16 @@ class _Table:
         t = self._t
         cols = _ct_columns(t, columns, False)
         filters = _ct_filters(filters)
+        # One part at a time, but every column of it when none are named: estimate
+        # that, so a table wide enough to overflow a part is refused with the way out.
+        per_part = _ct_estimate(t, cols or [c['name'] for c in t['columns']]) // max(t['parts'], 1)
+        if per_part > _ct_read_max:
+            _ct_fail(
+                "one part of `%s` is too large to load with %s (about %d MiB; limit %d MiB). "
+                "Select fewer columns with `tables['%s'].parts(columns=[...])`."
+                % (t['name'], 'all its columns' if cols is None else 'these columns',
+                   -(-per_part // _CT_MIB), _ct_read_max // _CT_MIB, t['name'])
+            )
         for p in range(t['parts']):
             yield _ct_read(t, p, cols, filters)
 
@@ -189,7 +227,11 @@ class _Tables:
         return _Table(self._find(name))
 
     def __contains__(self, name):
-        return name in self.names
+        try:
+            self._find(name)
+            return True
+        except LargeTableError:
+            return False
 
     def __len__(self):
         return len(self._tables)
@@ -232,9 +274,13 @@ def _ct_file_size(path):
     # The size of a file without reading it: a read-only map, which needs no open().
     import numpy as _np
     try:
-        return int(_np.memmap(path, dtype='uint8', mode='r').shape[0])
+        size = int(_np.memmap(path, dtype='uint8', mode='r').shape[0])
     except (ValueError, OSError):
-        return 0
+        size = 0
+    if size == 0:
+        # A limit that cannot be checked is not a limit that is met.
+        _ct_fail("emit_table: could not check the size of the file just written, so it is not returned")
+    return size
 
 
 def emit_table(data, name, format='csv'):
@@ -243,7 +289,7 @@ def emit_table(data, name, format='csv'):
     a size; a file over a limit is refused here, and dropped by the reader anyway."""
     if format not in ('csv', 'parquet'):
         _ct_fail("emit_table: format must be 'csv' or 'parquet'")
-    if not isinstance(name, str) or not _CT_OUT_NAME.match(name):
+    if not isinstance(name, str) or not _CT_OUT_NAME.fullmatch(name):
         _ct_fail("emit_table: name must be 1 to 48 letters, digits, '_' or '-'")
     if len(_ct_emitted) >= _ct_out_files:
         _ct_fail("emit_table: at most %d files can be returned" % _ct_out_files)

@@ -96,6 +96,11 @@ pub struct StoreSink {
     session_id: Option<String>,
     agent_session_id: Option<String>,
     stored: Mutex<Vec<Emitted>>,
+    /// One store may take this long, and all of a call's together `total`
+    /// (counted from the first).
+    per_store: std::time::Duration,
+    total: std::time::Duration,
+    begun: Mutex<Option<tokio::time::Instant>>,
 }
 
 impl StoreSink {
@@ -109,7 +114,20 @@ impl StoreSink {
             session_id,
             agent_session_id,
             stored: Mutex::new(vec![]),
+            per_store: std::time::Duration::from_secs(60),
+            total: super::runtime::COLLECT_BUDGET,
+            begun: Mutex::new(None),
         }
+    }
+
+    /// Different limits (the tests).
+    pub fn with_limits(
+        mut self,
+        per_store: std::time::Duration,
+        total: std::time::Duration,
+    ) -> Self {
+        (self.per_store, self.total) = (per_store, total);
+        self
     }
 
     /// What was stored, in the order it was accepted, and the guard that deletes
@@ -168,9 +186,20 @@ impl Drop for StoreSink {
 impl OutputSink for StoreSink {
     async fn accept(&self, file: OutFile) -> Result<(), RunRefusal> {
         let (name, size, mime) = (file.name.clone(), file.size, file.format.mime());
-        let stored = self
-            .storage
-            .store_stream(StoreStreamRequest {
+        // A storage that stalls or trickles holds nothing past its limit: one store
+        // has a time, and all of a call's together have one.
+        let begun = *self
+            .begun
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get_or_insert_with(tokio::time::Instant::now);
+        let left = (begun + self.total).saturating_duration_since(tokio::time::Instant::now());
+        if left.is_zero() {
+            return Err(RunRefusal::Storage);
+        }
+        let stored = tokio::time::timeout(
+            self.per_store.min(left),
+            self.storage.store_stream(StoreStreamRequest {
                 stream: Box::pin(chunks(file.into_file(), size)),
                 size_hint: Some(size),
                 mime_type: mime.to_string(),
@@ -178,9 +207,11 @@ impl OutputSink for StoreSink {
                 session_id: self.session_id.clone(),
                 agent_session_id: self.agent_session_id.clone(),
                 placement: StorePlacement::Generated,
-            })
-            .await
-            .map_err(|_| RunRefusal::Storage)?;
+            }),
+        )
+        .await
+        .map_err(|_| RunRefusal::Storage)?
+        .map_err(|_| RunRefusal::Storage)?;
         self.stored
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -309,5 +340,55 @@ mod tests {
         assert_eq!(err, RunRefusal::Storage);
         assert!(sink.take().is_empty());
         assert!(storage.got.lock().unwrap().is_empty());
+    }
+
+    /// A storage that stalls on a store, or takes longer in all than the call's
+    /// collection may, is cut off; what was stored before is kept for the guard.
+    #[tokio::test]
+    async fn a_store_that_stalls_or_overruns_the_total_is_cut_off() {
+        use std::time::Duration;
+        struct Stalls(Capturing);
+        #[async_trait]
+        impl OutputStorageRepository for Stalls {
+            async fn store(&self, r: StoreRequest) -> Result<StoredOutput, StorageError> {
+                self.0.store(r).await
+            }
+            async fn read(&self, k: &str) -> Result<StoredBytes, StorageError> {
+                self.0.read(k).await
+            }
+            async fn read_stream(&self, k: &str) -> Result<StoredStream, StorageError> {
+                self.0.read_stream(k).await
+            }
+            async fn delete(&self, k: &str) -> Result<(), StorageError> {
+                self.0.delete(k).await
+            }
+            async fn store_stream(
+                &self,
+                req: StoreStreamRequest,
+            ) -> Result<StoredOutput, StorageError> {
+                if req.filename.starts_with("slow") {
+                    tokio::time::sleep(Duration::from_secs(30)).await;
+                }
+                self.0.store_stream(req).await
+            }
+        }
+        let d = tempfile::tempdir().unwrap();
+        let sink = StoreSink::new(Arc::new(Stalls(Capturing::default())), None, None)
+            .with_limits(Duration::from_millis(200), Duration::from_secs(5));
+        let started = std::time::Instant::now();
+        let err = sink
+            .accept(one(d.path(), "slow.csv", b"x"))
+            .await
+            .unwrap_err();
+        assert_eq!(err, RunRefusal::Storage);
+        assert!(started.elapsed() < Duration::from_secs(3));
+        // The total: a first store eats the budget, the second has nothing left.
+        let sink = StoreSink::new(Arc::new(Stalls(Capturing::default())), None, None)
+            .with_limits(Duration::from_secs(5), Duration::from_millis(1));
+        tokio::time::sleep(Duration::from_millis(5)).await;
+        let _ = sink.accept(one(d.path(), "a.csv", b"x")).await;
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        let err = sink.accept(one(d.path(), "b.csv", b"y")).await.unwrap_err();
+        assert_eq!(err, RunRefusal::Storage);
     }
 }

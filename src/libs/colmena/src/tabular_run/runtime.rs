@@ -12,7 +12,7 @@ use super::outputs::{OutputGuard, StoreSink};
 use super::prelude::{prelude_inputs, tables_summary, unwrap_emitted, wrap_large_code};
 use super::refusal::{FailureReason, RunRefusal, Unavailable};
 use super::stage::StageLimits;
-use super::verify::verify_prepared;
+use super::verify::{still_current, verify_prepared};
 use crate::dag_engine::domain::python_executor::{PythonRunError, PythonRunRequest};
 use crate::dag_engine::infrastructure::python_exec::protocol::CRASHED_MESSAGE;
 use crate::storage::domain::OutputStorageRepository;
@@ -22,6 +22,34 @@ use crate::tabular_prepare::{EnsureOutcome, PrepareError, TabularPrepare};
 use serde_json::Value;
 use std::sync::Arc;
 use std::time::Duration;
+
+/// The phases of a large call and the time each may take. They add up to less than
+/// the call's clock (`PHASE_SUM_MAX`, 900 s, the progress ticker's longest), with
+/// the rest as slack for the waits between them: preparation 180 s, staging the
+/// data 150 s, the code 300 s, reading back and storing the outputs 150 s.
+pub const PREPARE_BUDGET: Duration = Duration::from_secs(180);
+pub const STAGE_BUDGET: Duration = Duration::from_secs(150);
+pub const RUN_BUDGET: Duration = Duration::from_secs(300);
+pub const COLLECT_BUDGET: Duration = Duration::from_secs(150);
+
+/// Which phase a call is in, for the answer that says where it was cut.
+#[derive(Debug, Default)]
+pub struct PhaseCell(std::sync::atomic::AtomicU8);
+
+impl PhaseCell {
+    fn set(&self, phase: u8) {
+        self.0.store(phase, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Words for the model: where the call was.
+    pub fn describe(&self) -> &'static str {
+        match self.0.load(std::sync::atomic::Ordering::SeqCst) {
+            1 => "while preparing the file",
+            2 => "while staging the data, running the code or reading back its files",
+            _ => "before it started",
+        }
+    }
+}
 
 /// What one call is allowed.
 #[derive(Debug, Clone, Copy)]
@@ -37,9 +65,12 @@ pub struct RuntimeConfig {
 impl Default for RuntimeConfig {
     fn default() -> Self {
         Self {
-            prepare_wait: Duration::from_secs(240),
-            heavy_timeout: Duration::from_secs(300),
-            limits: StageLimits::default(),
+            prepare_wait: PREPARE_BUDGET,
+            heavy_timeout: RUN_BUDGET,
+            limits: StageLimits {
+                total_time: STAGE_BUDGET,
+                ..StageLimits::default()
+            },
             out_mb: OUT_MIB,
         }
     }
@@ -59,6 +90,8 @@ pub struct LargeRunRequest {
     /// Where generated files belong, as for any attachment the engine stores.
     pub session_id: Option<String>,
     pub agent_session_id: Option<String>,
+    /// Updated as the call moves on, so a cut-off can say where it was.
+    pub phase: std::sync::Arc<PhaseCell>,
 }
 
 /// A file the code returned, stored and described.
@@ -195,12 +228,14 @@ impl LargeTabularRuntime {
     /// Runs the model's code over the prepared tables of `req`.
     pub async fn run(&self, req: LargeRunRequest) -> Result<LargeRunOutput, LargeRunError> {
         let refused = LargeRunError::Refused;
+        req.phase.set(1);
         self.ensure(&req).await.map_err(refused)?;
         let plan = verify_prepared(&*self.registry, &*self.storage, &req.source_key)
             .await
             .map_err(refused)?;
         let chosen = plan.select(&req.tables).map_err(refused)?;
         let timeout = self.config.heavy_timeout;
+        req.phase.set(2);
         let sink = StoreSink::new(
             self.storage.clone(),
             req.session_id.clone(),
@@ -222,6 +257,16 @@ impl LargeTabularRuntime {
         };
         match self.executor.run_with_mounts(call, mounted).await {
             Ok(done) => {
+                // The file may have been prepared again, or its copy removed, while
+                // the call ran: what the code read could mix two generations, and
+                // the row is only read at the start and the end. A changed copy is
+                // not answered (the sink drops, deleting the files it stored). A
+                // registry that cannot be read says nothing either way.
+                if still_current(&*self.registry, &req.source_key, plan.generation()).await
+                    == Some(false)
+                {
+                    return Err(refused(RunRefusal::CopyChanged));
+                }
                 let (result, reports) = unwrap_emitted(done.result.output.unwrap_or(Value::Null));
                 let (stored, guard) = sink.take_guarded();
                 let emitted = stored
@@ -297,6 +342,7 @@ mod tests {
             tables: tables.iter().map(|s| s.to_string()).collect(),
             session_id: Some("s1".into()),
             agent_session_id: Some("a1".into()),
+            phase: Default::default(),
         }
     }
 
@@ -593,7 +639,7 @@ mod tests {
     #[test]
     fn the_defaults_are_the_designs_waits() {
         let c = RuntimeConfig::default();
-        assert_eq!(c.prepare_wait, Duration::from_secs(240));
+        assert_eq!(c.prepare_wait, Duration::from_secs(180));
         assert_eq!(c.heavy_timeout, Duration::from_secs(300));
         assert_eq!(c.out_mb, OUT_MIB);
     }
@@ -658,6 +704,45 @@ mod tests {
             *p.storage.deleted.lock().unwrap(),
             ["generated/a.csv"],
             "b.csv stays"
+        );
+    }
+
+    /// The file is prepared again (here: its row removed) while the code runs: the
+    /// answer is not given, it is retryable, and the files the code returned are
+    /// deleted.
+    #[tokio::test]
+    async fn a_copy_that_changes_while_the_call_runs_is_not_answered() {
+        let p = prepared(&[("sales", 1)], 4).await;
+        let exec = Recorder::ok_with_files(json!(1), &[("a.csv", b"1")]);
+        *exec.delay.lock().unwrap() = Some(Duration::from_millis(400));
+        let registry = p.registry.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            registry.delete(SOURCE).await.unwrap();
+        });
+        let err = runtime(&p, exec, true)
+            .run(request("pass", &[]))
+            .await
+            .unwrap_err();
+        assert_eq!(err, LargeRunError::Refused(RunRefusal::CopyChanged));
+        assert!(RunRefusal::CopyChanged.retryable());
+        settle().await;
+        assert_eq!(*p.storage.deleted.lock().unwrap(), ["generated/a.csv"]);
+    }
+
+    /// The phases fit under the call's clock, with room for the waits between them.
+    #[test]
+    fn the_phase_budgets_add_up_under_the_calls_clock() {
+        let sum = PREPARE_BUDGET + STAGE_BUDGET + RUN_BUDGET + COLLECT_BUDGET;
+        assert_eq!(sum, Duration::from_secs(780));
+        assert!(
+            sum < Duration::from_secs(900),
+            "{sum:?} against the ticker's longest bound"
+        );
+        let c = RuntimeConfig::default();
+        assert_eq!(
+            (c.prepare_wait, c.heavy_timeout, c.limits.total_time),
+            (PREPARE_BUDGET, RUN_BUDGET, STAGE_BUDGET)
         );
     }
 }

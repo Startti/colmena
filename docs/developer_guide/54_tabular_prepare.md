@@ -1536,7 +1536,7 @@ Using a handle as a DataFrame (`groupby`, `[...]`, `len`, iteration, any other a
 `ValueError`) saying how to read the table. There is no method that loads a whole table.
 
 The read estimate starts from the manifest's `in_memory_bytes` and applies the per-type multipliers of the table in
-[Manifest](#manifest-manifestrs) (bool x8, date x2, a string adds 57 bytes of Python object per row), then doubles it for the
+[Manifest](#manifest-manifestrs) (bool x16, date x2, a string adds 57 bytes of Python object per row), then doubles it for the
 moment Arrow's table and the pandas frame exist together. `READ_MAX_BYTES` (1,536 MiB, half of the heavy run's 3,072 MiB) and
 the factor of two are ESTIMATES: the design calibrates them against the spike's item 2 records, which were not re-run against
 this estimate. Reads call `pd.read_parquet(path, columns=, filters=, use_threads=False, pre_buffer=False, memory_map=False)`.
@@ -1835,3 +1835,56 @@ call is cut.
 - *Quota:* at most 40 files and 512 MiB returned by this tool in a conversation (`SESSION_MAX_FILES`, `SESSION_MAX_BYTES`, estimates), counted
   from the registry's rows with this tool's origin. At the quota a call is refused before it runs (`large_tabular_quota`, not retryable); a
   call that would cross it keeps none of its files, says so, and still returns its result.
+
+The remote client spools every output of a response and validates the whole of it (names, a repeated name in any case, sizes, the file
+count, nothing after the end) BEFORE the sink sees the first; a hostile or broken server gets nothing into the sink.
+
+### Wire limits, rates and hostile peers (review round)
+
+- *Frames:* the frame cap is 1 MiB (`HEADER_MAX`), checked on the SENDING side (`try_frame`, no unchecked `as u32`). The client checks the call
+  header before anything else: code and inputs that do not fit are a model-readable error ("shorten the code"), never "unavailable". The server
+  cuts the response header to fit (stdout 64 KiB, the result's JSON 512 KiB, with a marker), so a completed run is never reported as a failure
+  to answer.
+- *Rates:* an upload and a download must keep 256 KiB/s once a 15 s grace has passed (`Reader::with_min_rate`, and the same rule on the
+  server's sender). A peer that trickles bytes under the 30 s idle limit no longer holds a volume for the whole 240 s. Remaining exposure,
+  stated: a token holder can still hold a volume for 15 s plus as long as it keeps above 256 KiB/s up to the 240 s limit, and with two volumes
+  in the budget two such calls fill it; the answer to the rest is the authentication, not a larger rule.
+- *The probe mounts nothing:* it is answered from the budget alone (`volumes < 2` and room for `out_mb`), so it can neither take a share a
+  real call needs nor leave one to be released later.
+- *Distinct answers:* a template that is not ready is `executor_not_ready` (retryable), not `mounts_disabled`; a staging volume whose I/O fails
+  is `volume_io`; the template's reason is cleaned with the same charset as the other path; `collect_out` runs on the blocking pool.
+- *The client bounds every wait:* a refusal body (the probe's too) is read to 16 KiB within the idle limit; the whole call has an outer limit
+  (probe + upload + run + download + idle); a redirect is not followed.
+- *Tests without privileges* (they run in ordinary CI): a hostile-server suite against the real client (endless refusal bodies on the probe and
+  on the call, a redirect, an oversized response frame, code too large for a frame, plus the spooled-response cases), and the upload limits
+  of the server's `receive` (total and part caps on the declaration, `MAX_FILES_IN`, a table index out of range, an oversized frame) and its
+  header clamps. Not possible without privileges: building the router, because `AppState` holds the concrete `SubprocessExecutor`, which
+  needs root; the 401 proof on the probe (no template start, no volume) stays in the privileged suite.
+
+### Phase budgets, a stalled storage, and a copy that changes
+
+- *Phase budgets add up under the call's clock:* preparation 180 s, staging the data 150 s, the code 300 s, reading back and storing the
+  outputs 150 s (780 s) under the 900 s ticker bound, the rest being slack for the waits between them. The cut-off answer says where the
+  call was: "while preparing the file", or "while staging the data, running the code or reading back its files" (the executor does not
+  report finer phases to the runtime).
+- *Every storage wait is bounded:* the manifest read (idle limit per chunk, 30 s for the whole read), each part (idle per chunk, the stage
+  deadline), each store of an output (60 s, and 150 s for all of a call's). A storage that stalls or trickles ends the call with a retryable
+  `Storage` refusal instead of holding the volume.
+- *A copy that changes while the call runs is not answered.* The verified plan carries the row's generation (manifest key, layout version,
+  attempts, last write, recorded size); after the run the registry is read again and a row that is gone, no longer ready or of another
+  generation makes the answer `CopyChanged` (retryable) and the files the code returned are deleted. Decision stated: the check cannot sit
+  between staging and the run (both happen inside the executor), so a re-preparation DURING staging can still let the code read a mix of
+  generations, and then its answer is not given; the mix is never answered. A registry that cannot be read says nothing either way.
+  `Invalid::Parts` no longer claims to compare the bytes read with the row: the row records no part sizes.
+
+### Prelude reads, corrected (review round)
+
+- Reads go through pyarrow reached by pandas' own optional-dependency helper (no import statement names it; the jail, not the validator, is the
+  boundary, and the prelude's namespace already exposes pandas file readers) so they can decode with `date_as_object=False` (a date is
+  `datetime64[ns]`, 8 bytes, not a Python object) and nullable booleans (`boolean`, a byte and a mask byte). The estimate's factors match
+  what the frame is: bool x16, date x2.
+- `head(n)` decodes ONE batch of `n` rows (`ParquetFile.iter_batches`), not the whole part of up to 500,000 rows; `parts()` with no columns
+  is estimated per part and refused with the way out when one part is too wide to load.
+- `emit_table` names are matched with `fullmatch` (a trailing newline no longer passes); a size that cannot be read (the file is missing, or
+  empty after a write) raises an error and the file is not returned, instead of reading as 0 bytes under every limit; `in` follows the same
+  case rule as `tables[name]`.

@@ -18,8 +18,9 @@ use super::collect::{collect_out, CollectLimits};
 use super::stage::{create_file, make_dir, StageLimits};
 use super::volume::Volume;
 use super::wire::{
-    frame, CallHeader, Dropped, FileEntry, OutEntry, Reader, Refusal, ResponseHeader, RunStatus,
-    HEADER_TIMEOUT, IDLE_TIMEOUT, MAX_FILES_IN, TRANSFER_MAX, WIRE_V2,
+    try_frame, CallHeader, Dropped, FileEntry, OutEntry, Reader, Refusal, ResponseHeader,
+    RunStatus, HEADER_TIMEOUT, IDLE_TIMEOUT, MAX_FILES_IN, MIN_BYTES_PER_SEC, OUTPUT_WIRE_MAX,
+    RATE_GRACE, STDOUT_WIRE_MAX, TRANSFER_MAX, WIRE_V2,
 };
 use crate::dag_engine::domain::python_executor::{PythonRunError, PythonRunRequest};
 use crate::dag_engine::infrastructure::python_exec::server::AppState;
@@ -133,6 +134,76 @@ where
     Ok(total)
 }
 
+/// The deadline a call may have: what it asked for, never above the server's cap.
+fn call_timeout(asked_ms: u64, max: Duration) -> Duration {
+    Duration::from_millis(asked_ms).min(max)
+}
+
+/// Whether the executor's budget has room for a volume of `out_mb` now. A guess
+/// for a probe (a volume taken a moment later still wins), made without mounting.
+fn would_stage(
+    exec: &crate::dag_engine::infrastructure::python_exec::subprocess::SubprocessExecutor,
+    out_mb: u64,
+) -> bool {
+    use crate::dag_engine::infrastructure::python_exec::staging::{
+        STAGED_OUT_MIB_MAX, STAGED_VOLUMES_MAX,
+    };
+    let (volumes, mib) = exec.staged_in_flight();
+    volumes < STAGED_VOLUMES_MAX && mib.saturating_add(out_mb) <= STAGED_OUT_MIB_MAX
+}
+
+/// How a reason `mounts_unavailable` gave becomes an answer. The reason is
+/// cleaned with the charset every other path uses (letters, digits, `_`, 64): the
+/// template's word is not trusted to be plain. A template that is not ready is
+/// the executor's moment, not a decision to turn mounts off.
+fn mounts_refusal(reason: &str) -> (StatusCode, &'static str, Option<String>) {
+    let plain = !reason.is_empty()
+        && reason.len() <= 64
+        && reason
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_');
+    match (reason, plain) {
+        ("no_staging_root", _) => (StatusCode::NOT_IMPLEMENTED, "no_staging_root", None),
+        ("template_not_ready", _) => (StatusCode::SERVICE_UNAVAILABLE, "executor_not_ready", None),
+        (r, true) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "mounts_disabled",
+            Some(r.to_string()),
+        ),
+        _ => (StatusCode::SERVICE_UNAVAILABLE, "mounts_disabled", None),
+    }
+}
+
+/// The response header made to fit a frame: stdout and the result are cut, and the
+/// run is still reported as the run it was, never as a failure to answer.
+fn fit_header(head: &mut ResponseHeader) {
+    if head.stdout.len() > STDOUT_WIRE_MAX {
+        let mut end = STDOUT_WIRE_MAX;
+        while !head.stdout.is_char_boundary(end) {
+            end -= 1;
+        }
+        head.stdout.truncate(end);
+        head.stdout.push_str("\n[truncated]");
+    }
+    if let Some(output) = &head.output {
+        if output.to_string().len() > OUTPUT_WIRE_MAX {
+            head.output = Some(serde_json::Value::String(
+                "[the result was too large to return: aggregate it or write it with emit_table]"
+                    .into(),
+            ));
+        }
+    }
+    if let Some(m) = &head.message {
+        if m.len() > STDOUT_WIRE_MAX {
+            let mut end = STDOUT_WIRE_MAX;
+            while !m.is_char_boundary(end) {
+                end -= 1;
+            }
+            head.message = Some(m[..end].to_string());
+        }
+    }
+}
+
 /// The reason out of the executor's refusal text, when it is that refusal.
 fn mounts_disabled_reason(text: &str) -> Option<String> {
     let rest = text
@@ -164,18 +235,18 @@ pub async fn run_mounts(State(st): State<AppState>, req: Request) -> Response {
     let id = request_id(req.headers());
     // Refused before a byte of data is read.
     if let Some(reason) = st.exec.mounts_unavailable().await {
-        let (code, refusal) = match reason.as_str() {
-            "no_staging_root" => (StatusCode::NOT_IMPLEMENTED, "no_staging_root"),
-            _ => (StatusCode::SERVICE_UNAVAILABLE, "mounts_disabled"),
-        };
+        let (code, refusal, reason) = mounts_refusal(&reason);
         tracing::info!(target: T_PYTHON_EXEC, request_id = %id, outcome = refusal, "python serve mounts run");
-        return refuse(code, refusal, Some(reason), false);
+        return refuse(code, refusal, reason, false);
     }
+    // A peer that trickles under the idle limit still holds a volume: past a
+    // grace it must keep a minimum rate.
     let mut reader = Reader::new(
         req.into_body().into_data_stream(),
         IDLE_TIMEOUT,
         TRANSFER_MAX,
-    );
+    )
+    .with_min_rate(MIN_BYTES_PER_SEC, RATE_GRACE);
     let header: CallHeader = match tokio::time::timeout(HEADER_TIMEOUT, reader.json()).await {
         Ok(Ok(h)) => h,
         Ok(Err(e)) => return wire_failure(e),
@@ -187,6 +258,14 @@ pub async fn run_mounts(State(st): State<AppState>, req: Request) -> Response {
     {
         return bad(StatusCode::BAD_REQUEST, "bad_request");
     }
+    if header.probe {
+        // Answered from the budget alone: no volume is mounted, so a probe can neither
+        // take a share a real call needs nor leave one to be released later.
+        return match would_stage(&st.exec, header.out_mb) {
+            true => StatusCode::NO_CONTENT.into_response(),
+            false => refuse(StatusCode::SERVICE_UNAVAILABLE, "busy", None, true),
+        };
+    }
     let staged = match st.exec.stage_call(header.out_mb) {
         Ok(s) => s,
         Err(StageError::OverBudget { .. }) => {
@@ -196,14 +275,10 @@ pub async fn run_mounts(State(st): State<AppState>, req: Request) -> Response {
         Err(StageError::NoStagingRoot) => {
             return refuse(StatusCode::NOT_IMPLEMENTED, "no_staging_root", None, false)
         }
-        Err(_) => return refuse(StatusCode::SERVICE_UNAVAILABLE, "busy", None, true),
+        // The volume could not be made (the staging volume's I/O): not "busy".
+        Err(_) => return refuse(StatusCode::SERVICE_UNAVAILABLE, "volume_io", None, false),
     };
     let volume = Volume::new(staged);
-    if header.probe {
-        // Would be taken now: the volume is given back and nothing is read or run.
-        drop(volume);
-        return StatusCode::NO_CONTENT.into_response();
-    }
     let data_dir = volume.get().data_dir();
     let received = match receive(&mut reader, &data_dir, StageLimits::default()).await {
         Ok(n) => n,
@@ -212,7 +287,7 @@ pub async fn run_mounts(State(st): State<AppState>, req: Request) -> Response {
             return response;
         }
     };
-    let timeout = Duration::from_millis(header.timeout_ms).min(st.max_timeout);
+    let timeout = call_timeout(header.timeout_ms, st.max_timeout);
     let run = PythonRunRequest {
         code: header.code,
         mode: header.mode,
@@ -238,7 +313,12 @@ pub async fn run_mounts(State(st): State<AppState>, req: Request) -> Response {
             head.stdout = done.stdout;
             // The child is dead and the volume still mounted: read what it wrote.
             let out_dir = volume.get().out_dir();
-            match collect_out(&out_dir, CollectLimits::default()) {
+            let listing = tokio::task::spawn_blocking(move || {
+                collect_out(&out_dir, CollectLimits::default())
+            })
+            .await
+            .unwrap_or_else(|_| Err(std::io::Error::other("collection panicked")));
+            match listing {
                 Ok(found) => {
                     head.too_many_entries = found.too_many_entries;
                     head.dropped = found
@@ -295,7 +375,23 @@ pub async fn run_mounts(State(st): State<AppState>, req: Request) -> Response {
         files = files.len(), duration_ms = started.elapsed().as_millis() as u64,
         "python serve mounts run"
     );
-    let header_bytes = frame(&serde_json::to_vec(&head).unwrap_or_default());
+    fit_header(&mut head);
+    let header_bytes = match serde_json::to_vec(&head)
+        .map_err(|_| ())
+        .and_then(|j| try_frame(&j).map_err(|_| ()))
+    {
+        Ok(b) => b,
+        // Cannot happen after `fit_header` (fixed fields, capped sections); if it did,
+        // the run is not reported as completed.
+        Err(()) => {
+            return refuse(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "bad_request",
+                None,
+                false,
+            )
+        }
+    };
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<Bytes, std::io::Error>>(2);
     // The task owns the volume until the last byte is sent, or the client is gone.
     tokio::spawn(async move {
@@ -306,7 +402,9 @@ pub async fn run_mounts(State(st): State<AppState>, req: Request) -> Response {
                 Ok(Ok(()))
             )
         };
-        let deadline = tokio::time::Instant::now() + TRANSFER_MAX;
+        let begun = tokio::time::Instant::now();
+        let deadline = begun + TRANSFER_MAX;
+        let mut sent_bytes = 0u64;
         if !send(Ok(header_bytes)).await {
             return;
         }
@@ -328,7 +426,16 @@ pub async fn run_mounts(State(st): State<AppState>, req: Request) -> Response {
                 };
                 buf.truncate(n);
                 left -= n as u64;
-                if tokio::time::Instant::now() >= deadline || !send(Ok(Bytes::from(buf))).await {
+                // A reader slower than the minimum rate (past the grace) holds the volume
+                // for the whole transfer limit: it is cut off like a slow uploader.
+                sent_bytes += n as u64;
+                let elapsed = begun.elapsed();
+                let too_slow = elapsed > RATE_GRACE
+                    && (sent_bytes as f64) < elapsed.as_secs_f64() * MIN_BYTES_PER_SEC as f64;
+                if too_slow
+                    || tokio::time::Instant::now() >= deadline
+                    || !send(Ok(Bytes::from(buf))).await
+                {
                     return;
                 }
             }
@@ -388,5 +495,191 @@ mod tests {
         h.insert("x-colmena-request-id", "a b;c-d_1".parse().unwrap());
         assert_eq!(request_id(&h), "abc-d_1");
         assert_eq!(request_id(&axum::http::HeaderMap::new()), "-");
+    }
+
+    /// The template's word is cleaned before it is passed on, and a template that
+    /// is not ready is not "mounts disabled".
+    #[test]
+    fn a_mounts_unavailable_reason_becomes_the_right_distinct_answer() {
+        assert_eq!(mounts_refusal("no_staging_root").1, "no_staging_root");
+        assert_eq!(mounts_refusal("template_not_ready").1, "executor_not_ready");
+        let (code, refusal, reason) = mounts_refusal("arrow_pool_not_system");
+        assert_eq!(
+            (code, refusal, reason.as_deref()),
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "mounts_disabled",
+                Some("arrow_pool_not_system")
+            )
+        );
+        for hostile in [
+            "gs://secret/key",
+            "has space",
+            &"x".repeat(65),
+            "line\nbreak",
+            "",
+        ] {
+            let (_, refusal, reason) = mounts_refusal(hostile);
+            assert_eq!((refusal, reason), ("mounts_disabled", None), "{hostile:?}");
+        }
+    }
+
+    /// A response header that cannot fit a frame is cut to fit, and still reports
+    /// the run as what it was.
+    #[test]
+    fn a_response_header_with_huge_stdout_and_result_is_cut_to_fit_a_frame() {
+        let mut head = ResponseHeader {
+            v: WIRE_V2,
+            status: RunStatus::Ok,
+            message: Some("m".repeat(500_000)),
+            output: Some(serde_json::json!(vec!["x".repeat(100); 20_000])),
+            stdout: "é".repeat(200_000),
+            files: vec![],
+            dropped: vec![],
+            too_many_entries: false,
+        };
+        fit_header(&mut head);
+        assert_eq!(head.status, RunStatus::Ok);
+        assert!(head.stdout.ends_with("[truncated]") && head.stdout.len() <= STDOUT_WIRE_MAX + 20);
+        assert!(head
+            .output
+            .as_ref()
+            .unwrap()
+            .as_str()
+            .unwrap()
+            .contains("emit_table"));
+        let json = serde_json::to_vec(&head).unwrap();
+        assert!(try_frame(&json).is_ok(), "{} bytes", json.len());
+    }
+
+    // ---- what the server accepts of an upload, with no jail and no privileges ----
+
+    use super::super::wire::{end_frame, frame, HEADER_MAX};
+    use futures::stream;
+
+    async fn upload(
+        entries: &[(&str, u64)],
+        body: Vec<u8>,
+        limits: StageLimits,
+    ) -> Result<u64, StatusCode> {
+        let mut bytes = vec![];
+        for (path, size) in entries {
+            let e = serde_json::to_vec(&FileEntry {
+                path: path.to_string(),
+                size: *size,
+            })
+            .unwrap();
+            bytes.extend_from_slice(&frame(&e));
+            bytes.extend_from_slice(&body[..(*size as usize).min(body.len())]);
+        }
+        bytes.extend_from_slice(&end_frame());
+        let chunks: Vec<Result<Bytes, ()>> = bytes
+            .chunks(8192)
+            .map(|c| Ok(Bytes::copy_from_slice(c)))
+            .collect();
+        let mut reader = Reader::new(
+            stream::iter(chunks),
+            Duration::from_secs(2),
+            Duration::from_secs(20),
+        );
+        let dir = tempfile::tempdir().unwrap();
+        receive(&mut reader, dir.path(), limits)
+            .await
+            .map_err(|r| r.status())
+    }
+
+    #[tokio::test]
+    async fn an_upload_over_the_total_or_a_part_cap_is_413_before_its_bytes() {
+        let limits = StageLimits {
+            total_bytes: 100,
+            part_bytes: 60,
+            ..StageLimits::default()
+        };
+        assert_eq!(
+            upload(
+                &[("t0/part-00000.parquet", 60), ("t0/part-00001.parquet", 40)],
+                vec![1; 100],
+                limits
+            )
+            .await,
+            Ok(100)
+        );
+        assert_eq!(
+            upload(
+                &[("t0/part-00000.parquet", 60), ("t0/part-00001.parquet", 41)],
+                vec![1; 100],
+                limits
+            )
+            .await,
+            Err(StatusCode::PAYLOAD_TOO_LARGE)
+        );
+        assert_eq!(
+            upload(&[("t0/part-00000.parquet", 61)], vec![1; 100], limits).await,
+            Err(StatusCode::PAYLOAD_TOO_LARGE)
+        );
+        // The real defaults: a gibibyte in all.
+        let big = StageLimits::default();
+        assert_eq!(big.total_bytes, 1 << 30);
+        assert_eq!(
+            big.part_bytes * 8,
+            big.total_bytes,
+            "eight parts at the cap are the whole gibibyte"
+        );
+    }
+
+    #[tokio::test]
+    async fn too_many_files_a_table_index_out_of_range_and_an_oversized_frame_are_refused() {
+        let many: Vec<String> = (0..=MAX_FILES_IN)
+            .map(|i| format!("t0/part-{i:05}.parquet"))
+            .collect();
+        let entries: Vec<(&str, u64)> = many.iter().map(|p| (p.as_str(), 0)).collect();
+        assert_eq!(
+            upload(&entries, vec![], StageLimits::default()).await,
+            Err(StatusCode::BAD_REQUEST)
+        );
+        assert_eq!(
+            upload(
+                &[("t256/part-00000.parquet", 0)],
+                vec![],
+                StageLimits::default()
+            )
+            .await,
+            Err(StatusCode::BAD_REQUEST)
+        );
+        assert_eq!(
+            upload(
+                &[("t255/part-00000.parquet", 0)],
+                vec![],
+                StageLimits::default()
+            )
+            .await,
+            Ok(0)
+        );
+        let chunks: Vec<Result<Bytes, ()>> = vec![Ok(Bytes::from(
+            ((HEADER_MAX as u32) + 1).to_be_bytes().to_vec(),
+        ))];
+        let mut reader = Reader::new(
+            stream::iter(chunks),
+            Duration::from_secs(1),
+            Duration::from_secs(5),
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let err = receive(&mut reader, dir.path(), StageLimits::default())
+            .await
+            .unwrap_err();
+        assert_eq!(err.status(), StatusCode::BAD_REQUEST);
+    }
+
+    /// A call asks for its deadline and the server caps it; the output size is
+    /// validated by the executor's own bounds.
+    #[test]
+    fn a_deadline_and_an_output_size_over_the_servers_caps_are_clamped_or_refused() {
+        let max = Duration::from_secs(60);
+        assert_eq!(call_timeout(5_000, max), Duration::from_secs(5));
+        assert_eq!(call_timeout(u64::MAX, max), max);
+        for bad in [0, 1025, u64::MAX] {
+            assert!(!valid_out_mb(bad), "{bad}");
+        }
+        assert!(valid_out_mb(1) && valid_out_mb(1024));
     }
 }

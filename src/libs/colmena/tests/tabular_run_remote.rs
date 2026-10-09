@@ -205,6 +205,59 @@ async fn the_gate_is_the_v1_gate_a_missing_or_wrong_token_is_401() {
         assert_eq!(r.status(), 401, "{token:?}");
     }
     assert_eq!(s.exec.staged_in_flight(), (0, 0));
+    // The same for a probe: refused at the gate, before the handler (which would
+    // be the first to ask the executor anything) and with no volume taken.
+    let h = CallHeader {
+        v: WIRE_V2,
+        code: String::new(),
+        mode: "none".into(),
+        timeout_ms: 1000,
+        inputs: Map::new(),
+        out_mb: 4,
+        probe: true,
+    };
+    let mut probe = frame(&serde_json::to_vec(&h).unwrap()).to_vec();
+    probe.extend_from_slice(&end_frame());
+    for token in [None, Some("a-token-this-server-does-not-accept")] {
+        let r = post(&s.url, token, probe.clone().into())
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 401, "{token:?}");
+    }
+    assert_eq!(s.exec.staged_in_flight(), (0, 0));
+}
+
+/// A probe mounts nothing: the budget is unchanged while it is answered, and a
+/// half-full budget still answers it 204.
+#[tokio::test]
+async fn a_probe_takes_no_volume_and_is_answered_from_the_budget() {
+    if !enabled() {
+        return;
+    }
+    let s = serve(Some(staging_root())).await;
+    let h = CallHeader {
+        v: WIRE_V2,
+        code: String::new(),
+        mode: "none".into(),
+        timeout_ms: 1000,
+        inputs: Map::new(),
+        out_mb: 4,
+        probe: true,
+    };
+    let mut probe = frame(&serde_json::to_vec(&h).unwrap()).to_vec();
+    probe.extend_from_slice(&end_frame());
+    let one = s.exec.stage_call(4).unwrap();
+    for _ in 0..5 {
+        let r = post(&s.url, Some(TOKEN), probe.clone().into())
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 204);
+        assert_eq!(s.exec.staged_in_flight().0, 1, "only the volume held here");
+    }
+    drop(one);
+    released(&s).await;
 }
 
 /// A file declaring more than arrives, bytes after the end, a path that is not

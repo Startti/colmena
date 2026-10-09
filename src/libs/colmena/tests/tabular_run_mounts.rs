@@ -585,3 +585,57 @@ async fn a_call_cancelled_while_the_sink_waits_gives_the_volume_back() {
     assert!(cut.is_err(), "still waiting on the sink when it was cut");
     eventually_released(&ex, &root).await;
 }
+
+/// What the code leaves running does not survive into the read: the program starts
+/// a background process that keeps writing to `/out`, and returns. By the time the
+/// sink is given the file, nothing of the call's uid is left to change it (the
+/// executor confirmed that before returning the result).
+#[tokio::test]
+async fn nothing_of_the_call_is_still_running_when_its_output_is_read() {
+    if staging_root().is_none() {
+        return;
+    }
+    let root = staging_root().unwrap();
+    let ex = executor(Some(&root));
+    let (storage, plan, _d) = prepared(&[vec![b'a'; 10]]).await;
+    struct Watch(Mutex<Vec<(u64, u64)>>);
+    #[async_trait]
+    impl OutputSink for Watch {
+        async fn accept(&self, file: OutFile) -> Result<(), RunRefusal> {
+            let f = file.into_file();
+            let first = f.metadata().unwrap().len();
+            tokio::time::sleep(Duration::from_millis(400)).await;
+            self.0
+                .lock()
+                .unwrap()
+                .push((first, f.metadata().unwrap().len()));
+            Ok(())
+        }
+    }
+    // The sandbox does not let the code fork (the jail denies it), so what could
+    // outlive the answer is its own threads and whatever it spawns where it can:
+    // a writer thread is started and the program returns while it is writing.
+    let code = r#"
+import threading, time
+open('/out/grow.csv', 'w').write('x')
+def writer():
+    f = open('/out/grow.csv', 'a')
+    while True:
+        f.write('y' * 100)
+        f.flush()
+        time.sleep(0.02)
+threading.Thread(target=writer, daemon=True).start()
+time.sleep(0.2)
+output = 1
+"#;
+    let sink = Watch(Mutex::new(vec![]));
+    let mut c = call(&storage, &plan, Default::default());
+    c.sink = Some(&sink);
+    ex.run_with_mounts(req(code, "none"), c).await.unwrap();
+    let seen = sink.0.lock().unwrap().clone();
+    assert_eq!(seen.len(), 1);
+    assert_eq!(
+        seen[0].0, seen[0].1,
+        "the file grew while it was being read: {seen:?}"
+    );
+}

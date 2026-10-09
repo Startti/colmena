@@ -321,6 +321,11 @@ answers why the executor cannot take a call with run mounts (`no_staging_root`, 
 the mounts off), so a server can refuse before it reads a call's data; `RemoteExecutor::transport()` and the now crate-visible
 `authorized` and `endpoint` give the mounts transport the same HTTP client, base URL and credentials `/v1/run` uses.
 
+`SubprocessExecutor::run_staged_confirmed` is `run_staged` for a caller that is about to read the call's output volume as root: after the
+exchange it stops the call's uid again (blocking pool) and waits up to 2 s until `/proc` lists no process of that uid but zombies, and a
+result is returned only then; if the stop fails or something still runs, the call fails with an executor error and the result is discarded
+(the slot's own stop, which frees it, only logs when it fails). `tabular_run::local` uses it. `run_staged` and `run` are unchanged.
+
 The proofs are in `tests/tabular_run_mounts.rs` (Linux, root and `CAP_SYS_ADMIN`, enabled with
 `COLMENA_PYEXEC_JAIL_TESTS=1` like the other jail suites; each test prints a skip line otherwise): the code lists and reads
 the staged parts at `/data` and cannot write there; pandas reads a staged Parquet part in `restricted` mode with pyarrow
