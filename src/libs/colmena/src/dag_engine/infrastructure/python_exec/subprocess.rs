@@ -129,6 +129,13 @@ impl Drop for Template {
     }
 }
 
+impl Drop for SubprocessExecutor {
+    fn drop(&mut self) {
+        let mut steps = Vec::new();
+        self.teardown(&mut steps);
+    }
+}
+
 enum State {
     NotStarted,
     Running(Template),
@@ -151,13 +158,15 @@ pub struct SubprocessExecutor {
     stderr_dropped: Arc<AtomicU64>,
     /// Staged volumes in flight (dark behind `COLMENA_LARGE_TABULAR`).
     staging_budget: Arc<StagingBudget>,
-    /// The lock that makes this the only executor of its staging root, held for
-    /// this executor's life (see [`Self::new_for_serving`]).
-    _staging_lock: Option<StagingLock>,
     /// Why this executor cannot offer run mounts although a staging root is set,
     /// decided at start (the root's lock could not be taken for a reason other than
     /// "held"); `None` when it can.
     staging_unavailable: Option<&'static str>,
+    /// The lock that makes this the only executor of its staging root, held for
+    /// this executor's life (see [`Self::new_for_serving`]). The LAST field, and
+    /// released by [`Self::teardown`] after everything else: a successor must not
+    /// take the root while a call of this executor is still alive.
+    _staging_lock: Option<StagingLock>,
 }
 
 /// Returns its index to the pool when dropped, once every process still
@@ -372,6 +381,33 @@ impl SubprocessExecutor {
         self.staging_budget.in_flight()
     }
 
+    /// Stops this executor's processes in order, recording each step: the template
+    /// (which takes its children with it), then whatever still runs as one of the
+    /// slots' users (a call's process that outlived its call), and only then releases
+    /// the staging lock (when there is one). Runs from `Drop`.
+    fn teardown(&mut self, steps: &mut Vec<&'static str>) {
+        if let Ok(mut state) = self.state.try_lock() {
+            // Dropping the template kills it and waits for it.
+            *state = State::NotStarted;
+        }
+        steps.push("template_stopped");
+        if self._staging_lock.is_some() {
+            for index in 0..self.cfg.slots as u32 {
+                let uid = jail::uid_for(&self.jail, index);
+                for _ in 0..3 {
+                    if kill_uid(uid).is_ok() {
+                        break;
+                    }
+                    std::thread::sleep(STOP_RETRY_PAUSE);
+                }
+            }
+        }
+        steps.push("slot_processes_stopped");
+        if self._staging_lock.take().is_some() {
+            steps.push("staging_lock_released");
+        }
+    }
+
     /// Stages one call (dark behind `COLMENA_LARGE_TABULAR`): takes a share of
     /// the executor's budget of volumes in flight, then makes the directories
     /// and the output volume. The share goes back when the call is dropped.
@@ -516,8 +552,8 @@ impl SubprocessExecutor {
             spawner,
             stderr_dropped: Arc::default(),
             staging_budget: Arc::new(StagingBudget::new(STAGED_VOLUMES_MAX, STAGED_OUT_MIB_MAX)),
-            _staging_lock: None,
             staging_unavailable: None,
+            _staging_lock: None,
         })
     }
 
@@ -1009,6 +1045,62 @@ mod tests {
         for (i, run) in runs.into_iter().enumerate() {
             assert!(run.as_ref().is_ok_and(|s| s.success()), "run {i}: {run:?}");
         }
+    }
+
+    /// Teardown order: the template is stopped, then whatever still runs as a slot's
+    /// user, and only then is the staging lock released, so that a successor cannot
+    /// take the root (and sweep it) while a call of this executor is still alive.
+    #[tokio::test]
+    async fn teardown_stops_the_template_and_the_slot_processes_before_the_lock_is_released() {
+        use std::os::unix::process::CommandExt;
+        let (_dir, mut ex) = fake("echo READY\nexec sleep 30");
+        let root = tempfile::tempdir().unwrap();
+        let root_path = root.path().canonicalize().unwrap();
+        ex._staging_lock = Some(StagingLock::acquire(&root_path).unwrap());
+        ex.warm().await.unwrap();
+        let template = match &*ex.state.lock().await {
+            State::Running(t) => t.child.id() as libc::pid_t,
+            _ => panic!("the template did not start"),
+        };
+        // A process of a call left running as slot 0's user (needs root to be made).
+        let stray = (unsafe { libc::geteuid() } == 0).then(|| {
+            let uid = jail::uid_for(&ex.jail, 0);
+            let mut cmd = std::process::Command::new("sleep");
+            cmd.arg("60").uid(uid).gid(uid);
+            cmd.spawn().unwrap()
+        });
+        let mut steps = Vec::new();
+        ex.teardown(&mut steps);
+        assert_eq!(
+            steps,
+            [
+                "template_stopped",
+                "slot_processes_stopped",
+                "staging_lock_released"
+            ]
+        );
+        assert_ne!(
+            unsafe { libc::kill(template, 0) },
+            0,
+            "the template is still there"
+        );
+        if let Some(mut stray) = stray {
+            let status = stray.wait().unwrap();
+            assert!(
+                !status.success(),
+                "the call's process outlived the teardown"
+            );
+        }
+        // Free now. A helper that another test of this process forked at this very
+        // moment holds a copy of the descriptor for an instant: retry briefly.
+        let freed = (0..100).any(|_| {
+            let ok = StagingLock::acquire(&root_path).is_ok();
+            if !ok {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            ok
+        });
+        assert!(freed, "the lock was not released");
     }
 
     fn starts(dir: &tempfile::TempDir) -> usize {

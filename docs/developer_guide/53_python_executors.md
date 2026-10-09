@@ -262,7 +262,10 @@ to ONE executor, and that is enforced: `new_for_serving` first takes an exclusiv
 second process on the same root gets `PythonExecutorError: the staging root is already owned by another executor` as its
 startup error and sweeps nothing. A lock that cannot be taken for any OTHER reason (ENOLCK, ENOSYS, EOPNOTSUPP on some
 network or FUSE volumes) does not stop the executor: nothing is swept, mounts are disabled with the reason
-`staging_lock_unavailable` (logged; `stage_call` and calls asking for mounts get a typed error) and plain calls are served. If the staging volume is persistent, the prepared data of a call that was killed stays on it until the
+`staging_lock_unavailable` (logged; `stage_call` and calls asking for mounts get a typed error) and plain calls are served. The lock is released last: dropping a `SubprocessExecutor` stops the template first, then whatever still runs as a slot's
+user (a call's process that outlived its call), and only then frees the root, so a successor cannot take it, and sweep it,
+while a call of the old executor is alive. The sweep does not count the lock file (`.executor.lock`) as an entry it
+skipped, and logs nothing when nothing was swept. If the staging volume is persistent, the prepared data of a call that was killed stays on it until the
 next start of an executor with that root; a tmpfs staging volume vanishes with the instance.
 
 The seccomp denylist of EVERY jail, staged or not, includes the new mount API, `open_tree`, `move_mount`, `fsopen`,
