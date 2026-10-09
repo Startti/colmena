@@ -121,6 +121,11 @@ jobs:
       PYO3_PYTHON: python3
       COLMENA_PYEXEC_JAIL_TESTS: "1"
       COLMENA_PYEXEC_EXPECT_PYARROW: "1"
+      # This job must RUN the isolated and the large-file suites, never skip them: a
+      # missing jail gate or a python3 without pandas/pyarrow fails the test instead of
+      # printing a skip line.
+      COLMENA_PYEXEC_EXPECT_JAIL_TESTS: "1"
+      COLMENA_TABULAR_EXPECT_PANDAS: "1"
     steps:
       - name: System packages (same Python stack as a Debian bookworm deployment)
         env:
@@ -149,7 +154,7 @@ jobs:
       # A filter that matches no test passes without running anything.
       - name: Every test filter used below matches tests
         run: |
-          for f in python_exec python_node data_run_python gsheets_run_python attachment_run_python crdt_doc_run_python; do
+          for f in python_exec python_node data_run_python gsheets_run_python attachment_run_python crdt_doc_run_python tabular_run; do
             n=$(cargo test -p colmena_dag_engine --lib -- --list "$f" | grep -c ': test$' || true)
             echo "$f: $n tests"
             test "$n" -gt 0
@@ -163,8 +168,13 @@ jobs:
       - name: Isolation and subprocess suites
         run: |
           cargo test --test python_executor_subprocess --test python_executor_isolation --test python_executor_serve \
-            --test python_executor_serve_process --test python_executor_remote --test python_executor_mounts -- --nocapture 2>&1 | tee jail-suites.log
+            --test python_executor_serve_process --test python_executor_remote --test python_executor_mounts \
+            --test tabular_run_mounts --test tabular_run_remote --test tabular_large_e2e -- --nocapture 2>&1 | tee jail-suites.log
           if grep -F 'skipped: set COLMENA_PYEXEC_JAIL_TESTS' jail-suites.log; then exit 1; fi
+
+      # The large-file prelude over real Parquet parts (pandas + pyarrow in python3).
+      - name: Large-file prelude and runtime
+        run: cargo test -p colmena_dag_engine --lib tabular_run
 
       - name: Executor self-test
         run: target/debug/python_executor self-test
