@@ -1728,3 +1728,16 @@ deployed executor and its front end before the switch is enabled in dev:
 - on HTTP/2, that a server that answers early (a refusal) while the body is unread resets the stream in a way the client reads
   as a refusal and not as a dropped connection (locally on HTTP/1.1 a refusal before the body is read can look like a dropped
   connection; the client therefore checks credentials and readiness first, with `warm`).
+
+### Returning files from the code (`emit_table`)
+
+`emit_table(df_or_parts, name, format='csv')` in the prelude writes `/out/<name>.<csv|parquet>`. A name is 1 to 48 letters, digits,
+`_` or `-`; a format other than `csv` or `parquet`, a bad or duplicate name and a ninth file are refused in the sandbox
+(`LargeTableError`) before anything is written, before pandas is even imported. CSV takes a DataFrame or an iterable of them
+(one header, chunks appended: `t.parts(...)` streams); parquet takes ONE DataFrame (pyarrow cannot be imported to append). The
+limits it enforces are the collector's (8 files, 64 MiB each, 128 MiB together, passed in as inputs from `CollectLimits`): a CSV
+is measured after each chunk and a parquet after the write, with a read-only memory map (no `open()` is available), and a file
+over a limit raises an error saying to return fewer rows or aggregate. That check is advisory: the reader enforces the same
+limits again and drops what is over. The helper records `{name, format, rows, dtypes, size}` of each file; when any file was
+written the wrapped answer is `{"__colmena_emitted": [...], "result": <result>}` and `unwrap_emitted` splits it, cleaning every
+field (it comes from the sandbox: it is only shown beside a file the reader kept, matched by name). The tool text names it.
