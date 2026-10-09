@@ -28,6 +28,8 @@ pub(super) struct RecordingModel {
     calls: AtomicUsize,
     /// The description of every tool the node offered, in order.
     tools: Mutex<Vec<String>>,
+    /// The full definition of every tool the node offered, in order.
+    definitions: Mutex<Vec<crate::llm::domain::ToolDefinition>>,
 }
 
 impl RecordingModel {
@@ -47,6 +49,7 @@ impl RecordingModel {
             files: AtomicUsize::new(0),
             calls: AtomicUsize::new(0),
             tools: Mutex::default(),
+            definitions: Mutex::default(),
         })
     }
 
@@ -59,6 +62,10 @@ impl RecordingModel {
                 .fetch_add(m.files().map_or(0, |f| f.len()), Ordering::SeqCst);
         }
         if let Some(tools) = request.tools() {
+            self.definitions
+                .lock()
+                .unwrap()
+                .extend(tools.iter().cloned());
             let mut offered = self.tools.lock().unwrap();
             offered.extend(
                 tools
@@ -79,6 +86,12 @@ impl RecordingModel {
     /// `name: description` of every tool offered to the model, in order.
     pub(super) fn tools_offered(&self) -> Vec<String> {
         self.tools.lock().unwrap().clone()
+    }
+
+    /// The last definition of the tool `name` the node offered, whole.
+    pub(super) fn tool_definition(&self, name: &str) -> Option<crate::llm::domain::ToolDefinition> {
+        let all = self.definitions.lock().unwrap();
+        all.iter().rev().find(|t| t.name == name).cloned()
     }
 
     /// How many times the model was called (summaries included).

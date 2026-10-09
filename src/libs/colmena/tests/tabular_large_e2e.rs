@@ -160,6 +160,8 @@ enum Kind {
     Rollback,
     /// The code runs past its own budget.
     Timeout,
+    /// The whole path, through `data_run_python` (`output`, one binding).
+    DataRun,
     /// The whole call runs past the tool's clock (shortened here from 900 s).
     Budget,
 }
@@ -245,6 +247,12 @@ impl AttachmentRegistry for FailsSecondUpsert {
 #[serial_test::serial(host_mounts)]
 async fn the_whole_path_runs_with_nothing_canned() {
     scenario(Kind::Whole).await;
+}
+
+#[tokio::test]
+#[serial_test::serial(host_mounts)]
+async fn data_run_python_runs_the_whole_path_with_nothing_canned() {
+    scenario(Kind::DataRun).await;
 }
 
 #[tokio::test]
@@ -451,7 +459,11 @@ async fn scenario(kind: Kind) {
         .with_attachment_storage(storage.clone())
         .with_attachment_registry(registry_for_tool)
         .with_agent_session_id(Some("agent_1".into()))
-        .with_large_tabular(Arc::new(runtime));
+        .with_large_tabular(Arc::new(runtime))
+        // The node serves both Python tools here; each is served on its own offering.
+        .with_large_served(colmena::llm::domain::large_tabular::LargeServed::decide(
+            true, true, true, true,
+        ));
     if kind == Kind::Budget {
         executor = executor.with_large_call_budget(Duration::from_secs(2));
     }
@@ -466,6 +478,10 @@ async fn scenario(kind: Kind) {
             "emit_table(tables['sales'].head(3, columns=['a']), 'top')\n\
              result = int(tables['sales'].read(columns=['a'])['a'].sum())"
         }
+        Kind::DataRun => {
+            "emit_table(tables['sales'].head(3, columns=['a']), 'top')\n\
+             output = int(tables['sales'].read(columns=['a'])['a'].sum())"
+        }
     };
     let call = ToolCall {
         id: "call-1".into(),
@@ -478,10 +494,30 @@ async fn scenario(kind: Kind) {
         provider_signature: None,
         scope_index: None,
     };
-    let result = dispatch_attachment_run_python_via_executor(&executor, &call)
+    let answer: Value = if kind == Kind::DataRun {
+        let drp = ToolCall {
+            function: FunctionCall::new(
+                "data_run_python".into(),
+                serde_json::json!({
+                    "bindings": [{"var": "big", "attachment_id": "doc-1"}],
+                    "code": code,
+                })
+                .to_string(),
+            ),
+            ..call
+        };
+        colmena::dag_engine::infrastructure::nodes::llm_synthetic_tools::data_run_python::dispatch_data_run_python_via_executor(
+            &executor,
+            &drp,
+            &Default::default(),
+        )
         .await
-        .unwrap();
-    let answer: Value = serde_json::from_str(&result.output).unwrap();
+    } else {
+        let result = dispatch_attachment_run_python_via_executor(&executor, &call)
+            .await
+            .unwrap();
+        serde_json::from_str(&result.output).unwrap()
+    };
 
     match kind {
         Kind::Quota => {
@@ -510,6 +546,21 @@ async fn scenario(kind: Kind) {
                 "{rows:?}"
             );
             assert_eq!(storage.deleted.lock().unwrap().len(), 2);
+        }
+        Kind::DataRun => {
+            // `output` is the answer, the tables are the prepared ones, the returned
+            // file is an attachment tagged with this tool's name, and nothing was
+            // read from the original.
+            assert_eq!(answer["result"], 55, "{answer}");
+            assert_eq!(answer["tables"][0]["name"], "sales");
+            assert_eq!(answer["emitted"][0]["name"], "top.csv", "{answer}");
+            let id = answer["emitted"][0]["document_id"].as_str().unwrap();
+            let row = attachments
+                .lookup_by_document_id("agent_1", id)
+                .await
+                .unwrap()
+                .expect("registered");
+            assert_eq!(row.origin.as_deref(), Some("generated_by:data_run_python"));
         }
         Kind::Budget => {
             // Cut by the call's clock, not the code's: the answer names the clock and

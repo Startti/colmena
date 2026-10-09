@@ -1,0 +1,97 @@
+{
+  "name": "data_run_python",
+  "description": "Run sandboxed pandas (`pd`) / numpy (`np`) / scipy.stats over one or more tables, then\n(optionally) write the result BACK to an enabled destination — a table, a spreadsheet, or a\ndownloadable file — all in one call. Row data lives where it is and is streamed to the sandbox;\nonly your `output` (a small summary you choose) crosses the wire.\n\n## When to use this tool\n\nThis is the PRIMARY tool for reading, computing over, and writing tabular data — whether the\ndata lives in ONE source or spans several. Reach for it whenever the answer needs a\nCOMPUTATION (max/mean/filter/groupby/join/dedupe/diff/statistical test) or a WRITE-BACK\n(append rows to a table, fill a formula down a spreadsheet, edit rows, export a file).\nCross-store tasks are one prominent case — \"update the database from this spreadsheet\",\n\"download this table as a CSV\", \"sync a spreadsheet with the DB\", \"compare this file against\nthe table\" — but a single-source analytical question (\"which product has the highest price in\nthis attachment?\") is equally in scope. Do NOT read-and-eyeball a table to compare or aggregate\nit — bind it and compute.\n\n## Binding sources (`bindings`, required — at least one)\n\nEach entry names a Python variable (`var`) and points at EXACTLY ONE source. All bindings are\nfetched IN PARALLEL and bound as Python globals — each a list of `{col: val}` dicts — BEFORE\nyour `code` runs. Rebuild the DataFrame with `df = pd.DataFrame(var)`.\n\nThe enabled source fields depend on this deployment (see \"Available sources\" below):\n  - `attachment_id` — a CSV/XLSX from the conversation catalog. XLSX only: optional\n    `sheet_name` (default first tab) and `header_row` (1-indexed, default 1 — set 2 for a\n    title row above the header).\n  - `data` — an inline array of `{col: val}` objects (or a 2-D array with a header row).\n    Use it to pass a table you produced yourself (e.g. one extracted from an image).\n\n```python\n# bindings: [\n#   {\"var\": \"sales\",   \"attachment_id\": \"doc_abc\"},\n#   {\"var\": \"targets\", \"data\": [{\"sku\": \"A\", \"goal\": 100}]}\n# ]\nsales   = pd.DataFrame(sales)\ntargets = pd.DataFrame(targets)\n```\n\n## `code` / `code_ref` and surfacing output\n\nSupply the Python source ONE of two ways — exactly one is required:\n  - `code` — Python source inline.\n\nEither way, the code that runs is Python source. Pre-imported: `pd` (pandas), `np` (numpy),\n`stats` (scipy.stats), and the stdlib (math, datetime, decimal, json, re, statistics, string,\ncollections, functools, itertools). Assign a global `output` (any JSON-serializable value) —\nTHAT is what you see back. DataFrames auto-convert via `to_dict(orient=\"records\")`, Series via\n`to_list()`, numpy scalars via `.item()`. Keep `output` SMALL — a count, a summary, a handful\nof rows. Large result sets belong in a write sink (below), not in `output`.\n\n## Write sinks — push results back out\n\nBeyond `output`, assign any of the write-sink global dicts below, keyed by destination name.\nEach value is EITHER a bare pandas DataFrame (uses that sink's default mode) OR a spec dict. In\na spec dict the DataFrame ALWAYS goes in a field literally named `df` — never any other name.\n### `output_attachments` → downloadable file\n\nKey = a filename ending in `.csv` or `.xlsx` (no other extension). Bare DataFrame, or\n`{\"df\": df, \"delimiter\": \";\"}` (CSV delimiter override). Returns `{name, document_id, rows,\nbytes}` per file. Use it to hand the user a file they can download.\n\n```python\noutput_attachments = {\"reporte.csv\": result_df,\n                      \"detalle.xlsx\": {\"df\": detail_df}}\n```\n\n## Anti-patterns — read this before you compute\n\n⚠️ KNOW THE COLUMNS FIRST. Binding a source loads its ROWS, not its schema. The catalog\nauto-summary already shows each attachment/sheet's inferred columns + sample rows in your\nsystem message — USE IT. If you don't already know the real column names and what each holds,\ninspect first. Never guess a column name or what a term means (e.g. \"frutas\" is almost\ncertainly a VALUE in a `Categoria` column, not part of a product name). Guessing silently\nproduces wrong results — a filter matching 0 rows, or the wrong rows, with no error.\n\n⚠️ SANITY-CHECK THE ROW COUNT. If a filter/groupby/mask matches 0 rows (or far fewer than you\nexpected), do NOT report success — that is a signal you misunderstood the data. Find the right\ncolumn/value and redo it.\n\n⚠️ COERCE TYPES. All CSV and spreadsheet cell values arrive as STRINGS (pandas object dtype).\nBefore numeric ops, coerce: `df[\"price\"] = pd.to_numeric(df[\"price\"], errors=\"coerce\")` or\n`df = df.astype({\"price\": float, \"stock\": int})`. Comparing/sorting/summing string columns\nsilently gives lexical (not numeric) results. SQL-sourced bindings arrive already typed.\n\n## Sandbox restrictions\n  - Blocked imports: os, sys, subprocess, socket, urllib, requests, importlib, builtins, ctypes.\n  - No filesystem access, no network access beyond the fetched bindings.\n  - Code wall-clock capped; response truncated at a fixed byte limit; writes capped at 100k rows.\n\nAvailable sources:\n- Attachment (CSV/XLSX from the conversation catalog)\n- Inline JSON data",
+  "summary": "The pandas workbench for tabular data — read from files, spreadsheets, SQL, or inline JSON, compute, and write results back to any enabled destination. Rows never enter your context.",
+  "input_schema_override": {
+    "properties": {
+      "bindings": {
+        "description": "Tabular bindings to load. Each becomes a Python global (a list of `{col: val}` dicts) under the name given by `var`. At least one entry required. Bindings are fetched IN PARALLEL, each from its own source (attachment, Google Sheets, SQL `SELECT`, or inline JSON data).",
+        "type": "array",
+        "items": {
+          "description": "One tabular binding: a Python variable name plus exactly one data source. The active source is determined structurally by [`classify_binding`] — no explicit `source` discriminator field is required from the LLM.",
+          "type": "object",
+          "required": [
+            "var"
+          ],
+          "properties": {
+            "var": {
+              "description": "Python variable name to bind the records to (e.g. \"products\"). Accepts UX aliases `binding_name` and `name`.",
+              "type": "string"
+            },
+            "attachment_id": {
+              "description": "Attachment document id (CSV/XLSX source).",
+              "default": null,
+              "type": "string"
+            },
+            "spreadsheet_id": {
+              "description": "Google Sheets spreadsheet id (gsheets source).",
+              "default": null,
+              "type": "string"
+            },
+            "sheet": {
+              "description": "Google Sheets tab name (gsheets source). NOT aliased to `sheet_name` — that field is reserved for the attachment-XLSX tab selector below; the two sources are structurally distinct.",
+              "default": null,
+              "type": "string"
+            },
+            "range": {
+              "description": "Optional A1 range (gsheets source only). Omit to read the entire tab.",
+              "default": null,
+              "type": "string"
+            },
+            "query": {
+              "description": "SQL `SELECT` statement (sql source).",
+              "default": null,
+              "type": "string"
+            },
+            "data": {
+              "description": "Inline table data — an array of `{col: val}` objects, or a 2-D array whose first row is the header (inline source).",
+              "default": null
+            },
+            "delimiter": {
+              "description": "CSV delimiter override (attachment source, CSV only).",
+              "default": null,
+              "type": "string"
+            },
+            "sheet_name": {
+              "description": "XLSX tab/sheet selector (attachment source, XLSX only). Distinct from `sheet` (gsheets tab) — do not conflate the two.",
+              "default": null,
+              "type": "string"
+            },
+            "header_row": {
+              "description": "Header row index override, 0-based (attachment source).",
+              "default": null,
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0.0
+            }
+          }
+        }
+      },
+      "code": {
+        "description": "Python code, inline. Has access to `pandas as pd`, `numpy as np`, `scipy.stats as stats`, plus each binding's records list bound under its `var` name. Define `output` (any JSON-serializable value) — that is what the LLM sees. Exactly one of `code` or `code_ref` must be set.",
+        "default": null,
+        "type": "string"
+      },
+      "code_ref": {
+        "description": "Reference key for stored code, resolved server-side via the operator-only `fixed_config.code_source_query` SQL binding instead of pasting code inline. Exactly one of `code` or `code_ref` must be set. Requires the operator to have configured `code_source_query` (and a `sql` capability) on this tool instance.",
+        "default": null,
+        "type": "string"
+      },
+      "write_to_spreadsheet": {
+        "description": "Optional target spreadsheet for `output_sheets` returned by the script (Google Sheets sink). Only meaningful when the `gsheets` capability is enabled.",
+        "default": null,
+        "type": "string"
+      },
+      "on_existing_sheet": {
+        "description": "Operator-set collision policy for `output_sheets` (`fail` | `auto_suffix` | `overwrite`). Sourced from `fixed_config.on_existing_sheet` — the executor wrapper injects it into the args before [`dispatch_core`] runs. Mirrors `gsheets_run_python`'s field of the same name.",
+        "default": null,
+        "type": "string"
+      }
+    },
+    "title": "DataRunPythonArgs",
+    "type": "object",
+    "required": [
+      "bindings"
+    ]
+  }
+}

@@ -48,8 +48,21 @@ pub const EMITTED_KEY: &str = "__colmena_emitted";
 /// `result` convention as the small path, with `tables` and the `df` guard in
 /// place of a loaded DataFrame.
 pub fn wrap_large_code(code: &str) -> String {
+    wrap_large_code_for(code, false)
+}
+
+/// [`wrap_large_code`], and with `accept_output` the code may also leave its answer in
+/// `output` (what `data_run_python` code does): `result` wins when both are set.
+pub fn wrap_large_code_for(code: &str, accept_output: bool) -> String {
+    let (before, after) = match accept_output {
+        true => (
+            "output = None\n",
+            "if result is None and output is not None:\n    result = output\n",
+        ),
+        false => ("", ""),
+    };
     format!(
-        "\nimport pandas as pd\nimport numpy as np\nimport scipy.stats as stats\n\n{PRELUDE}\nresult = None\n\n{code}\n\n{}\n{EMITTED_TAIL}",
+        "\nimport pandas as pd\nimport numpy as np\nimport scipy.stats as stats\n\n{PRELUDE}\nresult = None\n{before}\n{code}\n\n{after}{}\n{EMITTED_TAIL}",
         postlude()
     )
 }
@@ -391,6 +404,16 @@ mod tests {
         // A string adds the Python object header for every row: 57 * 1000.
         assert_eq!(est("['note']"), 2 * (20_000 + 57 * 1000));
         assert_eq!(est("['id', 'paid']"), 2 * (8000 + 125 * 16));
+    }
+
+    /// The `data_run_python` convention: the code may leave its answer in `output`; `result`
+    /// wins when both are set; the plain wrapper is untouched.
+    #[test]
+    fn the_wrapper_can_take_the_answer_from_output() {
+        assert!(!wrap_large_code("result = 1").contains("result = output"));
+        let wrapped = wrap_large_code_for("output = 7", true);
+        assert!(wrapped.contains("output = None") && wrapped.contains("result = output"));
+        assert_eq!(wrap_large_code("x"), wrap_large_code_for("x", false));
     }
 
     /// Skipped sheets are told with their cleaned name and a reason in words, and a
@@ -969,6 +992,27 @@ mod reads {
             &inputs,
         );
         assert_eq!(out, "raised");
+    }
+
+    /// Real Python: `output` is taken as the answer, and `result` wins over it.
+    #[test]
+    fn output_is_taken_as_the_answer_for_data_run_python_code() {
+        let dir = tempfile::tempdir().unwrap();
+        let Some(inputs) = staged(dir.path()) else {
+            return;
+        };
+        if python("import scipy", "none", &Map::new()).is_err() {
+            skip_or_fail("scipy is needed by the wrapper's imports");
+            return;
+        }
+        let run =
+            |code: &str| python(&wrap_large_code_for(code, true), "restricted", &inputs).unwrap();
+        assert_eq!(
+            run("output = int(tables['t'].read(columns=['a'])['a'].sum())"),
+            45
+        );
+        assert_eq!(run("output = 1\nresult = 2"), 2);
+        assert_eq!(run("result = 3"), 3);
     }
 
     /// `head(n)` returns n rows when they exist even if the first batch is shorter

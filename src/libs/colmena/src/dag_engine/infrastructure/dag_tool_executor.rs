@@ -160,6 +160,12 @@ pub struct DagToolExecutor {
     large_tabular: Option<Arc<crate::tabular_run::runtime::LargeTabularRuntime>>,
     /// A shorter clock for a large-file call than the tool's own (tests only).
     large_call_budget: Option<std::time::Duration>,
+    /// Which tools serve a large file on this node, each decided on its own offering:
+    /// a tool that is not in this set never reaches the large path, whatever name a
+    /// call carries (and it decides what a refusal names).
+    /// `None` until the node says; then it is exactly what the node said, whatever the
+    /// order the builders were called in (see `large_served()`).
+    large_served: Option<crate::llm::domain::large_tabular::LargeServed>,
     /// F-T15: per-call wiring for the `recall_history` synthetic tool.
     /// When both fields are populated, the executor intercepts `recall_history`
     /// tool calls and reads the persisted conversation directly. When either is
@@ -423,6 +429,7 @@ impl DagToolExecutor {
             attachment_registry: None,
             large_tabular: None,
             large_call_budget: None,
+            large_served: None,
             conversation_repository: None,
             conversation_key: None,
             max_tool_result_bytes: DEFAULT_MAX_TOOL_RESULT_STRING_BYTES,
@@ -887,8 +894,8 @@ impl DagToolExecutor {
         // says now and whatever the row's size or mime say. Every other row is
         // read as it always was.
         if location.host_owned {
-            return Err(crate::llm::domain::large_tabular::refusal_text_for(
-                self.large_tabular.is_some(),
+            return Err(crate::llm::domain::large_tabular::refusal_text_for_tool(
+                self.large_served().named(),
             )
             .to_string());
         }
