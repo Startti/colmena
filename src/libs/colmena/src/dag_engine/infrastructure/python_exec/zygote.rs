@@ -266,8 +266,13 @@ fn prove_mounts(jail: &JailSpec) -> Option<&'static str> {
     let staging = failed
         .iter()
         .any(|c| c.layer == "self_test" && c.reason == "staging_failed");
+    // The jail could not clear the capability sets of the probe's call (a runtime
+    // without CAP_SETPCAP): a call asking for mounts would end the same way.
+    let privileges = failed.iter().any(|c| c.layer == "privileges");
     Some(if staging {
         "staging_unusable"
+    } else if privileges {
+        "capability_drop_failed"
     } else {
         "mount_layer_failed"
     })

@@ -54,6 +54,9 @@ pub enum StageError {
         max_mib: u64,
     },
     NoStagingRoot,
+    /// The executor started without being able to offer run mounts (why: a fixed
+    /// code), and says so instead of staging calls it could not serve.
+    MountsDisabled(&'static str),
     Io(io::Error),
 }
 
@@ -67,6 +70,10 @@ impl std::fmt::Display for StageError {
             StageError::OverBudget { volumes, mib, max_volumes, max_mib } => write!(
                 f,
                 "PythonExecutorError: too many staged volumes in flight ({volumes} of {max_volumes} volumes, {mib} of {max_mib} MiB); retry later"
+            ),
+            StageError::MountsDisabled(reason) => write!(
+                f,
+                "PythonExecutorError: run mounts are disabled on this executor ({reason}); see its startup log"
             ),
             StageError::NoStagingRoot => {
                 write!(f, "PythonExecutorError: this executor has no staging directory configured")
@@ -552,6 +559,20 @@ pub struct StagingLock {
 #[cfg(target_os = "linux")]
 impl StagingLock {
     pub fn acquire(root: &Path) -> Result<Self, LockError> {
+        Self::acquire_with(root, |fd| {
+            match unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) } {
+                0 => Ok(()),
+                _ => Err(io::Error::last_os_error()),
+            }
+        })
+    }
+
+    /// [`Self::acquire`] with the `flock` call supplied, so that a test can make
+    /// it fail with any errno. EWOULDBLOCK is `Held`; every other failure is `Io`.
+    pub fn acquire_with(
+        root: &Path,
+        flock: impl FnOnce(RawFd) -> io::Result<()>,
+    ) -> Result<Self, LockError> {
         let rootfd = open_root(root).map_err(LockError::Io)?;
         let name = CString::new(LOCK_NAME).expect("no nul");
         let flags = libc::O_RDWR | libc::O_CREAT | libc::O_NOFOLLOW | libc::O_CLOEXEC;
@@ -560,8 +581,7 @@ impl StagingLock {
             return Err(LockError::Io(io::Error::last_os_error()));
         }
         let file = unsafe { OwnedFd::from_raw_fd(fd) };
-        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
-            let e = io::Error::last_os_error();
+        if let Err(e) = flock(file.as_raw_fd()) {
             return Err(match e.raw_os_error() {
                 Some(libc::EWOULDBLOCK) => LockError::Held,
                 _ => LockError::Io(e),
@@ -743,6 +763,24 @@ mod tests {
         );
         assert_eq!(got[2], want[2], "a parent comes after its children");
         assert_eq!(unescape_mount_point("/a\\040b\\134c"), "/a b\\c");
+    }
+
+    /// Only EWOULDBLOCK means another executor owns the root; any other reason a
+    /// lock cannot be taken (ENOLCK, ENOSYS, EOPNOTSUPP on some network or FUSE
+    /// volumes) is a plain error, which the executor turns into "mounts disabled".
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn only_a_held_lock_is_held() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        let fails = |code: i32| {
+            StagingLock::acquire_with(&root, |_| Err(io::Error::from_raw_os_error(code)))
+        };
+        assert!(matches!(fails(libc::EWOULDBLOCK), Err(LockError::Held)));
+        for code in [libc::ENOLCK, libc::ENOSYS, libc::EOPNOTSUPP, libc::EIO] {
+            assert!(matches!(fails(code), Err(LockError::Io(_))), "{code}");
+        }
+        assert!(StagingLock::acquire_with(&root, |_| Ok(())).is_ok());
     }
 
     /// The size is refused before the root is even opened or anything is made.

@@ -154,6 +154,10 @@ pub struct SubprocessExecutor {
     /// The lock that makes this the only executor of its staging root, held for
     /// this executor's life (see [`Self::new_for_serving`]).
     _staging_lock: Option<StagingLock>,
+    /// Why this executor cannot offer run mounts although a staging root is set,
+    /// decided at start (the root's lock could not be taken for a reason other than
+    /// "held"); `None` when it can.
+    staging_unavailable: Option<&'static str>,
 }
 
 /// Returns its index to the pool when dropped, once every process still
@@ -377,6 +381,9 @@ impl SubprocessExecutor {
             .staging_root
             .as_ref()
             .ok_or(StageError::NoStagingRoot)?;
+        if let Some(reason) = self.staging_unavailable {
+            return Err(StageError::MountsDisabled(reason));
+        }
         let share = StagingBudget::reserve(&self.staging_budget, out_mb)?;
         Ok(StagedCall::create_with(root, out_mb, Some(share))?)
     }
@@ -438,15 +445,42 @@ impl SubprocessExecutor {
         cfg: SubprocessConfig,
         max_timeout: Duration,
     ) -> Result<Self, ExecutorConfigError> {
+        Self::new_for_serving_with(cfg, max_timeout, StagingLock::acquire)
+    }
+
+    /// [`Self::new_for_serving`] with the lock acquisition supplied, so that a test
+    /// can make it fail. "Held" (another executor owns the root) is a hard startup
+    /// error and sweeps nothing. A lock that cannot be taken for any OTHER reason
+    /// (ENOLCK, ENOSYS, EOPNOTSUPP on some network or FUSE volumes) does not take the
+    /// executor down: nothing is swept (the root is not owned), run mounts are
+    /// disabled with the reason `staging_lock_unavailable`, loudly logged, and plain
+    /// calls are served.
+    pub fn new_for_serving_with(
+        cfg: SubprocessConfig,
+        max_timeout: Duration,
+        acquire: impl FnOnce(&std::path::Path) -> Result<StagingLock, super::staging::LockError>,
+    ) -> Result<Self, ExecutorConfigError> {
         let mut executor = Self::new(cfg, max_timeout)?;
         if let Some(root) = executor.cfg.staging_root.clone() {
             // Before the sweep, which would unmount a live executor's volumes: the
-            // root is taken first, or this start fails and sweeps nothing.
-            let lock =
-                StagingLock::acquire(&root).map_err(|e| ExecutorConfigError(e.to_string()))?;
-            executor._staging_lock = Some(lock);
-            if let Err(e) = super::staging::sweep_staging_root(&root) {
-                tracing::error!(target: T_PYTHON_EXEC, error = %e, "cannot sweep the staging root");
+            // root is taken first, or nothing is swept.
+            match acquire(&root) {
+                Ok(lock) => {
+                    executor._staging_lock = Some(lock);
+                    if let Err(e) = super::staging::sweep_staging_root(&root) {
+                        tracing::error!(target: T_PYTHON_EXEC, error = %e, "cannot sweep the staging root");
+                    }
+                }
+                Err(super::staging::LockError::Io(e)) => {
+                    tracing::error!(
+                        target: T_PYTHON_EXEC,
+                        error = %e,
+                        reason = "staging_lock_unavailable",
+                        "the staging root cannot be locked: run mounts are DISABLED, nothing is swept"
+                    );
+                    executor.staging_unavailable = Some("staging_lock_unavailable");
+                }
+                Err(held) => return Err(ExecutorConfigError(held.to_string())),
             }
         }
         Ok(executor)
@@ -483,6 +517,7 @@ impl SubprocessExecutor {
             stderr_dropped: Arc::default(),
             staging_budget: Arc::new(StagingBudget::new(STAGED_VOLUMES_MAX, STAGED_OUT_MIB_MAX)),
             _staging_lock: None,
+            staging_unavailable: None,
         })
     }
 
@@ -597,6 +632,11 @@ impl SubprocessExecutor {
         request: &[u8],
         mounts: Option<CallMounts>,
     ) -> Result<Vec<u8>, RawFailure> {
+        if let (Some(_), Some(reason)) = (&mounts, self.staging_unavailable) {
+            return Err(RawFailure::Unavailable(
+                StageError::MountsDisabled(reason).to_string(),
+            ));
+        }
         if mounts.is_some() && self.cfg.staging_root.is_none() {
             return Err(RawFailure::Unavailable(
                 "PythonExecutorError: this executor has no staging directory configured".into(),
