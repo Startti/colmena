@@ -139,6 +139,10 @@ pub struct PrepareConfig {
     pub large_tabular: bool,
     pub trigger: Arc<dyn PrepareTrigger>,
     pub progress: Arc<dyn PrepareProgress>,
+    /// The preparation registry the host keeps, which the large path reads to
+    /// vouch for a prepared copy before it runs code over it. Without one the
+    /// engine can register a large file but cannot analyse it.
+    pub registry: Option<Arc<dyn crate::tabular_prepare::registry::PreparationRegistry>>,
 }
 
 impl PrepareConfig {
@@ -177,6 +181,7 @@ impl Default for PrepareConfig {
             large_tabular: false,
             trigger: Arc::new(InlineTrigger::default()),
             progress: Arc::new(NoopProgress),
+            registry: None,
         }
     }
 }

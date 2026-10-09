@@ -1593,3 +1593,13 @@ The node-level proofs run the real `llm_call` node against a scripted model (`no
 host-owned file reaches the runtime and the model sees the tables and the result, with no key and no byte of the original
 read; with the switch off the file keeps its usual refusal and the tool text is the usual one; with no runtime wired
 the same; a runtime whose own switch is off answers with the typed refusal.
+
+### What the host gives the engine
+
+`PrepareConfig` gains `registry: Option<Arc<dyn PreparationRegistry>>`, the preparation registry the host keeps (the same
+trait the driver and the cleanup use). When the engine assembles its node registry (`node_registry_from_config`),
+`large_runtime(prepare, storage, python_exec::mounted_executor())` builds the runtime and hands it to the node registry ONLY
+with the switch on AND a registry AND an executor with run mounts. Each missing piece leaves large files registrable but not
+analysable: nothing is half wired, one warning is logged at start (whether a registry was given; never a key), the tool keeps
+its usual description, and a call over a host-owned file keeps the refusal it has always had. `PrepareConfig::default()` has no
+registry, so a host that does not opt in changes nothing.
