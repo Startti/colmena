@@ -13,10 +13,17 @@
 //! - [`stage`]: stream the parts into the call's data directory, bounded in
 //!   memory and in bytes (Unix).
 //!
+//! - [`mounted`]: the seam an executor implements to run a call over the tables;
+//!   `local` is the subprocess executor's, `remote_seam` the remote one's (refuses).
+//!
 //! See docs/developer_guide/53_python_executors.md and
 //! docs/developer_guide/54_tabular_prepare.md.
 
+#[cfg(target_os = "linux")]
+pub mod local;
+pub mod mounted;
 pub mod refusal;
+pub mod remote_seam;
 #[cfg(unix)]
 pub mod stage;
 #[cfg(test)]

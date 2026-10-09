@@ -1,0 +1,95 @@
+//! Mounted runs on the subprocess executor (Linux). The call's tables are
+//! copied into its own `data` directory and bound read-only at `/data` by the
+//! jail; see docs/developer_guide/53_python_executors.md.
+//!
+//! Staging goes through [`SubprocessExecutor::stage_call`], the budgeted path:
+//! the unbudgeted `StagedCall::create` and `run_staged` primitives are never
+//! used to take a call's volume.
+
+use super::mounted::{MountedCall, MountedError, MountedExecutor, MountedResult};
+use super::refusal::{Budget, RunRefusal, Unavailable};
+use super::stage::stage_tables;
+use crate::dag_engine::domain::python_executor::PythonRunRequest;
+use crate::dag_engine::infrastructure::python_exec::staging::StageError;
+use crate::dag_engine::infrastructure::python_exec::subprocess::SubprocessExecutor;
+use crate::dag_engine::log_policy::T_PYTHON_EXEC;
+use async_trait::async_trait;
+
+/// What the model is told when the executor could not make the call's volume.
+/// The executor's own text is logged and never shown.
+pub fn refuse_stage(e: &StageError) -> RunRefusal {
+    match e {
+        StageError::OverBudget { .. } => RunRefusal::OverBudget(Budget::Volumes),
+        StageError::NoStagingRoot => RunRefusal::Unavailable(Unavailable::NoStagingRoot),
+        // The executor started without run mounts (the root's lock, its capabilities):
+        // it says so instead of staging calls it cannot serve.
+        StageError::MountsDisabled(_) => RunRefusal::Unavailable(Unavailable::MountsDisabled),
+        StageError::InvalidSize(_) | StageError::Io(_) => {
+            RunRefusal::Unavailable(Unavailable::Executor)
+        }
+    }
+}
+
+#[async_trait]
+impl MountedExecutor for SubprocessExecutor {
+    async fn run_with_mounts(
+        &self,
+        req: PythonRunRequest,
+        call: MountedCall<'_>,
+    ) -> Result<MountedResult, MountedError> {
+        let staged_call = self.stage_call(call.out_mb).map_err(|e| {
+            tracing::warn!(target: T_PYTHON_EXEC, error = %e, "could not stage a call with mounts");
+            MountedError::Refused(refuse_stage(&e))
+        })?;
+        let outcome = async {
+            let staged = stage_tables(
+                call.storage,
+                call.plan,
+                call.tables,
+                &staged_call.data_dir(),
+                call.limits,
+            )
+            .await
+            .map_err(MountedError::Refused)?;
+            let result = self
+                .run_staged(req, staged_call.mounts())
+                .await
+                .map_err(MountedError::Run)?;
+            Ok(MountedResult { result, staged })
+        }
+        .await;
+        // The volume is unmounted and the directories removed off the async
+        // worker, and before this returns, so the budget share is given back.
+        let _ = tokio::task::spawn_blocking(move || drop(staged_call)).await;
+        outcome
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io;
+
+    #[test]
+    fn a_stage_failure_is_refused_with_fixed_text_never_the_executors() {
+        let over = StageError::OverBudget {
+            volumes: 2,
+            mib: 2048,
+            max_volumes: 2,
+            max_mib: 2048,
+        };
+        assert_eq!(refuse_stage(&over), RunRefusal::OverBudget(Budget::Volumes));
+        assert_eq!(
+            refuse_stage(&StageError::NoStagingRoot),
+            RunRefusal::Unavailable(Unavailable::NoStagingRoot)
+        );
+        let io = StageError::Io(io::Error::other("/var/lib/secret/path"));
+        let refusal = refuse_stage(&io);
+        assert_eq!(refusal, RunRefusal::Unavailable(Unavailable::Executor));
+        assert!(!refusal.message().contains("secret"));
+        assert_eq!(
+            refuse_stage(&StageError::InvalidSize(0)),
+            RunRefusal::Unavailable(Unavailable::Executor)
+        );
+    }
+}
