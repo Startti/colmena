@@ -8,19 +8,21 @@ call directories left by a killed predecessor. With the switch off nothing is sw
 who signs off the jail change; the developer-facing description is in
 [53_python_executors.md](../developer_guide/53_python_executors.md#run-staging-directories-linux-dark).
 
-## Open question first: seccomp
+## What isolation holds today, and what each layer contributes
 
-Today the read-only guarantee of `/data` rests on ONE thing: the program holds an empty capability set (all of
-inheritable, permitted, effective and ambient are zero), so every mount operation fails with `EPERM`. The seccomp
-filter denies `mount`, `umount2`, `unshare`, `setns`, `pivot_root`, `chroot` but NOT the new mount API system calls
-(`fsopen`, `fsconfig`, `fsmount`, `fspick`, `open_tree`, `move_mount`, `mount_setattr`); the capability bounding set is
-not cleared either. Both are as they were before this change. Two blind reviewers independently asked for the seven
-calls to be added to the denylist as defence in depth. That edit touches `seccomp.rs`, which this unit was told not to
-change, so it was NOT made and no claim is made that it would not alter anything else. Tests prove today's behaviour
-only: four of the seven (`fsopen`, `open_tree`, `mount_setattr`, `move_mount`) are exercised and fail with `EPERM` from
-inside; the other three (`fsconfig`, `fsmount`, `fspick`) exist and are NOT exercised (`ENOSYS` would be accepted only for a kernel without the API, and only because the capability sets are asserted
-empty in the same test). Decision for the sandbox owner: add the seven calls to the denylist (and its test), clear the
-bounding set, or accept the capability drop as the only barrier.
+The sandbox is not one control but a stack, and each layer below is proven by a test from inside it. (1) A fresh mount,
+network, IPC and UTS namespace per call: the network namespace is empty, the mount namespace has its own `/tmp`, a fresh
+`/proc` and the host paths covered. (2) One unprivileged uid and gid per slot, no supplementary groups, and `no_new_privs`:
+the program is not root and cannot become it. (3) Empty capability sets (and, for a staged jail, an empty bounding set),
+so no mount, namespace or network operation is permitted to it. (4) A seccomp filter that refuses sockets, new processes
+and programs, tracing, `mount`, `umount2`, `unshare`, `setns`, `pivot_root`, `chroot` and, for a staged jail, the whole
+new mount API: a second, independent barrier for everything the capability sets already forbid. (5) `/data` is a
+read-only bind mount (`nosuid,nodev,noexec`) of the one directory the jail opened for THIS call, with its flags read back,
+so a world-writable file in it still cannot be written. (6) The staging root is covered for every call and every other
+call's mounts are detached from the call's namespace, so nothing but this call's own `/data` and `/out` is reachable.
+(7) `/out` is a per-call tmpfs with a size and an inode bound, `nosuid,nodev,noexec`, unmounted before anything is removed.
+(8) Resource limits (address space, CPU, file size, descriptors, processes, core). Take any one layer away and the others
+still hold the read-only guarantee; this round (U1) removed the one place where it rested on a single layer.
 
 ## What changes, in one paragraph
 
@@ -38,8 +40,8 @@ executor with a staging root. "Mounts" = a call that asks for them.
 |---|---|---|---|---|
 | Namespaces (net, mnt, ipc, uts) | all four, empty network | same | same | same |
 | Network | empty namespace, `socket()` refused by seccomp | same | same | same |
-| Seccomp filter | `seccomp.rs` | file untouched | same | same |
-| Identity, capabilities | slot uid/gid, no groups, empty effective/permitted | same | same | same (compared from inside) |
+| Seccomp filter | `seccomp.rs` | as today (no staging root: the extra layer is not applied) | + the new mount API denied (`open_tree`, `move_mount`, `fsopen`, `fsconfig`, `fsmount`, `fspick`, `mount_setattr`, `open_tree_attr`; EPERM, like `mount`) | same as Plain |
+| Identity, capabilities | slot uid/gid, no groups, empty effective/permitted; bounding set untouched (nonzero) | same | same, and the bounding set cleared | same as Plain (compared from inside) |
 | `no_new_privs`, death signal | set | same | same | same |
 | `RLIMIT_AS` | template VmSize + `memory_mb` | same | same | same value |
 | `RLIMIT_CPU`, `NOFILE` 256, `NPROC` 64, `CORE` 0 | as today | same | same | same |
@@ -56,7 +58,8 @@ executor with a staging root. "Mounts" = a call that asks for them.
 | Call header | 4 fields | same bytes | same bytes | + `mounts {stage_id, out_mb}` |
 | Jail spec | 3 fields | same bytes | + `staging_root` | same |
 | Template start | single-thread check, 26-layer self-test | same | + a second probe whose failure disables mounts only | same |
-| Self-test layers | 26 | 26 | 26 + 3 (the mount probe) | 26 + 3 |
+| Self-test layers | 26 | 26 | 26 + 4 (the mount probe) | 26 + 4 |
+| One executor per staging root | n/a | n/a | enforced: an exclusive `flock` on `<root>/.executor.lock` before the sweep; a second serving executor fails to start | same |
 | New executor setting | n/a | `COLMENA_PYTHON_EXECUTOR_STAGING_DIR` is read and ignored | `COLMENA_PYTHON_EXECUTOR_STAGING_DIR`, `--staging-root` | same |
 
 ## Budget numbers (S1)
@@ -76,8 +79,7 @@ caller can still call `StagedCall::create` or `run_staged` directly, so the unit
 
 ## Evidence that the unchanged things are unchanged
 
-- `git diff <base>..HEAD -- python_exec/seccomp.rs` is empty. `DEFAULT_HIDDEN`, the `set_limit` calls except
-  `RLIMIT_FSIZE`, the uid/gid/capability code and the namespace flags are not in the diff.
+- `seccomp.rs` changed in this round (U1) and ONLY by adding the mount API list and a `mount_api` flag to `deny_filter` and `apply`; a filter built with the flag off is, by test, the filter it was (`the_mount_api_is_denied_only_when_asked_for_and_like_mount`), and the jail passes the flag only for a jail with a staging root. `DEFAULT_HIDDEN`, the `set_limit` calls except `RLIMIT_FSIZE`, the uid/gid code and the namespace flags are not in the diff; the capability code gained the bounding-set clearing, for a staged jail only (`the_bounding_set_is_empty_inside_a_staged_jail_and_untouched_otherwise` shows today's jail keeps its bounding set).
 - No line of any existing suite is changed (`python_executor_isolation`, `_subprocess`, `_golden`, `_serve*`,
   `_remote`, the C0 characterisation suites): they pass unmodified.
 - A call header without mounts and a jail spec without a staging root serialise to exactly today's bytes (unit tests).
@@ -85,7 +87,7 @@ caller can still call `StagedCall::create` or `run_staged` directly, so the unit
   nothing is created): the executor config is today's. The self-test of an executor without a staging root reports the
   26 layers.
 - From inside the sandbox a call with mounts and a call without compare equal in: uid/gid/groups, all five capability
-  sets (the bounding set is nonzero and unchanged: the jail has never cleared it), `NoNewPrivs`, seccomp mode,
+  sets (a staged jail's bounding set is empty for both kinds of call; without a staging root it is nonzero and untouched), `NoNewPrivs`, seccomp mode,
   environment, every `RLIMIT_*` except `RLIMIT_FSIZE` (compared separately: 64 MiB against the volume's 100 MiB),
   `socket()` error, network interfaces, cwd and `/tmp` size.
 
@@ -106,8 +108,8 @@ descriptor reaching the sandbox). They agreed on ten items. The fixes are stacke
 | S5 | tests that did not prove what they said | swap test now runs the real `open_staged` and `bind_dir` and swaps the path between them; mount API helper clears errno and treats `rc >= 0` as success; same-sandbox test order independent and compares a 100 MiB file limit | `a_path_swapped_between_the_walk_and_the_bind_binds_the_original`, `data_cannot_be_remounted_unmounted_or_replaced`, `a_call_with_mounts_is_otherwise_the_same_sandbox` |
 | S6 | a broken staging setup or pyarrow import could take the whole executor down | the mount probe is separate: a failure disables the mounts capability (logged, `MOUNTS_DISABLED <reason>` before `READY`, typed error); the pool check never imports pyarrow | `a_broken_staging_root_disables_mounts_and_not_plain_calls`, `pyarrow_is_never_imported_just_to_be_checked`, `a_template_with_mounts_disabled_refuses_only_mounts_calls` |
 | S7 | cleanup errors swallowed; nothing reclaims leftovers after a crash | failures logged with the call id; a startup sweep unmounts and removes leftover call directories without following anything inside | `a_failed_cleanup_is_logged_with_the_call_id`, `the_sweep_reclaims_leftover_calls_and_follows_nothing`, `an_executor_about_to_serve_sweeps_its_root` |
-| S8 | the pyarrow test never runs in CI | a missing pyarrow prints a note; with `COLMENA_PYEXEC_EXPECT_PYARROW=1` it prints the skip line the job's step greps for and fails. NOT added to the workflow | see "CI does not install pyarrow" below |
-| S9 | add the new mount API calls to seccomp | NOT done (outside the brief); first open question | n/a |
+| S8 | the pyarrow test never runs in CI | CLOSED by U3: a separate workflow commit installs pyarrow 21.0.0 (`pip --no-deps`, >= 18.1) in the isolated job and sets `COLMENA_PYEXEC_EXPECT_PYARROW=1`, so a missing pyarrow fails the step. The job itself has not been run | the Docker run with the pyarrow image (`pandas_reads_a_parquet_part_through_data_when_pyarrow_is_installed`); the job's other steps were replayed in that image |
+| S9 | add the new mount API calls to seccomp | CLOSED by U1: the eight calls are denied for a staged jail (EPERM, like `mount`), the bounding set is cleared; see the controls below | `the_filter_refuses_each_mount_api_call_where_the_capability_is_present`, `the_bounding_set_is_empty_inside_a_staged_jail_and_untouched_otherwise` |
 | S10 | the note overclaimed and omitted | this rewrite | n/a |
 
 Honest note on S2. The reviewers' claim was that the memory of a released output volume stays pinned while any call that
@@ -126,7 +128,9 @@ Docker container and a named test failed; "not mutated" = no mutation was run.
 |---|---|---|---|
 | Program writes to `/data` | read-only mount, not file mode | `nothing_can_be_changed_under_data` (world-writable file and directory; 11 operations all `EROFS`; source unchanged) | mutated: drop `MS_RDONLY`, also with the read-back neutralised |
 | `/data` suid/dev/exec | mount flags | `data_is_mounted_nosuid_nodev_noexec_and_read_only` | mutated through the read-back (the call ends); not shown independently of the read-back |
-| Remount, unmount, mount over, new namespaces, new mount API, chroot | empty capability set; seccomp for the old calls | `data_cannot_be_remounted_unmounted_or_replaced`, `out_cannot_be_remounted_or_unmounted` | not mutated: this is the existing capability drop. The helper was fixed after review; its reporting of a success was shown on a call that succeeds as root |
+| Remount, unmount, mount over, new namespaces, new mount API, chroot | empty capability sets AND empty bounding set; seccomp for the old calls and, for a staged jail, for the eight new-API calls | `data_cannot_be_remounted_unmounted_or_replaced` (all twelve operations strictly `EPERM`, all five capability sets zero), `out_cannot_be_remounted_or_unmounted`; the filter itself: `seccomp::tests::the_filter_refuses_each_mount_api_call_where_the_capability_is_present` (a throwaway child that is ROOT with every capability: the calls get past the kernel, then the filter is installed and each answers `EPERM`; a filter built without the extra layer leaves them alone) | mutated: the filter skipping each of the eight numbers in turn, the extra layer always off, always on. `open_tree_attr` is named by number (467) because the libc crate does not name it |
+| A kernel capability left in the bounding set | the bounding set is cleared while the process is still root, before the uid change; read back | `the_bounding_set_is_empty_inside_a_staged_jail_and_untouched_otherwise`, the `capabilities_empty` self-test layer (`the_capability_layer_fails_with_capabilities_and_holds_without_them`), `the_capability_lines_must_all_be_zero` | mutated: not cleared, cleared for every jail (today's jail changes), the layer never failing. NOT shown by any test: that the filter was extended for a staged jail, as opposed to the capability check answering EPERM alone (the two answers are identical from inside); `staged_jail` is unit-tested instead (`the_extra_layers_belong_to_a_staged_jail_only`) |
+| Two executors on one staging root | exclusive `flock` taken before the sweep | `a_second_serving_executor_on_one_root_is_refused_and_sweeps_nothing` (the first one's in-flight call, data and volume untouched, and the call still runs; the root is takeable again after the first is dropped) | mutated: no lock, sweep before lock, a held lock not reported as `Held`, shared instead of exclusive lock |
 | Reach another call's data or the host's | bind of the opened directory only; root covered; other calls' mounts detached | `nothing_but_this_calls_data_is_reachable`, `the_staging_root_is_hidden_from_a_call_without_mounts`, `a_call_does_not_see_other_calls_mounts` | mutated: widen the bind, do not cover the root, do not detach |
 | Symlink or `..` in the path | id charset; `O_NOFOLLOW` per component; owner/mode check | `staging::tests` (macOS and Linux), `a_call_the_jail_cannot_trust_ends_before_any_code_runs` | mutated: allow links, skip the owner check, skip the id check |
 | Swap between check and bind | the bound thing is the descriptor | `a_path_swapped_between_the_walk_and_the_bind_binds_the_original` (real `open_staged` and `bind_dir`, in a child) | mutated: bind re-resolves by name |
@@ -148,22 +152,25 @@ Docker container and a named test failed; "not mutated" = no mutation was run.
 |---|---|---|
 | macOS (aarch64) | `cargo fmt --check`, `cargo clippy --lib --tests -D warnings`, `cargo test --lib`, the C0 suites, `scripts/check_doc_links.py`. Portable unit tests: the no-follow walk, the budget, the volume judgement, the mount-table parsing, the config gate, the header byte test | green |
 | macOS, compile only | NOTHING of the jail compiles on macOS: `jail`, `selftest`, `subprocess`, `zygote` are `cfg(target_os = "linux")` | not verified there |
-| Docker Desktop, `linux/aarch64`, Debian bookworm + the CI package set, `--cap-add SYS_ADMIN --security-opt seccomp=unconfined --security-opt apparmor=unconfined`, root | Linux clippy; `cargo test --lib python_exec`; the new suite (38 tests); `python_executor_subprocess`, `_isolation`, `_serve`, `_serve_process`, `_remote`, `_golden` unchanged; `python_executor self-test` (26 layers, 29 with `--staging-root`); every mutation in this note; the suite also with pyarrow 21.0.0 installed in the image (the test that reads Parquet through `/data` ran there) | green |
-| The Linux job "Python executors (Linux, isolated)" | the new suite runs there only after the one-line workflow change (its own commit) merges; the job itself was never run | NOT run |
+| Docker Desktop, `linux/aarch64`, Debian bookworm + the CI package set, `--cap-add SYS_ADMIN --security-opt seccomp=unconfined --security-opt apparmor=unconfined`, root | Linux clippy; `cargo test --lib python_exec`; the new suite (43 tests); `python_executor_subprocess`, `_isolation`, `_serve`, `_serve_process`, `_remote`, `_golden` unchanged; `python_executor self-test` (26 layers, 30 with `--staging-root`); every mutation in this note; the suite also with pyarrow 21.0.0 installed in the image (the test that reads Parquet through `/data` ran there) | green |
+| The same Docker image, the other steps of the Linux job replayed with pyarrow installed | the Python node and tool suites under `subprocess` (every mode) and under `remote` against a local `python_executor serve`, the crdt suites, the golden bench in both modes (not the smoke graph: it needs Postgres) | green: 91 lib tests under `subprocess` and again under `remote`, the three crdt suites, the golden bench (17 cases) in both executors and the 12-call burst; run once, in the image with pyarrow 21.0.0 |
+| The Linux job "Python executors (Linux, isolated)" | the new suite and the pyarrow install run there only after the two workflow commits merge; the job itself was never run, and neither was a pyarrow 21.0.0 install on x86_64 there | NOT run |
 | The real dev executor on amd64, Cloud Run gen2 | nothing | NOT verified |
 
 Caveats about the Docker evidence: Docker Desktop's VM kernel, not Cloud Run's; aarch64, not amd64; the container runs
 as root with seccomp unconfined for the container itself (the jail applies its own filter inside).
 
-## CI change, stated exactly
+## CI changes, stated exactly
 
-`.github/workflows/ci-develop.yml`, step "Isolation and subprocess suites": `--test python_executor_mounts` appended to
-the existing `cargo test` line (two changed lines). Strictly needed because that step lists its suites by name and the new
-suite is a jail test (root, `CAP_SYS_ADMIN`) that only this job can run. It sits alone in its own commit.
-
-Decision for the sandbox owner: the job installs `python3-pandas` and NOT pyarrow, so CI does not exercise a template
-that has pyarrow loaded, nor the test that reads a Parquet part through `/data`. Adding `pip install pyarrow` (or a
-package) is a workflow change and was not made. Until it is, those two things are covered only by the Docker run.
+Two workflow commits, each alone in its slice. (1) `.github/workflows/ci-develop.yml`, step "Isolation and subprocess suites":
+`--test python_executor_mounts` appended to the existing `cargo test` line (two changed lines): that step lists its suites
+by name and the suite is a jail test (root, `CAP_SYS_ADMIN`) that only this job can run. (2) The same job's package step:
+`python3-pip` added to the apt line, one `pip install --break-system-packages --no-deps pyarrow==21.0.0` line (with a
+two-line comment), and `COLMENA_PYEXEC_EXPECT_PYARROW: "1"` in the job's environment (6 changed lines): a template now loads
+pyarrow like the executor image's, the Parquet-through-`/data` test runs, and a missing pyarrow fails the step with the skip
+line it already greps for. Added time, estimated and NOT measured: about 30 to 40 seconds (the pip install and the
+download of the wheel). Whole-job effect: every Python step of the job now runs with pyarrow loaded in the template; the
+Docker replay is the only evidence that this passes, and `--no-deps` relies on the Debian numpy.
 
 ## Requirements for the next unit, which reads `/out` as root
 
@@ -188,7 +195,7 @@ Not done in this unit: nothing here reads `/out` on the trusted side.
 - Its owner must be the executor's user (root) and its mode `0700` (no group or other access). The call directories the
   trusted side creates are `0700` (call) and `0755` (`data`, readable by the slot user through the bind); the jail refuses
   a call directory or `data` directory that is not owned by the executor or is writable by group or others.
-- One executor per staging root: the startup sweep cannot tell a leftover from a call in flight. This is documented, NOT enforced (see the open questions).
+- One executor per staging root: the startup sweep cannot tell a leftover from a call in flight, so this is ENFORCED with a lock file in the root (`a_second_serving_executor_on_one_root_is_refused_and_sweeps_nothing`). The lock is advisory and per open file description: it holds between processes on one kernel, and on a network filesystem whose `flock` is not honoured it would not.
 - If the volume is persistent, the prepared customer data of a call that was killed stays on it until the next start of
   an executor with that root, which sweeps it; a tmpfs volume vanishes with the instance. Mounted output volumes do not
   survive a restart of the container (their namespace is gone).
@@ -197,16 +204,13 @@ Not done in this unit: nothing here reads `/out` on the trusted side.
 
 ## Not run / not verified
 
-Linux CI job; amd64; Cloud Run gen2 or the real dev executor (kernel behaviour of mount propagation, rootfs writability,
+Linux CI job (including the pyarrow install step and the whole job now running with pyarrow loaded); the extended seccomp filter and the bounding-set clearing on amd64 (the numbers are the same on both architectures and the filter was run on aarch64 only); behaviour on a kernel that lacks a listed call (by design the filter loads and answers EPERM where the kernel would answer ENOSYS; no test runs on such a kernel); amd64; Cloud Run gen2 or the real dev executor (kernel behaviour of mount propagation, rootfs writability,
 the new mount API under that kernel, allocator behaviour with pyarrow on amd64); the real jail with pyarrow loaded for
 `RLIMIT_NPROC`/`NOFILE` and the 64 MiB `/tmp`; instance memory with several volumes (spike item 5); real anonymised files.
 Not built here (later slices): filling `data` and the `/v2/run` protocol (C6), the prelude and routing (C7), collecting
 `out` on the trusted side (C8), the executor image and staging volume (A4).
 
 ## Other open questions for the sandbox owner
-
-- CI installs no pyarrow (S8): a template with pyarrow loaded and a Parquet read through `/data` never run in CI, only in the Docker run. Install it in the job (a workflow change, not made) or accept that?
-- One executor per staging root is documented but NOT enforced: a second root process started with the same staging directory would sweep the first one's in-flight calls (and unmount their volumes) at its start. A lock file or a per-process subdirectory would enforce it; not done.
 
 1. Mount points. `/data` and `/out` are created by the jail in the root filesystem when absent (a link or file there is
    refused; calls racing to create them are handled). They then persist, empty and not writable by the program, and later
