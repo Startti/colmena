@@ -188,6 +188,7 @@ async fn fixture(
         .unwrap();
     Fixture {
         resolver: AttachmentResolverImpl {
+            large_tool_served: false,
             registry,
             provider: ProviderKind::OpenAi,
             api_key: "key".to_string(),

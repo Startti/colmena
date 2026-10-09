@@ -49,4 +49,6 @@ pub mod stage;
 #[cfg(test)]
 pub(crate) mod testkit;
 pub mod verify;
+#[cfg(target_os = "linux")]
+pub mod volume;
 pub mod wire;

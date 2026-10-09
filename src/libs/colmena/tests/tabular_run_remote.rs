@@ -94,6 +94,7 @@ fn header(code: &str) -> Vec<u8> {
         timeout_ms: 30_000,
         inputs: Map::new(),
         out_mb: 4,
+        probe: false,
     };
     frame(&serde_json::to_vec(&h).unwrap()).to_vec()
 }
@@ -265,6 +266,7 @@ async fn a_malformed_or_oversized_upload_is_refused_and_leaves_nothing() {
             timeout_ms: 1000,
             inputs: Map::new(),
             out_mb,
+            probe: false,
         };
         let mut b = frame(&serde_json::to_vec(&h).unwrap()).to_vec();
         b.extend_from_slice(&end_frame());
@@ -743,9 +745,8 @@ async fn a_storage_that_lies_about_a_size_fails_the_call_and_leaves_nothing() {
         .unwrap_err();
     assert_eq!(
         err,
-        MountedError::Refused(RunRefusal::Invalid(
-            colmena::tabular_run::refusal::Invalid::Parts
-        ))
+        // Declared 50 more than it sent: the storage cut the transfer (retryable).
+        MountedError::Refused(RunRefusal::Storage)
     );
     released(&s).await;
 }
@@ -808,4 +809,36 @@ async fn a_server_with_mounts_off_is_reported_as_disabled() {
         err,
         MountedError::Refused(RunRefusal::Unavailable(Unavailable::MountsDisabled))
     );
+}
+
+/// A probe is answered before any data is read and runs nothing: 204 when a call
+/// would be taken, the usual refusal when it would not, and no volume is kept.
+#[tokio::test]
+async fn a_probe_says_whether_a_call_would_be_taken_and_keeps_nothing() {
+    if !enabled() {
+        return;
+    }
+    let s = serve(Some(staging_root())).await;
+    let probe = |_: ()| {
+        let h = CallHeader {
+            v: WIRE_V2,
+            code: String::new(),
+            mode: "none".into(),
+            timeout_ms: 1000,
+            inputs: Map::new(),
+            out_mb: 4,
+            probe: true,
+        };
+        let mut b = frame(&serde_json::to_vec(&h).unwrap()).to_vec();
+        b.extend_from_slice(&end_frame());
+        post(&s.url, Some(TOKEN), b.into()).send()
+    };
+    assert_eq!(probe(()).await.unwrap().status(), 204);
+    released(&s).await;
+    let (a, b) = (s.exec.stage_call(4).unwrap(), s.exec.stage_call(4).unwrap());
+    let busy = probe(()).await.unwrap();
+    assert_eq!(busy.status(), 503);
+    assert_eq!(busy.json::<Refusal>().await.unwrap().refusal, "busy");
+    drop((a, b));
+    released(&s).await;
 }

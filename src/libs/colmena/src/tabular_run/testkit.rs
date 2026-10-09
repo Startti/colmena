@@ -37,6 +37,13 @@ pub(crate) struct FakeStorage {
     pub reads: Mutex<Vec<String>>,
     /// What `store_stream` was given: file name and bytes.
     pub stored: Mutex<Vec<(String, Vec<u8>)>>,
+    /// Keys `delete` was asked for.
+    pub deleted: Mutex<Vec<String>>,
+    /// Fault injection for `store_stream`: fail the nth call (1-based), or
+    /// stall it for a while.
+    pub store_fail_on: Mutex<Option<usize>>,
+    pub store_stall_on: Mutex<Option<(usize, std::time::Duration)>>,
+    pub store_calls: Mutex<usize>,
     /// Keys that fail to read.
     pub broken: Mutex<Vec<String>>,
     /// Keys served by a generator instead of the bytes in `objects`.
@@ -52,6 +59,10 @@ impl FakeStorage {
             chunk: 1024,
             reads: Mutex::new(vec![]),
             stored: Mutex::new(vec![]),
+            deleted: Mutex::new(vec![]),
+            store_fail_on: Mutex::new(None),
+            store_stall_on: Mutex::new(None),
+            store_calls: Mutex::new(0),
             broken: Mutex::new(vec![]),
             custom: Mutex::new(HashMap::new()),
         })
@@ -114,14 +125,32 @@ impl OutputStorageRepository for FakeStorage {
             filename: "object".into(),
         })
     }
-    async fn delete(&self, _key: &str) -> Result<(), StorageError> {
-        panic!("the run path never deletes from storage")
+    async fn delete(&self, key: &str) -> Result<(), StorageError> {
+        // Only a call that did not complete deletes what it stored.
+        self.deleted.lock().unwrap().push(key.to_string());
+        Ok(())
     }
     async fn store_stream(
         &self,
         mut req: crate::storage::domain::StoreStreamRequest,
     ) -> Result<StoredOutput, StorageError> {
         use futures::StreamExt;
+        let call = {
+            let mut n = self.store_calls.lock().unwrap();
+            *n += 1;
+            *n
+        };
+        let stall = *self.store_stall_on.lock().unwrap();
+        if let Some((nth, d)) = stall {
+            if nth == call {
+                tokio::time::sleep(d).await;
+            }
+        }
+        if *self.store_fail_on.lock().unwrap() == Some(call) {
+            return Err(StorageError::BackendUnavailable(
+                "secret adapter detail".into(),
+            ));
+        }
         let mut all = vec![];
         while let Some(chunk) = req.stream.next().await {
             all.extend_from_slice(&chunk?);
@@ -335,6 +364,8 @@ pub(crate) struct Recorder {
     pub answer: Mutex<Option<Result<MountedResult, MountedError>>>,
     /// Files the fake "code" leaves in the output volume, fed to the sink.
     pub outputs: Mutex<Vec<(String, Vec<u8>)>>,
+    /// How long the fake "code" takes, to exercise progress and the call's budget.
+    pub delay: Mutex<Option<std::time::Duration>>,
 }
 
 impl Recorder {
@@ -343,6 +374,7 @@ impl Recorder {
             seen: Mutex::new(vec![]),
             answer: Mutex::new(Some(answer)),
             outputs: Mutex::new(vec![]),
+            delay: Mutex::new(None),
         })
     }
     pub fn ok(output: Value) -> Arc<Self> {
@@ -386,6 +418,10 @@ impl MountedExecutor for Recorder {
             .lock()
             .unwrap()
             .push((req, call.tables.to_vec(), call.out_mb));
+        let delay = *self.delay.lock().unwrap();
+        if let Some(d) = delay {
+            tokio::time::sleep(d).await;
+        }
         let mut answer = self.answer.lock().unwrap().take().expect("answered once");
         let files = self.outputs.lock().unwrap().clone();
         if let (Some(sink), Ok(done), false) = (call.sink, answer.as_mut(), files.is_empty()) {

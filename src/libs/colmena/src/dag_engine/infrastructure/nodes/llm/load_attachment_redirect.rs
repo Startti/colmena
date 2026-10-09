@@ -74,6 +74,7 @@ fn resolver(
     provider: ProviderKind,
 ) -> AttachmentResolverImpl {
     AttachmentResolverImpl {
+        large_tool_served: false,
         registry,
         provider,
         api_key: "key".to_string(),

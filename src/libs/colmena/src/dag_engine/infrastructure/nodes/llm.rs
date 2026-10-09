@@ -1041,6 +1041,9 @@ struct AttachmentResolverImpl {
     /// provider's Files API. None disables cross-provider lazy upload (only
     /// pre-resolved rows work).
     storage: Option<std::sync::Arc<dyn crate::storage::domain::OutputStorageRepository>>,
+    /// Whether the large-file tool is served this turn (a runtime is wired and the
+    /// switch is on): decides what the refusal tells the model to use.
+    large_tool_served: bool,
 }
 
 /// `load_attachment` never reads, inlines or uploads an object the HOST owns. The
@@ -1048,9 +1051,12 @@ struct AttachmentResolverImpl {
 /// the row judged is the row read (no second lookup, no row of another provider),
 /// whatever the large tabular switch says now and whatever the row's size or mime
 /// say. Every other row, and every other error, is exactly what it always was.
-fn refuse_host_reference(row: &crate::llm::domain::ConversationAttachment) -> Result<(), String> {
+fn refuse_host_reference(
+    row: &crate::llm::domain::ConversationAttachment,
+    large_tool_served: bool,
+) -> Result<(), String> {
     if row.is_host_storage_ref() {
-        Err(crate::llm::domain::large_tabular::refusal_text().to_string())
+        Err(crate::llm::domain::large_tabular::refusal_text_for(large_tool_served).to_string())
     } else {
         Ok(())
     }
@@ -1075,7 +1081,7 @@ impl crate::llm::application::LoadAttachmentResolver for AttachmentResolverImpl 
             .map_err(|e| e.to_string())?;
         let att = match row {
             Some(a) => {
-                refuse_host_reference(&a)?;
+                refuse_host_reference(&a, self.large_tool_served)?;
                 a
             }
             None => {
@@ -1089,7 +1095,7 @@ impl crate::llm::application::LoadAttachmentResolver for AttachmentResolverImpl 
                 let Some(gen) = gen_row else {
                     return Ok(None);
                 };
-                refuse_host_reference(&gen)?;
+                refuse_host_reference(&gen, self.large_tool_served)?;
                 let storage = self.storage.as_ref().ok_or_else(|| {
                     "load_attachment: generated artifact present but no OutputStorageRepository \
                      is wired — cannot resolve bytes for cross-provider upload"
@@ -2508,6 +2514,10 @@ impl ExecutableNode for LlmNode {
         // lazily by the AttachmentResolver: on first `load_attachment` call,
         // bytes are read via OutputStorageRepository, uploaded to the current
         // provider's Files API, and a sibling row is upserted.
+        // One answer for the whole turn: is the large-file tool served (switch on,
+        // runtime wired)? It decides the refusals' wording and, with a host-owned
+        // row in the catalog, whether the tool is offered with the large-file text.
+        let large_tool_served = self.large_tabular_enabled() && self.large_runtime.get().is_some();
         let attachment_catalog: Vec<crate::llm::domain::ConversationAttachment> =
             if attachments_enabled {
                 if let (Some(reg), Some(sid)) =
@@ -2976,7 +2986,9 @@ impl ExecutableNode for LlmNode {
                 // a runtime that can serve them is wired; otherwise the tool is
                 // exactly what it always was.
                 tools.push(
-                    if self.large_tabular_enabled() && self.large_runtime.get().is_some() {
+                    if large_tool_served
+                        && attachment_catalog.iter().any(|a| a.is_host_storage_ref())
+                    {
                         build_attachment_run_python_tool_definition_for_large_files()
                     } else {
                         build_attachment_run_python_tool_definition()
@@ -3860,6 +3872,7 @@ impl ExecutableNode for LlmNode {
                         provider: provider_kind.clone(),
                         api_key: api_key.clone(),
                         storage: self.storage.clone(),
+                        large_tool_served,
                     })
                         as std::sync::Arc<dyn crate::llm::application::LoadAttachmentResolver>
                 }),
@@ -3884,6 +3897,7 @@ impl ExecutableNode for LlmNode {
                         provider: provider_kind.clone(),
                         api_key: api_key.clone(),
                         storage: self.storage.clone(),
+                        large_tool_served,
                     })
                         as std::sync::Arc<dyn crate::llm::application::LoadAttachmentResolver>
                 }),
@@ -5950,6 +5964,7 @@ mod resolver_tests {
             provider: ProviderKind::OpenAi,
             api_key: "dummy".to_string(),
             storage: None,
+            large_tool_served: false,
         };
         let file = resolver.resolve("agent_1", "doc-1").await.unwrap().unwrap();
         match file.source {
@@ -5977,6 +5992,7 @@ mod resolver_tests {
             provider: ProviderKind::OpenAi,
             api_key: "dummy".to_string(),
             storage: None,
+            large_tool_served: false,
         };
         let res = resolver.resolve("agent_1", "missing").await.unwrap();
         assert!(res.is_none());
@@ -6023,6 +6039,7 @@ mod resolver_tests {
             provider: ProviderKind::OpenAi,
             api_key: "dummy".to_string(),
             storage: None, // no storage adapter
+            large_tool_served: false,
         };
 
         // No storage → must error (not silently return None) so the LLM is
@@ -6092,6 +6109,7 @@ mod resolver_tests {
             provider: ProviderKind::OpenAi,
             api_key: "dummy".to_string(),
             storage: Some(storage),
+            large_tool_served: false,
         };
 
         let file = resolver
@@ -6164,6 +6182,7 @@ mod resolver_tests {
             provider: ProviderKind::Anthropic,
             api_key: "dummy".to_string(),
             storage: Some(storage),
+            large_tool_served: false,
         };
         let err = resolver
             .resolve("agent_1", "img-big")
@@ -6435,6 +6454,7 @@ mod resolver_tests {
             provider: ProviderKind::OpenAi,
             api_key: "dummy".to_string(),
             storage: None,
+            large_tool_served: false,
         };
 
         let res = resolver.resolve("agent_1", "doc-1").await.unwrap();
@@ -6544,6 +6564,7 @@ mod resolver_tests {
 
         // load_attachment from an Anthropic model.
         let loader = AttachmentResolverImpl {
+            large_tool_served: false,
             registry: registry.clone(),
             provider: ProviderKind::Anthropic,
             api_key: "test-key".to_string(),
@@ -6682,6 +6703,7 @@ mod resolver_tests {
 
         // A later load_attachment from Anthropic reads the stored bytes.
         let loader = AttachmentResolverImpl {
+            large_tool_served: false,
             registry: registry.clone(),
             provider: ProviderKind::Anthropic,
             api_key: "test-key".to_string(),

@@ -29,6 +29,11 @@ pub const PART_FILE_MAX_BYTES: u64 = 2 * PART_MAX_BYTES as u64;
 pub struct StageLimits {
     pub total_bytes: u64,
     pub part_bytes: u64,
+    /// No chunk for this long ends the stage: a storage that stalls or trickles
+    /// holds nothing. Per chunk.
+    pub idle: std::time::Duration,
+    /// The whole staging (every part) may take at most this long.
+    pub total_time: std::time::Duration,
 }
 
 impl Default for StageLimits {
@@ -36,6 +41,8 @@ impl Default for StageLimits {
         Self {
             total_bytes: DATA_MAX_BYTES,
             part_bytes: PART_FILE_MAX_BYTES,
+            idle: super::wire::IDLE_TIMEOUT,
+            total_time: super::wire::TRANSFER_MAX,
         }
     }
 }
@@ -84,8 +91,32 @@ pub(super) async fn create_file(path: &Path) -> Result<tokio::fs::File, RunRefus
     Ok(file)
 }
 
+/// Ends a file the call will read: everything written, flushed and synced, with
+/// every error reported. A file left to its drop can lose its tail silently.
+async fn finish<W>(file: &mut W) -> Result<(), RunRefusal>
+where
+    W: tokio::io::AsyncWrite + Unpin + Syncable,
+{
+    file.flush().await.map_err(local)?;
+    file.sync().await.map_err(local)
+}
+
+/// What [`finish`] needs besides writing: a durable sync.
+#[async_trait::async_trait]
+pub(super) trait Syncable {
+    async fn sync(&self) -> std::io::Result<()>;
+}
+
+#[async_trait::async_trait]
+impl Syncable for tokio::fs::File {
+    async fn sync(&self) -> std::io::Result<()> {
+        self.sync_all().await
+    }
+}
+
 /// Copies one part from storage into `dest`, returning the bytes written.
 /// `already` is what the call has staged so far.
+#[allow(clippy::too_many_arguments)]
 async fn copy_part(
     storage: &dyn OutputStorageRepository,
     key: &str,
@@ -93,17 +124,29 @@ async fn copy_part(
     already: u64,
     limits: StageLimits,
     created: &mut Vec<PathBuf>,
+    deadline: tokio::time::Instant,
+    single_table: bool,
 ) -> Result<u64, RunRefusal> {
-    let mut stream = storage
-        .read_stream(key)
+    // Every wait on storage is bounded: by the idle limit and by the stage's deadline.
+    let wait = |idle: std::time::Duration| {
+        idle.min(deadline.saturating_duration_since(tokio::time::Instant::now()))
+    };
+    let mut stream = tokio::time::timeout(wait(limits.idle), storage.read_stream(key))
         .await
+        .map_err(|_| RunRefusal::Storage)?
         .map_err(|_| RunRefusal::Storage)?;
     let declared = stream.size_bytes;
     let part_over = RunRefusal::OverBudget(Budget::Part {
         limit_bytes: limits.part_bytes,
     });
-    let total_over = RunRefusal::OverBudget(Budget::Data {
-        limit_bytes: limits.total_bytes,
+    // A single chosen table that does not fit cannot be helped by naming fewer.
+    let total_over = RunRefusal::OverBudget(match single_table {
+        true => Budget::Table {
+            limit_bytes: limits.total_bytes,
+        },
+        false => Budget::Data {
+            limit_bytes: limits.total_bytes,
+        },
     });
     // Decided from the declared size, before the file exists.
     if declared > limits.part_bytes {
@@ -115,9 +158,17 @@ async fn copy_part(
     let mut file = create_file(dest).await?;
     created.push(dest.to_path_buf());
     let mut written = 0u64;
-    while let Some(chunk) = stream.stream.next().await {
+    loop {
+        let next = tokio::time::timeout(wait(limits.idle), stream.stream.next())
+            .await
+            .map_err(|_| RunRefusal::Storage)?;
+        let Some(chunk) = next else { break };
         let chunk = chunk.map_err(|_| RunRefusal::Storage)?;
         written = written.saturating_add(chunk.len() as u64);
+        // More than it said it would send: the record and the storage disagree.
+        if written > declared {
+            return Err(RunRefusal::Invalid(Invalid::Parts));
+        }
         // And again on what arrives: the declared size may be a lie.
         if written > limits.part_bytes {
             return Err(part_over);
@@ -127,9 +178,11 @@ async fn copy_part(
         }
         file.write_all(&chunk).await.map_err(local)?;
     }
-    file.flush().await.map_err(local)?;
+    finish(&mut file).await?;
+    // A stream that ended cleanly but early is a storage that cut the transfer:
+    // retryable, not a mismatch with the record.
     if written != declared {
-        return Err(RunRefusal::Invalid(Invalid::Parts));
+        return Err(RunRefusal::Storage);
     }
     Ok(written)
 }
@@ -183,7 +236,9 @@ async fn stage_into(
         .write_all(manifest.as_bytes())
         .await
         .map_err(local)?;
+    finish(&mut manifest_file).await?;
 
+    let deadline = tokio::time::Instant::now() + limits.total_time;
     let mut parts = 0usize;
     for &t in tables {
         let table = plan
@@ -197,7 +252,17 @@ async fn stage_into(
             let rel = part_path(t, p).map_err(|_| RunRefusal::Invalid(Invalid::Manifest))?;
             let dest = data_dir.join(&rel);
             let key = plan.part_key(t, p)?;
-            bytes += copy_part(storage, &key, &dest, bytes, limits, created).await?;
+            bytes += copy_part(
+                storage,
+                &key,
+                &dest,
+                bytes,
+                limits,
+                created,
+                deadline,
+                tables.len() <= 1,
+            )
+            .await?;
             parts += 1;
         }
     }
@@ -329,13 +394,15 @@ mod tests {
         let limits = StageLimits {
             total_bytes: manifest_len + 250,
             part_bytes: 100,
+            ..StageLimits::default()
         };
         let err = stage_tables(&*p.storage, &plan, &[0], dir.path(), limits)
             .await
             .unwrap_err();
         assert_eq!(
             err,
-            RunRefusal::OverBudget(Budget::Data {
+            // One table asked for: naming fewer cannot help, and the text says so.
+            RunRefusal::OverBudget(Budget::Table {
                 limit_bytes: limits.total_bytes
             })
         );
@@ -344,6 +411,7 @@ mod tests {
         let at = StageLimits {
             total_bytes: manifest_len + 300,
             part_bytes: 100,
+            ..StageLimits::default()
         };
         stage_tables(&*p.storage, &plan, &[0], dir.path(), at)
             .await
@@ -366,6 +434,7 @@ mod tests {
         let limits = StageLimits {
             total_bytes: 100 * MIB as u64,
             part_bytes: 5 * MIB as u64,
+            ..StageLimits::default()
         };
         let err = stage_tables(&*p.storage, &plan, &[0], dir.path(), limits)
             .await
@@ -396,20 +465,18 @@ mod tests {
         let limits = StageLimits {
             total_bytes: 100 * MIB as u64,
             part_bytes: 4 * MIB as u64,
+            ..StageLimits::default()
         };
         let err = stage_tables(&*p.storage, &plan, &[0], dir.path(), limits)
             .await
             .unwrap_err();
-        assert_eq!(
-            err,
-            RunRefusal::OverBudget(Budget::Part {
-                limit_bytes: limits.part_bytes
-            })
-        );
+        // Past what it declared (1 KiB) is a disagreement with the record, found
+        // at the first chunk that crosses it; nothing like the limit is read.
+        assert_eq!(err, RunRefusal::Invalid(Invalid::Parts));
         let produced = live.produced.load(SeqCst);
         assert!(
-            produced <= 5 * MIB,
-            "read {produced} bytes past a 4 MiB limit"
+            produced <= 2 * MIB,
+            "read {produced} bytes of an endless stream"
         );
         assert!(entries(dir.path()).is_empty());
     }
@@ -429,15 +496,13 @@ mod tests {
         let limits = StageLimits {
             total_bytes: manifest_len + 3 * MIB as u64,
             part_bytes: 100 * MIB as u64,
+            ..StageLimits::default()
         };
         let err = stage_tables(&*p.storage, &plan, &[0], dir.path(), limits)
             .await
             .unwrap_err();
-        assert!(
-            matches!(err, RunRefusal::OverBudget(Budget::Data { .. })),
-            "{err:?}"
-        );
-        assert!(live.produced.load(SeqCst) <= 4 * MIB);
+        assert_eq!(err, RunRefusal::Invalid(Invalid::Parts), "{err:?}");
+        assert!(live.produced.load(SeqCst) <= 2 * MIB);
         assert!(entries(dir.path()).is_empty());
     }
 
@@ -445,7 +510,12 @@ mod tests {
     /// storage said it was: refused, nothing kept.
     #[tokio::test]
     async fn bytes_that_differ_from_the_declared_size_are_refused() {
-        for (total, declared) in [(1000u64, 2000u64), (2000, 1000)] {
+        // Less than declared: a storage that cut the transfer (retryable). More:
+        // the storage and the record disagree.
+        for (total, declared, expected) in [
+            (1000u64, 2000u64, RunRefusal::Storage),
+            (2000, 1000, RunRefusal::Invalid(Invalid::Parts)),
+        ] {
             let p = prepared(&[("sales", 1)], 4).await;
             let plan = plan_of(&p).await;
             let live = Arc::new(Live::default());
@@ -458,11 +528,7 @@ mod tests {
             let err = stage_tables(&*p.storage, &plan, &[0], dir.path(), Default::default())
                 .await
                 .unwrap_err();
-            assert_eq!(
-                err,
-                RunRefusal::Invalid(Invalid::Parts),
-                "{total}/{declared}"
-            );
+            assert_eq!(err, expected, "{total}/{declared}");
             assert!(entries(dir.path()).is_empty());
         }
     }
@@ -501,6 +567,7 @@ mod tests {
         let limits = StageLimits {
             total_bytes: 200 * MIB as u64,
             part_bytes: 100 * MIB as u64,
+            ..StageLimits::default()
         };
         stage_tables(&*p.storage, &plan, &[0], dir.path(), limits)
             .await
@@ -570,5 +637,131 @@ mod tests {
     fn the_part_limit_is_twice_what_the_converter_rolls_at() {
         assert_eq!(PART_FILE_MAX_BYTES, 128 * 1024 * 1024);
         assert_eq!(StageLimits::default().total_bytes, DATA_MAX_BYTES);
+    }
+
+    /// With several tables chosen the refusal is the one that says to name fewer.
+    #[tokio::test]
+    async fn several_tables_over_the_total_are_told_to_name_fewer() {
+        let p = prepared(&[("sales", 1), ("stores", 1)], 100).await;
+        let plan = plan_of(&p).await;
+        let dir = tempfile::tempdir().unwrap();
+        let manifest_len = p.manifest.to_json().unwrap().len() as u64;
+        let limits = StageLimits {
+            total_bytes: manifest_len + 150,
+            part_bytes: 100,
+            ..StageLimits::default()
+        };
+        let err = stage_tables(&*p.storage, &plan, &[0, 1], dir.path(), limits)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, RunRefusal::OverBudget(Budget::Data { .. })),
+            "{err:?}"
+        );
+        assert!(err.message().contains("name fewer tables"));
+        assert!(Budget::Table {
+            limit_bytes: 1 << 30
+        }
+        .eq(&Budget::Table {
+            limit_bytes: 1 << 30
+        }));
+        let one = RunRefusal::OverBudget(Budget::Table {
+            limit_bytes: 1 << 30,
+        });
+        assert!(one.message().contains("alone") && !one.message().contains("name fewer"));
+    }
+
+    /// A writer that accepts everything but fails when it is flushed: a file left
+    /// to its drop would lose its tail without a word. The manifest must be
+    /// flushed and synced, and the failure must be the call's.
+    #[tokio::test]
+    async fn a_write_that_fails_at_the_flush_is_a_failure_not_a_truncated_file() {
+        struct FailsOnFlush;
+        impl tokio::io::AsyncWrite for FailsOnFlush {
+            fn poll_write(
+                self: std::pin::Pin<&mut Self>,
+                _: &mut std::task::Context<'_>,
+                b: &[u8],
+            ) -> std::task::Poll<std::io::Result<usize>> {
+                std::task::Poll::Ready(Ok(b.len()))
+            }
+            fn poll_flush(
+                self: std::pin::Pin<&mut Self>,
+                _: &mut std::task::Context<'_>,
+            ) -> std::task::Poll<std::io::Result<()>> {
+                std::task::Poll::Ready(Err(std::io::Error::other("ENOSPC at the flush")))
+            }
+            fn poll_shutdown(
+                self: std::pin::Pin<&mut Self>,
+                _: &mut std::task::Context<'_>,
+            ) -> std::task::Poll<std::io::Result<()>> {
+                std::task::Poll::Ready(Ok(()))
+            }
+        }
+        #[async_trait::async_trait]
+        impl Syncable for FailsOnFlush {
+            async fn sync(&self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let mut w = FailsOnFlush;
+        let err = finish(&mut w).await.unwrap_err();
+        assert_eq!(err, RunRefusal::Unavailable(Unavailable::Executor));
+        assert!(!err.message().contains("ENOSPC"));
+    }
+
+    /// A storage that stalls (or trickles) holds nothing for longer than the idle
+    /// limit, and the stage as a whole has a deadline.
+    #[tokio::test]
+    async fn a_storage_that_stalls_or_trickles_is_cut_off() {
+        use crate::storage::domain::StoredStream;
+        use futures::StreamExt;
+        let p = prepared(&[("sales", 1)], 4).await;
+        let plan = plan_of(&p).await;
+        let key = plan.part_key(0, 0).unwrap();
+        // Stalls: three bytes, then nothing, ever.
+        p.storage.serve(&key, || StoredStream {
+            stream: Box::pin(
+                futures::stream::iter(vec![Ok(bytes::Bytes::from_static(b"abc"))])
+                    .chain(futures::stream::pending()),
+            ),
+            size_bytes: 1000,
+            mime_type: "x".into(),
+            filename: "p".into(),
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let limits = StageLimits {
+            idle: std::time::Duration::from_millis(100),
+            ..StageLimits::default()
+        };
+        let started = std::time::Instant::now();
+        let err = stage_tables(&*p.storage, &plan, &[0], dir.path(), limits)
+            .await
+            .unwrap_err();
+        assert_eq!(err, RunRefusal::Storage);
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
+        assert!(entries(dir.path()).is_empty());
+        // Trickles: a byte every 40 ms never trips the idle limit; the deadline does.
+        p.storage.serve(&key, || StoredStream {
+            stream: Box::pin(futures::stream::unfold(0u64, |n| async move {
+                tokio::time::sleep(std::time::Duration::from_millis(40)).await;
+                Some((Ok(bytes::Bytes::from_static(b"x")), n + 1))
+            })),
+            size_bytes: 100_000,
+            mime_type: "x".into(),
+            filename: "p".into(),
+        });
+        let limits = StageLimits {
+            idle: std::time::Duration::from_millis(500),
+            total_time: std::time::Duration::from_millis(300),
+            ..StageLimits::default()
+        };
+        let started = std::time::Instant::now();
+        let err = stage_tables(&*p.storage, &plan, &[0], dir.path(), limits)
+            .await
+            .unwrap_err();
+        assert_eq!(err, RunRefusal::Storage);
+        assert!(started.elapsed() < std::time::Duration::from_secs(3));
+        assert!(entries(dir.path()).is_empty());
     }
 }

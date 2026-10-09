@@ -8,7 +8,7 @@
 
 use super::collect::RejectReason;
 use super::mounted::{MountedCall, MountedError, MountedExecutor, OUT_MIB};
-use super::outputs::StoreSink;
+use super::outputs::{OutputGuard, StoreSink};
 use super::prelude::{prelude_inputs, tables_summary, unwrap_emitted, wrap_large_code};
 use super::refusal::{FailureReason, RunRefusal, Unavailable};
 use super::stage::StageLimits;
@@ -74,8 +74,10 @@ pub struct EmittedOutput {
     pub dtypes: Vec<(String, String)>,
 }
 
-/// A call whose code ran to the end.
-#[derive(Debug, Clone, PartialEq)]
+/// A call whose code ran to the end. The files it returned are in storage and
+/// stay there only if the holder commits `guard` (after registering them): dropped
+/// without it, they are deleted.
+#[derive(Debug)]
 pub struct LargeRunOutput {
     pub stdout: String,
     pub result: Value,
@@ -86,6 +88,7 @@ pub struct LargeRunOutput {
     /// What was written to the output volume and not kept, and why, as text
     /// for the model (a name only when it passed the charset).
     pub not_kept: Vec<String>,
+    pub guard: OutputGuard,
 }
 
 /// Why a call produced no output.
@@ -98,8 +101,9 @@ pub enum LargeRunError {
     Timeout {
         secs: u64,
     },
-    /// The executor failed for a reason that is not the code's.
-    Internal(String),
+    /// The executor failed for a reason that is not the code's. The detail is
+    /// logged, never returned: it can carry a socket path of the host.
+    Internal,
 }
 
 /// What the model is told when the child ended without a result.
@@ -219,8 +223,8 @@ impl LargeTabularRuntime {
         match self.executor.run_with_mounts(call, mounted).await {
             Ok(done) => {
                 let (result, reports) = unwrap_emitted(done.result.output.unwrap_or(Value::Null));
-                let emitted = sink
-                    .take()
+                let (stored, guard) = sink.take_guarded();
+                let emitted = stored
                     .into_iter()
                     .map(|stored| {
                         let report = reports.iter().find(|r| r.name == stored.name);
@@ -253,6 +257,7 @@ impl LargeTabularRuntime {
                     tables: tables_summary(plan.manifest(), &chosen),
                     emitted,
                     not_kept,
+                    guard,
                 })
             }
             Err(MountedError::Refused(r)) => Err(refused(r)),
@@ -267,7 +272,8 @@ impl LargeTabularRuntime {
                 secs: timeout.as_secs(),
             }),
             Err(MountedError::Run(PythonRunError::Internal(text))) => {
-                Err(LargeRunError::Internal(text))
+                tracing::warn!(target: "colmena::tabular_run", detail = %text, "large-file call: executor failure");
+                Err(LargeRunError::Internal)
             }
         }
     }
@@ -474,7 +480,7 @@ mod tests {
             ),
             (
                 PythonRunError::Internal("PythonExecutorError: boom".into()),
-                LargeRunError::Internal("PythonExecutorError: boom".into()),
+                LargeRunError::Internal,
             ),
         ];
         for (run_error, expected) in cases {
@@ -590,5 +596,68 @@ mod tests {
         assert_eq!(c.prepare_wait, Duration::from_secs(240));
         assert_eq!(c.heavy_timeout, Duration::from_secs(300));
         assert_eq!(c.out_mb, OUT_MIB);
+    }
+
+    async fn settle() {
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+
+    /// A later output that fails to store takes the earlier ones back: nothing is
+    /// kept, nothing is reported as kept, and the refusal hides the adapter's text.
+    #[tokio::test]
+    async fn a_failing_store_deletes_the_outputs_stored_before_it() {
+        let p = prepared(&[("sales", 1)], 4).await;
+        *p.storage.store_fail_on.lock().unwrap() = Some(2);
+        let exec = Recorder::ok_with_files(json!(1), &[("a.csv", b"1"), ("b.csv", b"2")]);
+        let err = runtime(&p, exec, true)
+            .run(request("pass", &[]))
+            .await
+            .unwrap_err();
+        assert_eq!(err, LargeRunError::Refused(RunRefusal::Storage));
+        settle().await;
+        assert_eq!(*p.storage.deleted.lock().unwrap(), ["generated/a.csv"]);
+    }
+
+    /// The call's clock drops the future in the middle of collecting: what was
+    /// already stored is deleted by the guard, not left behind.
+    #[tokio::test]
+    async fn a_call_dropped_while_collecting_deletes_what_it_stored() {
+        let p = prepared(&[("sales", 1)], 4).await;
+        *p.storage.store_stall_on.lock().unwrap() = Some((2, Duration::from_secs(30)));
+        let exec = Recorder::ok_with_files(json!(1), &[("a.csv", b"1"), ("b.csv", b"2")]);
+        let rt = runtime(&p, exec, true);
+        let cut =
+            tokio::time::timeout(Duration::from_millis(400), rt.run(request("pass", &[]))).await;
+        assert!(cut.is_err(), "still collecting when it was cut");
+        settle().await;
+        assert_eq!(*p.storage.deleted.lock().unwrap(), ["generated/a.csv"]);
+    }
+
+    /// The holder of a finished call that never commits (its own future was dropped
+    /// before registration, or registration failed) deletes the files by dropping.
+    #[tokio::test]
+    async fn outputs_not_committed_are_deleted_and_committed_ones_are_kept() {
+        let p = prepared(&[("sales", 1)], 4).await;
+        let exec = Recorder::ok_with_files(json!(1), &[("a.csv", b"1")]);
+        let out = runtime(&p, exec, true)
+            .run(request("pass", &[]))
+            .await
+            .unwrap();
+        assert_eq!(out.emitted.len(), 1);
+        drop(out);
+        settle().await;
+        assert_eq!(*p.storage.deleted.lock().unwrap(), ["generated/a.csv"]);
+        let exec = Recorder::ok_with_files(json!(1), &[("b.csv", b"2")]);
+        let out = runtime(&p, exec, true)
+            .run(request("pass", &[]))
+            .await
+            .unwrap();
+        out.guard.commit();
+        settle().await;
+        assert_eq!(
+            *p.storage.deleted.lock().unwrap(),
+            ["generated/a.csv"],
+            "b.csv stays"
+        );
     }
 }

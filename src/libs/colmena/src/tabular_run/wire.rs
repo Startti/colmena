@@ -45,6 +45,10 @@ pub struct CallHeader {
     pub timeout_ms: u64,
     pub inputs: Map<String, Value>,
     pub out_mb: u64,
+    /// Ask only whether a call like this would be taken now (the route, the
+    /// credentials, mounts, a free volume): the answer is 204 and nothing runs.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub probe: bool,
 }
 
 /// One file of the request: its relative path and the bytes that follow.
@@ -277,6 +281,7 @@ mod tests {
             timeout_ms: 1000,
             inputs: Map::new(),
             out_mb: 4,
+            probe: false,
         };
         let mut out = frame(&serde_json::to_vec(&header).unwrap()).to_vec();
         for (path, bytes) in files {
