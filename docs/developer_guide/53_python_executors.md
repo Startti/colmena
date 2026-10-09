@@ -220,7 +220,11 @@ included, is never followed on the trusted side: the volume is unmounted before 
 like `/data` when missing.
 
 With a staging root configured the template's fixed environment gains two variables, `ARROW_DEFAULT_MEMORY_POOL=system`
-and `ARROW_IO_THREADS=1`, and every call inherits them; without one the environment is exactly the four variables above.
+and `ARROW_IO_THREADS=1`, and every call inherits them; without one the environment is exactly the five fixed variables of
+`TEMPLATE_ENV`: `PATH`, three BLAS/OpenMP thread counts of 1 and `JE_ARROW_MALLOC_CONF=background_thread:false`. The last
+stops the jemalloc bundled in pyarrow's x86_64 wheels from starting a `jemalloc_bg_thd` thread during `import pyarrow`
+(pandas imports it when installed), which would give the template a second thread and fail its single-thread check for
+every call; the check is unchanged, and only jemalloc's timer-driven purge of unused pages becomes purge-on-use.
 The system pool is required under the address-space limit: with pyarrow's default allocator, versions 21 and later
 reserve about 1 GiB of address space per process. pandas 1.5.3 imports pyarrow inside `import pandas` when it is
 installed, so a template of such an image has it loaded. A template with a staging root checks, without importing

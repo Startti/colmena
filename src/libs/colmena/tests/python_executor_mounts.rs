@@ -953,6 +953,7 @@ async fn a_staged_executor_adds_exactly_the_arrow_variables() {
         "OPENBLAS_NUM_THREADS": "1",
         "OMP_NUM_THREADS": "1",
         "MKL_NUM_THREADS": "1",
+        "JE_ARROW_MALLOC_CONF": "background_thread:false",
         "ARROW_DEFAULT_MEMORY_POOL": "system",
         "ARROW_IO_THREADS": "1",
     });

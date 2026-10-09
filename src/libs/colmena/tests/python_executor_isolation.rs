@@ -86,6 +86,7 @@ async fn the_environment_holds_only_the_template_variables() {
         "OPENBLAS_NUM_THREADS": "1",
         "OMP_NUM_THREADS": "1",
         "MKL_NUM_THREADS": "1",
+        "JE_ARROW_MALLOC_CONF": "background_thread:false",
     });
     for k in ["LANG", "LC_ALL", "LC_CTYPE"] {
         if let Ok(v) = std::env::var(k) {
