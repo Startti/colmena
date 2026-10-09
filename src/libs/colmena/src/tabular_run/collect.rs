@@ -412,4 +412,145 @@ mod tests {
         assert_eq!(names(&c), ["ok.csv"]);
         assert_eq!(reasons(&c), [RejectReason::NotARegularFile]);
     }
+
+    #[test]
+    fn a_directory_is_refused_and_not_entered() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::create_dir(d.path().join("sub.csv")).unwrap();
+        put(&d.path().join("sub.csv"), "inner.csv", b"x");
+        let c = collect_out(d.path(), CollectLimits::default()).unwrap();
+        assert!(c.files.is_empty());
+        assert_eq!(reasons(&c), [RejectReason::NotARegularFile]);
+    }
+
+    /// Two names for one file: neither is kept, so a hard link cannot make a
+    /// file count twice or point at something outside what was checked.
+    #[test]
+    fn a_hard_linked_file_is_refused_under_every_name() {
+        let d = tempfile::tempdir().unwrap();
+        put(d.path(), "one.csv", b"x");
+        std::fs::hard_link(d.path().join("one.csv"), d.path().join("two.csv")).unwrap();
+        put(d.path(), "solo.csv", b"x");
+        let c = collect_out(d.path(), CollectLimits::default()).unwrap();
+        assert_eq!(names(&c), ["solo.csv"]);
+        assert_eq!(reasons(&c), [RejectReason::HardLinked; 2]);
+    }
+
+    /// Only the logical size counts: a sparse file allocates nothing and still
+    /// returns this many bytes on a read.
+    #[test]
+    fn a_sparse_file_is_judged_by_its_logical_size() {
+        let d = tempfile::tempdir().unwrap();
+        let f = File::create(d.path().join("sparse.parquet")).unwrap();
+        f.set_len(2 * 1024 * 1024 * 1024).unwrap();
+        put(d.path(), "small.csv", b"x");
+        let limits = CollectLimits {
+            file_bytes: 1024 * 1024,
+            ..CollectLimits::default()
+        };
+        let c = collect_out(d.path(), limits).unwrap();
+        assert_eq!(names(&c), ["small.csv"]);
+        assert_eq!(reasons(&c), [RejectReason::TooLarge]);
+        assert_eq!(c.rejected[0].name.as_deref(), Some("sparse.parquet"));
+    }
+
+    #[test]
+    fn the_file_and_total_limits_are_exact() {
+        let d = tempfile::tempdir().unwrap();
+        for (name, len) in [("a.csv", 40), ("b.csv", 40), ("c.csv", 41), ("d.csv", 100)] {
+            put(d.path(), name, &vec![b'x'; len]);
+        }
+        let limits = CollectLimits {
+            max_files: 8,
+            file_bytes: 100,
+            total_bytes: 121,
+            max_entries: 64,
+        };
+        let c = collect_out(d.path(), limits).unwrap();
+        // 40 + 40 + 41 = 121 fits exactly; the 100-byte file would reach 221.
+        assert_eq!(names(&c), ["a.csv", "b.csv", "c.csv"]);
+        assert_eq!(reasons(&c), [RejectReason::OverTotal]);
+        let limits = CollectLimits {
+            file_bytes: 99,
+            ..limits
+        };
+        let c = collect_out(d.path(), limits).unwrap();
+        assert_eq!(reasons(&c), [RejectReason::TooLarge]);
+    }
+
+    #[test]
+    fn files_past_the_count_are_refused_by_name_and_the_rest_kept() {
+        let d = tempfile::tempdir().unwrap();
+        for i in 0..10 {
+            put(d.path(), &format!("f{i}.csv"), b"x");
+        }
+        let c = collect_out(d.path(), CollectLimits::default()).unwrap();
+        assert_eq!(c.files.len(), OUT_MAX_FILES);
+        assert_eq!(reasons(&c), [RejectReason::OverFileCount; 2]);
+        assert_eq!(c.rejected[0].name.as_deref(), Some("f8.csv"));
+    }
+
+    /// More entries than the cap: nothing is kept, and the walk stopped one past
+    /// the cap instead of reading the whole directory.
+    #[test]
+    fn a_volume_with_too_many_entries_keeps_nothing() {
+        let d = tempfile::tempdir().unwrap();
+        for i in 0..=OUT_MAX_ENTRIES {
+            put(d.path(), &format!("f{i}.csv"), b"x");
+        }
+        let c = collect_out(d.path(), CollectLimits::default()).unwrap();
+        assert!(c.too_many_entries && c.files.is_empty());
+        // Exactly at the cap is not too many.
+        std::fs::remove_file(d.path().join("f0.csv")).unwrap();
+        let c = collect_out(d.path(), CollectLimits::default()).unwrap();
+        assert!(!c.too_many_entries);
+        assert_eq!(c.files.len(), OUT_MAX_FILES);
+        assert_eq!(c.rejected.len(), OUT_MAX_ENTRIES - OUT_MAX_FILES);
+    }
+
+    /// The directory itself is opened without following a link, and a missing
+    /// one is an error, not an empty answer.
+    #[test]
+    fn the_directory_is_not_followed_if_it_is_a_link_and_must_exist() {
+        let real = tempfile::tempdir().unwrap();
+        put(real.path(), "a.csv", b"x");
+        let holder = tempfile::tempdir().unwrap();
+        let link = holder.path().join("out");
+        std::os::unix::fs::symlink(real.path(), &link).unwrap();
+        assert!(collect_out(&link, CollectLimits::default()).is_err());
+        assert!(collect_out(&holder.path().join("missing"), CollectLimits::default()).is_err());
+        let file = holder.path().join("plain");
+        std::fs::write(&file, b"x").unwrap();
+        assert!(
+            collect_out(&file, CollectLimits::default()).is_err(),
+            "not a directory"
+        );
+    }
+
+    /// What is held is the descriptor that was checked: swapping the name for a
+    /// link afterwards changes nothing about what the caller reads.
+    #[test]
+    fn a_kept_file_is_the_one_that_was_checked_even_if_the_name_is_swapped() {
+        let d = tempfile::tempdir().unwrap();
+        put(d.path(), "a.csv", b"checked");
+        let mut c = collect_out(d.path(), CollectLimits::default()).unwrap();
+        std::fs::remove_file(d.path().join("a.csv")).unwrap();
+        std::os::unix::fs::symlink("/etc/hostname", d.path().join("a.csv")).unwrap();
+        let mut text = String::new();
+        c.files
+            .remove(0)
+            .into_file()
+            .read_to_string(&mut text)
+            .unwrap();
+        assert_eq!(text, "checked");
+    }
+
+    #[test]
+    fn the_limits_are_the_designs() {
+        let l = CollectLimits::default();
+        assert_eq!(l.max_files, 8);
+        assert_eq!(l.file_bytes, 64 * 1024 * 1024);
+        assert_eq!(l.total_bytes, 2 * l.file_bytes);
+        assert_eq!(l.max_entries, 64);
+    }
 }
