@@ -1951,3 +1951,28 @@ the tool in a turn whose node does not offer it. That residual is stated, not hi
   stored name is prefixed with an id unique to the call. A key derived from the name cannot repeat between calls, a later call's cleanup can never name an earlier call's
   object, and an object left by a store that was cut (whose key was never returned, so nothing can delete it) is logged by its unique name for the host's orphan sweep of
   generated objects. Local adapters key by uuid; the HTTP-callback adapter's keys come from the host. The attachment row's display name is still the file's own.
+
+- *Quota.* A call at the quota still RUNS and answers (the result is returned); only keeping files is refused, all or none, with a sentence the model can act on
+  ("return results in the answer"). Counting and registering happen under a per-conversation lock, so two concurrent calls cannot both pass within a process (across
+  processes each instance can add at most one call's files, 8, past the figure). A usage that cannot be read fails closed for keeping files. The tool future dropped
+  between two registrations, a second registration that fails and a row that will not come back are each tested (rows removed before objects is asserted).
+
+## Demoting a damaged copy is guarded and bounded
+
+A call that finds a part missing in storage answers `copy_damaged` (not retryable
+as it is) and asks the registry to mark the copy missing so the next claim
+prepares it again. Three rules keep that from hurting a healthy file:
+
+- Only the generation the call verified is demoted. The plan keeps the verified
+  row and the registry's conditional update refuses a row written since, so a
+  reader of an old generation cannot flip a row prepared again meanwhile.
+- Only a definite "not found" counts as missing. The storage adapters have no
+  not-found variant; they answer `InvalidInput` with a "not found" message, and
+  that message is the test. Other invalid input and every transient fault is
+  the storage's moment (`storage`, retryable). A key missing from an adapter's
+  in-memory index reads the same way; the cool-down below bounds that case.
+- A source is demoted at most once per 15 minutes per process (at most 1024
+  sources tracked). A storage that keeps answering "not found" cannot make every
+  call prepare a large file again. The choice is a per-process cool-down rather
+  than a counter in the row because a completed preparation resets the row's
+  attempts; it is not shared between processes.

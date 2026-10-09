@@ -86,6 +86,11 @@ impl FakeStorage {
             .insert(key.to_string(), Box::new(make));
     }
 
+    /// The list `delete` appends to, shared with tests that watch its order.
+    pub fn deleted_handle(&self) -> Arc<Mutex<Vec<String>>> {
+        self.deleted.clone()
+    }
+
     pub fn put(&self, key: &str, bytes: Vec<u8>) {
         self.objects.lock().unwrap().insert(key.to_string(), bytes);
     }
@@ -115,7 +120,7 @@ impl OutputStorageRepository for FakeStorage {
             .unwrap()
             .get(key)
             .cloned()
-            .ok_or_else(|| StorageError::InvalidInput(format!("no such object {key}")))?;
+            .ok_or_else(|| StorageError::InvalidInput(format!("storage_key '{key}' not found")))?;
         let size = bytes.len() as u64;
         let chunks: Vec<Result<Bytes, StorageError>> = bytes
             .chunks(self.chunk.max(1))
@@ -252,6 +257,34 @@ pub(crate) async fn claim(registry: &SqlitePreparationRegistry, format_version: 
         .await
         .unwrap()
         .expect("claim won");
+}
+
+/// Prepares the same copy again, as a second process would: the row is written anew
+/// (a later `updated_at`), the parts and manifest are the same.
+pub(crate) async fn reprepare(p: &Prepared) {
+    let info = ready_info(p).await;
+    reprepare_with(p, info).await;
+}
+
+/// What the registry holds for the ready copy now (take it before the row changes).
+pub(crate) async fn ready_info(p: &Prepared) -> ReadyInfo {
+    let row = p.registry.get(SOURCE).await.unwrap().unwrap();
+    ReadyInfo {
+        manifest_key: row.manifest_key.clone().unwrap(),
+        blob_keys: row.blob_keys.clone(),
+        tables_json: row.tables_json.clone().unwrap(),
+        prepared_bytes: row.prepared_bytes.unwrap(),
+    }
+}
+
+pub(crate) async fn reprepare_with(p: &Prepared, info: ReadyInfo) {
+    let row = p.registry.get(SOURCE).await.unwrap().unwrap();
+    p.registry.delete(SOURCE).await.unwrap();
+    claim(&p.registry, row.format_version).await;
+    p.registry
+        .complete(SOURCE, "job", info, Utc::now())
+        .await
+        .unwrap();
 }
 
 pub(crate) async fn prepared(tables: &[(&str, u32)], part_bytes: usize) -> Prepared {

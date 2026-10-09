@@ -181,7 +181,16 @@ pub struct LargeTabularRuntime {
     storage: Arc<dyn OutputStorageRepository>,
     executor: Arc<dyn MountedExecutor>,
     config: RuntimeConfig,
+    /// Sources whose copy this process demoted, and when: a source is demoted at most
+    /// once per [`DEMOTE_COOLDOWN`], so a storage that keeps answering "not found"
+    /// cannot make every call prepare the file again.
+    demoted: std::sync::Mutex<std::collections::HashMap<String, std::time::Instant>>,
 }
+
+/// Least time between two demotions of one source by this process.
+const DEMOTE_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(15 * 60);
+/// Most sources remembered (a stale entry is dropped before a new one is refused).
+const DEMOTED_TRACKED_MAX: usize = 1024;
 
 impl LargeTabularRuntime {
     pub fn new(
@@ -196,7 +205,20 @@ impl LargeTabularRuntime {
             storage,
             executor,
             config: RuntimeConfig::default(),
+            demoted: Default::default(),
         }
+    }
+
+    /// Whether this process may demote `source` now; records it when it may.
+    fn may_demote(&self, source: &str) -> bool {
+        let mut seen = self.demoted.lock().unwrap();
+        let now = std::time::Instant::now();
+        seen.retain(|_, at| now.duration_since(*at) < DEMOTE_COOLDOWN);
+        if seen.contains_key(source) || seen.len() >= DEMOTED_TRACKED_MAX {
+            return false;
+        }
+        seen.insert(source.to_string(), now);
+        true
     }
 
     pub fn with_config(mut self, config: RuntimeConfig) -> Self {
@@ -324,13 +346,16 @@ impl LargeTabularRuntime {
                 })
             }
             Err(MountedError::Refused(RunRefusal::CopyDamaged)) => {
-                // Make the next claim prepare it again (the row must still be exactly
-                // what was observed); best effort, and the answer is the same.
-                if let Ok(Some(row)) = self.registry.get(&req.source_key).await {
-                    let _ = self
-                        .registry
-                        .mark_manifest_missing(&row, chrono::Utc::now())
-                        .await;
+                // Make the next claim prepare it again. Only the generation THIS call
+                // verified is demoted (the registry refuses a row written since), and a
+                // source at most once per cool-down: the answer is the same either way.
+                if let Some(row) = plan.verified_row() {
+                    if self.may_demote(&req.source_key) {
+                        let _ = self
+                            .registry
+                            .mark_manifest_missing(row, chrono::Utc::now())
+                            .await;
+                    }
                 }
                 Err(refused(RunRefusal::CopyDamaged))
             }
@@ -792,6 +817,56 @@ mod tests {
         let row = p.registry.get(SOURCE).await.unwrap().unwrap();
         assert_eq!(row.status, PrepareStatus::Failed);
         assert_eq!(row.error_code.as_deref(), Some("manifest_missing"));
+    }
+
+    /// A reader of an old generation cannot flip a row that was prepared again while
+    /// it ran: the demotion is conditional on the generation the call verified.
+    #[tokio::test]
+    async fn a_reader_of_an_old_generation_does_not_demote_a_fresh_row() {
+        use crate::tabular_prepare::registry::PrepareStatus;
+        let p = prepared(&[("sales", 1)], 4).await;
+        let exec = Recorder::answering(Err(MountedError::Refused(RunRefusal::CopyDamaged)));
+        *exec.delay.lock().unwrap() = Some(Duration::from_millis(400));
+        let rt = runtime(&p, exec, true);
+        let (run, ()) = tokio::join!(rt.run(request("pass", &[])), async {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            super::super::testkit::reprepare(&p).await;
+        });
+        assert_eq!(
+            run.unwrap_err(),
+            LargeRunError::Refused(RunRefusal::CopyDamaged)
+        );
+        let row = p.registry.get(SOURCE).await.unwrap().unwrap();
+        assert_eq!(
+            row.status,
+            PrepareStatus::Ready,
+            "the fresh generation was demoted"
+        );
+    }
+
+    /// A storage that keeps saying "not found" cannot make every call prepare the file
+    /// again: one demotion per source per cool-down.
+    #[tokio::test]
+    async fn a_source_is_demoted_at_most_once_per_cool_down() {
+        use crate::tabular_prepare::registry::PrepareStatus;
+        let p = prepared(&[("sales", 1)], 4).await;
+        let exec = Recorder::answering(Err(MountedError::Refused(RunRefusal::CopyDamaged)));
+        let info = super::super::testkit::ready_info(&p).await;
+        let rt = runtime(&p, exec.clone(), true);
+        rt.run(request("pass", &[])).await.unwrap_err();
+        assert_eq!(
+            p.registry.get(SOURCE).await.unwrap().unwrap().status,
+            PrepareStatus::Failed
+        );
+        // Prepared again, and the storage still says it is missing: not demoted again.
+        super::super::testkit::reprepare_with(&p, info).await;
+        *exec.answer.lock().unwrap() = Some(Err(MountedError::Refused(RunRefusal::CopyDamaged)));
+        let err = rt.run(request("pass", &[])).await.unwrap_err();
+        assert_eq!(err, LargeRunError::Refused(RunRefusal::CopyDamaged));
+        assert_eq!(
+            p.registry.get(SOURCE).await.unwrap().unwrap().status,
+            PrepareStatus::Ready
+        );
     }
 
     /// What storage is given is unique per call: the same file name from two calls

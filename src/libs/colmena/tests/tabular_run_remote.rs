@@ -47,6 +47,9 @@ fn enabled() -> bool {
     if std::env::var("COLMENA_PYEXEC_JAIL_TESTS").as_deref() == Ok("1") {
         return true;
     }
+    if std::env::var("COLMENA_PYEXEC_EXPECT_JAIL_TESTS").as_deref() == Ok("1") {
+        panic!("COLMENA_PYEXEC_JAIL_TESTS=1 is required (COLMENA_PYEXEC_EXPECT_JAIL_TESTS=1)");
+    }
     eprintln!("skipped: set COLMENA_PYEXEC_JAIL_TESTS=1 (Linux, root, CAP_SYS_ADMIN)");
     false
 }

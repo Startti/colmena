@@ -71,7 +71,6 @@ impl OutputGuard {
             storage,
             rows,
             entries,
-            done: false,
         }
     }
 }
@@ -131,58 +130,88 @@ pub type RowRegistry = (Arc<dyn crate::llm::domain::AttachmentRegistry>, String)
 /// One owner of everything a call created for its returned files: the objects it
 /// stored and the registry rows it made. Dropped (or rolled back) without
 /// [`OutputLedger::commit`], it removes the ROWS first and the OBJECTS second, and
-/// never deletes an object whose row it could not remove (that pair is left whole
-/// and reported as kept). The cleanup runs from `Drop` too, spawned and bounded.
+/// never deletes an object whose row may still exist (that pair is left whole and
+/// reported as kept). The cleanup runs from `Drop` too, spawned and bounded.
+///
+/// Cancel-safe: the entries stay in the ledger until each step is CONFIRMED, so a
+/// rollback whose future is dropped half way is finished by `Drop`. A row is marked
+/// "may exist" BEFORE the registry is asked to make it (removing a row that is not
+/// there is a no-op), so an upsert that committed but errored, timed out or was
+/// cut off is still undone.
 pub struct OutputLedger {
     storage: Arc<dyn OutputStorageRepository>,
     rows: Option<RowRegistry>,
+    /// (key, a row may exist), until the entry is settled.
     entries: Vec<(String, bool)>,
-    done: bool,
 }
 
-/// Undoes `entries` (key, row made?): rows first, then objects. Returns the entries
-/// that could not be undone because their row would not go: both are left in place.
+/// One registry step of a cleanup (a row removal or a re-read).
+const ROW_STEP: std::time::Duration = if cfg!(test) {
+    std::time::Duration::from_millis(300)
+} else {
+    std::time::Duration::from_secs(10)
+};
+
+/// Whether the row of `key` is gone: removed, or, when the outcome of the removal is
+/// not known (an error, a timeout), found absent on a re-read. Unknown is "not gone".
+async fn row_is_gone(rows: Option<&RowRegistry>, key: &str) -> bool {
+    use crate::llm::domain::ProviderKind::Generated;
+    let Some((registry, session)) = rows else {
+        return false;
+    };
+    let removed = tokio::time::timeout(
+        ROW_STEP,
+        registry.delete_attachment_for_provider(session, key, Generated),
+    )
+    .await;
+    if matches!(removed, Ok(Ok(()))) {
+        return true;
+    }
+    // The delete may have committed before it failed: look, rather than guess.
+    matches!(
+        tokio::time::timeout(ROW_STEP, registry.lookup(session, key, Generated)).await,
+        Ok(Ok(None))
+    )
+}
+
+/// Undoes `entries` in place: rows first, then objects. An entry leaves the list only
+/// once its step is confirmed, so whatever is cut off midway is still there for the
+/// next owner. Returns the keys whose row stays (they are kept, whole, row and
+/// object); an object whose delete failed stays listed.
 async fn undo(
     storage: &dyn OutputStorageRepository,
     rows: Option<&RowRegistry>,
-    entries: Vec<(String, bool)>,
-) -> Vec<(String, bool)> {
-    let mut stuck = vec![];
-    let mut objects = vec![];
-    for (key, registered) in entries.into_iter().rev() {
-        if registered {
-            let removed = match rows {
-                Some((registry, session)) => matches!(
-                    tokio::time::timeout(
-                        CLEANUP_STEP,
-                        registry.delete_attachment_for_provider(
-                            session,
-                            &key,
-                            crate::llm::domain::ProviderKind::Generated,
-                        )
-                    )
-                    .await,
-                    Ok(Ok(()))
-                ),
-                None => false,
-            };
-            if !removed {
-                tracing::warn!(target: "colmena::tabular_run", "a registered output row could not be removed; it and its object are left in place");
-                stuck.push((key, true));
-                continue;
-            }
+    entries: &mut Vec<(String, bool)>,
+) -> Vec<String> {
+    let mut kept = vec![];
+    let mut i = entries.len();
+    while i > 0 {
+        i -= 1;
+        if !entries[i].1 {
+            continue;
         }
-        objects.push(key);
+        if row_is_gone(rows, &entries[i].0).await {
+            entries[i].1 = false;
+        } else {
+            tracing::warn!(target: "colmena::tabular_run", "a registered output row could not be confirmed removed; it and its object are left in place");
+            kept.push(entries.remove(i).0);
+        }
     }
-    for key in objects {
-        delete_object(storage, &key).await;
+    let mut i = 0;
+    while i < entries.len() {
+        if delete_object(storage, &entries[i].0).await {
+            entries.remove(i);
+        } else {
+            i += 1;
+        }
     }
-    stuck
+    kept
 }
 
 impl OutputLedger {
-    /// A row for `key` was made.
-    pub fn note_registered(&mut self, key: &str) {
+    /// A row for `key` may exist from now on: call this BEFORE asking the registry to
+    /// make it.
+    pub fn row_may_exist(&mut self, key: &str) {
         if let Some(e) = self.entries.iter_mut().find(|e| e.0 == key) {
             e.1 = true;
         }
@@ -190,32 +219,27 @@ impl OutputLedger {
 
     /// Everything is registered: keep it all.
     pub fn commit(mut self) {
-        self.done = true;
         self.entries.clear();
     }
 
-    /// Undoes it now. Returns the keys whose row could not be removed: those stay,
-    /// whole (row and object), and are kept in fact.
+    /// Undoes it now. Returns the keys whose row could not be confirmed removed:
+    /// those stay, whole (row and object), and are kept in fact. Cut off midway, the
+    /// rest is finished by `Drop`.
     pub async fn rollback(mut self) -> Vec<String> {
-        self.done = true;
-        let entries = std::mem::take(&mut self.entries);
-        undo(&*self.storage, self.rows.as_ref(), entries)
-            .await
-            .into_iter()
-            .map(|e| e.0)
-            .collect()
+        let (storage, rows) = (self.storage.clone(), self.rows.clone());
+        undo(&*storage, rows.as_ref(), &mut self.entries).await
     }
 }
 
 impl Drop for OutputLedger {
     fn drop(&mut self) {
-        if self.done || self.entries.is_empty() {
+        if self.entries.is_empty() {
             return;
         }
         let (storage, rows) = (self.storage.clone(), self.rows.take());
-        let entries = std::mem::take(&mut self.entries);
+        let mut entries = std::mem::take(&mut self.entries);
         run_detached(async move {
-            undo(&*storage, rows.as_ref(), entries).await;
+            undo(&*storage, rows.as_ref(), &mut entries).await;
         });
     }
 }

@@ -565,3 +565,28 @@ caller. The `debug` event also does not fire for a call made through `scope`
 (the test-only override that swaps in a different executor for one async
 call): `scope` skips the dispatcher entirely, so the request it wraps never
 reaches the code that emits the event.
+
+## A slot of a confirmed call is quarantined, not forgotten
+
+A call that carries run mounts (`run_staged_confirmed`) is returned only once
+every process of its uid is confirmed gone. The confirmation is retried (three
+attempts, a growing pause between them) before it fails, so one slow teardown
+or one unreadable moment does not condemn a slot.
+
+When it still fails, the slot is **quarantined**: out of rotation, probed every
+five seconds (stop the uid again, scan), and returned, with its permit, once
+nothing runs as its uid. `SubprocessExecutor::quarantined_slots()` and the
+`python slot quarantined` / `python slot returned from quarantine` warnings
+report it. A plain `/v1/run` call keeps the old rule: a uid that cannot be
+stopped retires its slot.
+
+Calls with mounts share a limit of half the slots (at least one), and a
+quarantined slot keeps its share until it is returned, so plain calls always
+keep the other half. A single-slot executor cannot keep that floor: its slot is
+unavailable to plain calls until the probe returns it. When the limit is
+reached a mounts call is refused as busy.
+
+If the `/proc` scan cannot work at all here (it does not list this very
+process), that is decided once, when the executor is built: run mounts are off,
+with the reason `proc_scan_unusable` in the startup log and in the refusal, and
+plain calls are untouched.

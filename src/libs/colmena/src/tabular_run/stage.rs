@@ -91,12 +91,16 @@ pub(super) async fn create_file(path: &Path) -> Result<tokio::fs::File, RunRefus
     Ok(file)
 }
 
-/// A part the registry tracks that the storage says it does not have (the adapters
-/// answer `InvalidInput` for a missing object) is a damaged copy; any other failure is
-/// the storage's moment.
+/// A part the registry tracks that the storage DEFINITELY says it does not have is a
+/// damaged copy. The adapters have no "not found" variant: they answer `InvalidInput`
+/// with a message saying the key was not found for a missing object, and `InvalidInput`
+/// also covers a malformed request. Only the first is "missing"; everything else
+/// (transient faults, other invalid input) is the storage's moment.
 pub(super) fn damaged_or_storage(e: crate::storage::domain::StorageError) -> RunRefusal {
     match e {
-        crate::storage::domain::StorageError::InvalidInput(_) => RunRefusal::CopyDamaged,
+        crate::storage::domain::StorageError::InvalidInput(m) if m.contains("not found") => {
+            RunRefusal::CopyDamaged
+        }
         _ => RunRefusal::Storage,
     }
 }
@@ -773,6 +777,30 @@ mod tests {
         assert_eq!(err, RunRefusal::Storage);
         assert!(started.elapsed() < std::time::Duration::from_secs(3));
         assert!(entries(dir.path()).is_empty());
+    }
+
+    /// Only a definite "not found" says an object is missing; any other invalid input,
+    /// and every transient fault, is the storage's moment.
+    #[test]
+    fn only_a_definite_not_found_is_a_damaged_copy() {
+        use crate::storage::domain::StorageError as E;
+        assert_eq!(
+            damaged_or_storage(E::InvalidInput(
+                "storage_key 'k' not found in LocalCache".into()
+            )),
+            RunRefusal::CopyDamaged
+        );
+        for other in [
+            E::InvalidInput("empty bytes".into()),
+            E::BackendUnavailable("dns".into()),
+            E::UploadFailed("503".into()),
+            E::CallbackFailed {
+                status: 500,
+                body: String::new(),
+            },
+        ] {
+            assert_eq!(damaged_or_storage(other), RunRefusal::Storage);
+        }
     }
 
     /// A part the registry tracks that the storage no longer has is a damaged copy

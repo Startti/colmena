@@ -38,9 +38,17 @@ pub struct PreparedTables {
     /// What identifies the generation of the prepared copy the registry vouched
     /// for (see [`PreparedTables::generation`]).
     generation: String,
+    /// The row that was verified, so that a later demotion acts on THIS generation
+    /// only (`None` for a plan built by hand in a test).
+    row: Option<PreparedRow>,
 }
 
 impl PreparedTables {
+    /// The registry row this copy was verified against.
+    pub fn verified_row(&self) -> Option<&PreparedRow> {
+        self.row.as_ref()
+    }
+
     /// The generation of the copy that was verified: the registry row's identity
     /// (manifest key, layout version, attempts, last write and recorded size). A
     /// re-preparation of the same source writes the row again, so a different value
@@ -254,6 +262,7 @@ pub async fn verify_prepared(
         manifest,
         prepared_bytes,
         generation,
+        row: Some(row.clone()),
     };
     for (t, table) in plan.manifest.tables.iter().enumerate() {
         for p in 0..table.parts as usize {
@@ -549,6 +558,7 @@ mod tests {
             manifest: Manifest::new(tables),
             prepared_bytes: 7,
             generation: String::new(),
+            row: None,
         }
     }
 

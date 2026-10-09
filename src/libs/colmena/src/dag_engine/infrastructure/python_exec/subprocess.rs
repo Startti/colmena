@@ -162,6 +162,9 @@ pub struct SubprocessExecutor {
     /// decided at start (the root's lock could not be taken for a reason other than
     /// "held"); `None` when it can.
     staging_unavailable: Option<&'static str>,
+    quarantine: Arc<Quarantine>,
+    /// Why run mounts are off here whatever the template says (see [`scan_unusable`]).
+    scan_disabled: Option<String>,
     /// The lock that makes this the only executor of its staging root, held for
     /// this executor's life (see [`Self::new_for_serving`]). The LAST field, and
     /// released by [`Self::teardown`] after everything else: a successor must not
@@ -183,18 +186,39 @@ struct Slot {
     permit: Option<OwnedSemaphorePermit>,
     /// [`kill_uid`] outside tests.
     stop: fn(u32) -> Result<(), NotStopped>,
+    /// Where a slot of a confirmed call goes when its uid cannot be confirmed empty.
+    quarantine: Option<Arc<Quarantine>>,
+    /// Set by a confirmed call that could not confirm its uid empty.
+    quarantine_it: bool,
+    /// The share of the confirmed-call limit this call holds (see [`Quarantine`]).
+    confirmed: Option<OwnedSemaphorePermit>,
 }
 
 impl Drop for Slot {
     fn drop(&mut self) {
-        let stopped = (self.stop)(self.uid).or_else(|_| {
+        let mut stopped = (self.stop)(self.uid).or_else(|_| {
             std::thread::sleep(STOP_RETRY_PAUSE);
             (self.stop)(self.uid)
         });
+        if self.quarantine_it && stopped.is_ok() {
+            // The stop worked but the uid could not be confirmed empty: not returned yet.
+            stopped = Err(NotStopped::default());
+        }
         let Err(e) = stopped else {
             self.pool.lock().unwrap().push(self.index);
             return;
         };
+        // A slot of a confirmed call is never forgotten: its uid is probed again
+        // later and returned when nothing runs as it.
+        if let (Some(q), true) = (
+            &self.quarantine,
+            self.confirmed.is_some() || self.quarantine_it,
+        ) {
+            if let Some(permit) = self.permit.take() {
+                q.hold(self.index, self.uid, permit, self.confirmed.take());
+                return;
+            }
+        }
         tracing::error!(
             target: T_PYTHON_EXEC,
             slot = self.index,
@@ -331,14 +355,101 @@ fn kill_uid(uid: u32) -> Result<(), NotStopped> {
     })
 }
 
-/// A stop that never succeeds: set on a slot whose uid could not be confirmed empty,
-/// so that freeing it retires it (the existing path for a slot that cannot be stopped).
-fn refuse_to_stop(_uid: u32) -> Result<(), NotStopped> {
-    Err(NotStopped::default())
+/// Quarantine: slots of confirmed (large-file) calls whose uid could not be
+/// confirmed empty. They are out of rotation, not forgotten: a thread probes them
+/// every `interval` and returns each one whose uid has no process left.
+///
+/// Confirmed calls also share a LIMIT (`confirmed`, half the slots, at least one)
+/// so that however many are quarantined, plain calls keep the other half. A
+/// quarantined slot keeps its share until it is returned. With a single slot the
+/// floor cannot hold: that slot is unavailable to plain calls until the probe
+/// returns it (at most one `interval` after its processes are gone).
+struct Quarantine {
+    held: Mutex<Vec<(u32, u32, bool)>>,
+    running: std::sync::atomic::AtomicBool,
+    permits: Arc<Semaphore>,
+    confirmed: Arc<Semaphore>,
+    pool: Arc<Mutex<Vec<u32>>>,
+    stop: fn(u32) -> Result<(), NotStopped>,
+    scan: fn(u32) -> Procs,
+    interval: Duration,
+}
+
+impl Quarantine {
+    fn count(&self) -> usize {
+        self.held.lock().unwrap().len()
+    }
+
+    fn hold(
+        self: &Arc<Self>,
+        index: u32,
+        uid: u32,
+        permit: OwnedSemaphorePermit,
+        share: Option<OwnedSemaphorePermit>,
+    ) {
+        permit.forget();
+        let had_share = share.is_some();
+        if let Some(share) = share {
+            share.forget();
+        }
+        let mut held = self.held.lock().unwrap();
+        held.push((index, uid, had_share));
+        tracing::warn!(
+            target: T_PYTHON_EXEC,
+            slot = index,
+            quarantined = held.len(),
+            "python slot quarantined: its uid could not be confirmed empty"
+        );
+        if !self.running.swap(true, Ordering::AcqRel) {
+            let me = self.clone();
+            let spawned = std::thread::Builder::new()
+                .name("python-quarantine".into())
+                .spawn(move || me.probe_loop());
+            if spawned.is_err() {
+                self.running.store(false, Ordering::Release);
+            }
+        }
+    }
+
+    fn probe_loop(&self) {
+        loop {
+            std::thread::sleep(self.interval);
+            // Probed in place: a slot being probed is still counted as quarantined.
+            let entries = self.held.lock().unwrap().clone();
+            let mut back = Vec::new();
+            for (index, uid, share) in entries {
+                let scan = self.scan;
+                if confirm_once(self.stop, &scan, uid, Duration::from_millis(500)) {
+                    back.push((index, uid, share));
+                }
+            }
+            let mut held = self.held.lock().unwrap();
+            for entry in &back {
+                held.retain(|e| e != entry);
+                self.pool.lock().unwrap().push(entry.0);
+                self.permits.add_permits(1);
+                if entry.2 {
+                    self.confirmed.add_permits(1);
+                }
+                tracing::warn!(target: T_PYTHON_EXEC, slot = entry.0, "python slot returned from quarantine");
+            }
+            if held.is_empty() {
+                self.running.store(false, Ordering::Release);
+                return;
+            }
+        }
+    }
 }
 
 /// Longest [`confirm_uid_gone`] waits for the processes to leave `/proc`.
+/// How long a confirmed call waits for its share of the confirmed-call limit.
+const CONFIRMED_WAIT: Duration = Duration::from_secs(1);
 const CONFIRM_WAIT: Duration = Duration::from_secs(2);
+/// Confirmation attempts per call and the pause step between them.
+const CONFIRM_ATTEMPTS: u32 = 3;
+const CONFIRM_BACKOFF: Duration = Duration::from_millis(200);
+/// How often quarantined slots are probed.
+const QUARANTINE_INTERVAL: Duration = Duration::from_secs(5);
 
 /// What a scan of `/proc` found for a uid.
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
@@ -419,15 +530,24 @@ fn uid_has_processes(uid: u32) -> Procs {
     scan_uid(Path::new("/proc"), uid)
 }
 
+fn uid_has_processes_of_self(uid: u32) -> Procs {
+    uid_has_processes(uid)
+}
+
 /// Blocking. Stops every process of `uid` (again) and waits, up to `wait`, until
 /// none is left. `false` when the stop fails or something still runs.
-fn confirm_uid_gone(stop: fn(u32) -> Result<(), NotStopped>, uid: u32, wait: Duration) -> bool {
+fn confirm_once(
+    stop: fn(u32) -> Result<(), NotStopped>,
+    scan: &dyn Fn(u32) -> Procs,
+    uid: u32,
+    wait: Duration,
+) -> bool {
     if stop(uid).is_err() {
         return false;
     }
     let end = Instant::now() + wait;
     loop {
-        match uid_has_processes(uid) {
+        match scan(uid) {
             Procs::Gone => return true,
             // Not knowing is not confirming, and waiting will not make it known.
             Procs::Unknown => return false,
@@ -437,6 +557,40 @@ fn confirm_uid_gone(stop: fn(u32) -> Result<(), NotStopped>, uid: u32, wait: Dur
             return false;
         }
         std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// Tries up to `attempts` times, pausing `backoff * n` between them, so that one
+/// slow teardown or one unreadable moment does not condemn a slot. The rule is the
+/// same each time: confirmed gone, or not.
+fn confirm_uid_gone(
+    stop: fn(u32) -> Result<(), NotStopped>,
+    scan: &dyn Fn(u32) -> Procs,
+    uid: u32,
+    wait: Duration,
+    attempts: u32,
+    backoff: Duration,
+) -> bool {
+    for n in 0..attempts.max(1) {
+        if confirm_once(stop, scan, uid, wait) {
+            return true;
+        }
+        if n + 1 < attempts {
+            std::thread::sleep(backoff * (n + 1));
+        }
+    }
+    false
+}
+
+/// Why the `/proc` scan cannot work here, if it cannot: this very process must be
+/// found by it. Decided once, when the executor is built.
+fn scan_unusable(scan: fn(u32) -> Procs) -> Option<String> {
+    if !cfg!(target_os = "linux") {
+        return None;
+    }
+    match scan(unsafe { libc::getuid() }) {
+        Procs::Alive => None,
+        _ => Some("proc_scan_unusable: /proc does not list this process's own tasks".into()),
     }
 }
 
@@ -660,6 +814,22 @@ impl SubprocessExecutor {
             .map_err(|e| {
                 ExecutorConfigError(format!("cannot start the Python template thread: {e}"))
             })?;
+        let permits = Arc::new(Semaphore::new(cfg.slots));
+        let free_slots = Arc::new(Mutex::new((0..cfg.slots as u32).rev().collect()));
+        let scan_disabled = scan_unusable(uid_has_processes_of_self);
+        if let Some(reason) = &scan_disabled {
+            tracing::error!(target: T_PYTHON_EXEC, reason = %reason, "run mounts are off: processes of a call's uid cannot be confirmed gone");
+        }
+        let quarantine = Arc::new(Quarantine {
+            held: Mutex::new(Vec::new()),
+            running: Default::default(),
+            permits: permits.clone(),
+            confirmed: Arc::new(Semaphore::new((cfg.slots / 2).max(1))),
+            pool: free_slots.clone(),
+            stop: kill_uid,
+            scan: uid_has_processes,
+            interval: QUARANTINE_INTERVAL,
+        });
         Ok(Self {
             jail: JailSpec {
                 uid_base: cfg.uid_base,
@@ -667,8 +837,8 @@ impl SubprocessExecutor {
                 hide_paths: cfg.hide_paths.clone(),
                 staging_root: cfg.staging_root.clone(),
             },
-            permits: Arc::new(Semaphore::new(cfg.slots)),
-            free_slots: Arc::new(Mutex::new((0..cfg.slots as u32).rev().collect())),
+            permits,
+            free_slots,
             usable_slots: Arc::new(AtomicUsize::new(cfg.slots)),
             cfg,
             max_timeout,
@@ -677,8 +847,16 @@ impl SubprocessExecutor {
             stderr_dropped: Arc::default(),
             staging_budget: Arc::new(StagingBudget::new(STAGED_VOLUMES_MAX, STAGED_OUT_MIB_MAX)),
             staging_unavailable: None,
+            quarantine,
+            scan_disabled,
             _staging_lock: None,
         })
+    }
+
+    /// Slots out of rotation because their uid could not be confirmed empty; they
+    /// come back by themselves. Also logged when it changes.
+    pub fn quarantined_slots(&self) -> usize {
+        self.quarantine.count()
     }
 
     /// Whether a call can still get a slot: false once every slot is retired
@@ -753,6 +931,9 @@ impl SubprocessExecutor {
 
     /// Why the running template cannot offer run mounts, if it cannot.
     async fn mounts_disabled(&self) -> Option<String> {
+        if let Some(reason) = &self.scan_disabled {
+            return Some(reason.clone());
+        }
         match &*self.state.lock().await {
             State::Running(t) => t.mounts_disabled.clone(),
             _ => None,
@@ -774,7 +955,15 @@ impl SubprocessExecutor {
         rx.await.map_err(|_| SUPERVISOR_GONE.to_string())?
     }
 
+    #[cfg(test)]
     async fn take_slot(&self) -> Result<Slot, RawFailure> {
+        self.take_slot_with(None).await
+    }
+
+    async fn take_slot_with(
+        &self,
+        confirmed: Option<OwnedSemaphorePermit>,
+    ) -> Result<Slot, RawFailure> {
         // The pool is closed only once its last slot is retired.
         let closed = |_| RawFailure::Unavailable(NO_SLOT_LEFT.into());
         let permit = self.permits.clone().acquire_owned().await.map_err(closed)?;
@@ -787,6 +976,9 @@ impl SubprocessExecutor {
             usable: self.usable_slots.clone(),
             permit: Some(permit),
             stop: kill_uid,
+            quarantine: Some(self.quarantine.clone()),
+            quarantine_it: false,
+            confirmed,
         })
     }
 
@@ -820,7 +1012,21 @@ impl SubprocessExecutor {
         if request.len() > self.cfg.max_request_bytes {
             return Err(RawFailure::RequestTooLarge);
         }
-        let slot = self.take_slot().await?;
+        // A confirmed call takes its share of a limit that leaves plain calls their slots.
+        let share = if confirm {
+            let limit = self.quarantine.confirmed.clone().acquire_owned();
+            match tokio::time::timeout(CONFIRMED_WAIT, limit).await {
+                Ok(Ok(share)) => Some(share),
+                _ => {
+                    return Err(RawFailure::Unavailable(
+                        "PythonExecutorError: too many large-file calls are running or recovering; retry later".into(),
+                    ))
+                }
+            }
+        } else {
+            None
+        };
+        let slot = self.take_slot_with(share).await?;
         let socket = self.socket_path().await.map_err(RawFailure::Unavailable)?;
         if mounts.is_some() {
             if let Some(reason) = self.mounts_disabled().await {
@@ -881,15 +1087,22 @@ impl SubprocessExecutor {
         // logs when it fails.
         if confirm && result.is_ok() {
             let (stop, uid) = (slot_stop, slot_uid);
-            let gone =
-                tokio::task::spawn_blocking(move || confirm_uid_gone(stop, uid, CONFIRM_WAIT))
-                    .await
-                    .unwrap_or(false);
+            let gone = tokio::task::spawn_blocking(move || {
+                confirm_uid_gone(
+                    stop,
+                    &uid_has_processes,
+                    uid,
+                    CONFIRM_WAIT,
+                    CONFIRM_ATTEMPTS,
+                    CONFIRM_BACKOFF,
+                )
+            })
+            .await
+            .unwrap_or(false);
             if !gone {
-                // The slot is RETIRED, not returned: its uid may still have a process.
-                // Its own stop fails from now on, which is what retires a slot.
+                // The slot is QUARANTINED, not returned: its uid may still have a process.
                 if let Some((_, slot)) = child.live.as_mut() {
-                    slot.stop = refuse_to_stop;
+                    slot.quarantine_it = true;
                 }
                 tracing::error!(target: T_PYTHON_EXEC, "could not confirm every process of a call exited");
                 return Err(RawFailure::Unavailable(
@@ -1361,6 +1574,9 @@ mod tests {
                 usable: Arc::new(AtomicUsize::new(1)),
                 permit: permit.ok(),
                 stop: |_| Ok(()),
+                quarantine: None,
+                quarantine_it: false,
+                confirmed: None,
             };
             let pid = stand_in.id() as libc::pid_t;
             let entered = (case != "no runtime").then(|| reaper.enter());
@@ -1412,6 +1628,9 @@ mod tests {
             usable: usable.clone(),
             permit: permits.clone().try_acquire_owned().ok(),
             stop,
+            quarantine: None,
+            quarantine_it: false,
+            confirmed: None,
         };
         let state = || (permits.available_permits(), pool.lock().unwrap().clone());
         let t0 = Instant::now();
@@ -1598,11 +1817,12 @@ mod tests {
         let fails: fn(u32) -> Result<(), NotStopped> = |_| Err(NotStopped::default());
         let nobody = 4_000_000_001u32;
         let me = unsafe { libc::geteuid() };
-        assert!(!confirm_uid_gone(fails, nobody, Duration::from_millis(50)));
-        assert!(confirm_uid_gone(ok, nobody, Duration::from_millis(50)));
+        let wait = Duration::from_millis(50);
+        assert!(!confirm_once(fails, &uid_has_processes, nobody, wait));
+        assert!(confirm_once(ok, &uid_has_processes, nobody, wait));
         let started = Instant::now();
         assert!(
-            !confirm_uid_gone(ok, me, Duration::from_millis(150)),
+            !confirm_once(ok, &uid_has_processes, me, Duration::from_millis(150)),
             "this very process runs as {me}"
         );
         assert!(started.elapsed() >= Duration::from_millis(150));
@@ -1657,5 +1877,172 @@ mod tests {
             scan_uid(Path::new("/nonexistent-proc"), 777),
             Procs::Unknown
         );
+    }
+
+    // ---- slot quarantine (hardening of the confirmed stop) ----
+
+    /// A slow teardown or one unreadable moment does not condemn a slot: the stop
+    /// and the scan are tried again, with the same rule each time.
+    #[test]
+    fn a_slow_teardown_or_one_unreadable_moment_is_retried() {
+        let ok: fn(u32) -> Result<(), NotStopped> = |_| Ok(());
+        let wait = Duration::from_millis(30);
+        let pause = Duration::from_millis(5);
+        // Alive for longer than one wait, then gone: the second attempt confirms.
+        let calls = std::cell::Cell::new(0);
+        let slow = |_: u32| {
+            calls.set(calls.get() + 1);
+            if calls.get() > 4 {
+                Procs::Gone
+            } else {
+                Procs::Alive
+            }
+        };
+        assert!(confirm_uid_gone(ok, &slow, 1, wait, 3, pause));
+        calls.set(0);
+        assert!(
+            !confirm_uid_gone(ok, &slow, 1, wait, 1, pause),
+            "one attempt is not enough"
+        );
+        // Unknown once, then readable.
+        let calls = std::cell::Cell::new(0);
+        let blip = |_: u32| {
+            calls.set(calls.get() + 1);
+            if calls.get() == 1 {
+                Procs::Unknown
+            } else {
+                Procs::Gone
+            }
+        };
+        assert!(confirm_uid_gone(ok, &blip, 1, wait, 3, pause));
+        // Unreadable for good, or alive for good: still never "confirmed".
+        assert!(!confirm_uid_gone(
+            ok,
+            &|_| Procs::Unknown,
+            1,
+            wait,
+            3,
+            pause
+        ));
+        assert!(!confirm_uid_gone(ok, &|_| Procs::Alive, 1, wait, 3, pause));
+    }
+
+    /// Where the scan cannot even see this process it cannot work at all: decided
+    /// once, mounts are off with a reason.
+    #[test]
+    fn a_scan_that_cannot_see_this_process_turns_mounts_off() {
+        if cfg!(target_os = "linux") {
+            assert!(scan_unusable(|_| Procs::Unknown)
+                .unwrap()
+                .contains("proc_scan_unusable"));
+            assert!(scan_unusable(|_| Procs::Gone).is_some());
+            assert!(scan_unusable(|_| Procs::Alive).is_none());
+            assert!(
+                scan_unusable(uid_has_processes).is_none(),
+                "/proc works here"
+            );
+        } else {
+            assert!(scan_unusable(|_| Procs::Unknown).is_none());
+        }
+    }
+
+    static PROBE_GONE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+    fn probe(_: u32) -> Procs {
+        if PROBE_GONE.load(Ordering::SeqCst) {
+            Procs::Gone
+        } else {
+            Procs::Alive
+        }
+    }
+
+    /// A slot of a confirmed call that cannot be confirmed empty leaves rotation, is
+    /// counted, and comes back by itself (index, permit, share) once its uid is empty.
+    #[test]
+    fn a_quarantined_slot_comes_back_when_its_uid_is_empty() {
+        let permits = Arc::new(Semaphore::new(2));
+        let confirmed = Arc::new(Semaphore::new(1));
+        let pool = Arc::new(Mutex::new(vec![1]));
+        let q = Arc::new(Quarantine {
+            held: Mutex::new(Vec::new()),
+            running: Default::default(),
+            permits: permits.clone(),
+            confirmed: confirmed.clone(),
+            pool: pool.clone(),
+            stop: |_| Ok(()),
+            scan: probe,
+            interval: Duration::from_millis(30),
+        });
+        PROBE_GONE.store(false, Ordering::SeqCst);
+        let slot = Slot {
+            index: 0,
+            uid: 20000,
+            pool: pool.clone(),
+            usable: Arc::new(AtomicUsize::new(2)),
+            permit: permits.clone().try_acquire_owned().ok(),
+            stop: |_| Ok(()),
+            quarantine: Some(q.clone()),
+            quarantine_it: true,
+            confirmed: confirmed.clone().try_acquire_owned().ok(),
+        };
+        drop(slot);
+        assert_eq!(q.count(), 1);
+        assert_eq!(
+            (permits.available_permits(), confirmed.available_permits()),
+            (1, 0)
+        );
+        assert_eq!(*pool.lock().unwrap(), vec![1], "not back in the pool");
+        std::thread::sleep(Duration::from_millis(150));
+        assert_eq!(q.count(), 1, "something still runs as the uid");
+        PROBE_GONE.store(true, Ordering::SeqCst);
+        let end = Instant::now() + Duration::from_secs(3);
+        while q.count() > 0 && Instant::now() < end {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(q.count(), 0);
+        assert_eq!(
+            (permits.available_permits(), confirmed.available_permits()),
+            (2, 1)
+        );
+        assert!(pool.lock().unwrap().contains(&0));
+    }
+
+    /// Quarantined slots never take the plain calls' slots: confirmed calls hold
+    /// at most half of them, and a plain call whose uid cannot be stopped is
+    /// retired as before.
+    #[tokio::test]
+    async fn plain_calls_keep_their_slots_while_confirmed_ones_are_quarantined() {
+        let (_dir, ex) = fake("exit 1");
+        let total = ex.cfg.slots;
+        if total < 2 {
+            return;
+        }
+        let limit = ex.quarantine.confirmed.available_permits();
+        assert_eq!(limit, (total / 2).max(1));
+        let mut parked = Vec::new();
+        for _ in 0..limit {
+            let share = ex.quarantine.confirmed.clone().try_acquire_owned().unwrap();
+            let mut slot = ex.take_slot_with(Some(share)).await.ok().unwrap();
+            slot.stop = not_stopped;
+            parked.push(slot);
+        }
+        drop(parked);
+        assert_eq!(ex.quarantined_slots(), limit);
+        assert!(
+            ex.quarantine.confirmed.clone().try_acquire_owned().is_err(),
+            "no share left"
+        );
+        // The plain calls still get every remaining slot, and the pool is not closed.
+        assert!(ex.has_usable_slot());
+        let mut plain = Vec::new();
+        for _ in 0..(total - limit) {
+            plain.push(ex.take_slot().await.ok().unwrap());
+        }
+        // A plain call that cannot be stopped is retired, not quarantined.
+        let mut one = plain.pop().unwrap();
+        one.stop = not_stopped;
+        drop(one);
+        assert_eq!(ex.quarantined_slots(), limit);
+        assert_eq!(ex.usable_slots.load(Ordering::Acquire), total - 1);
     }
 }

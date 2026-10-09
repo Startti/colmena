@@ -989,18 +989,19 @@ impl DagToolExecutor {
         Ok(())
     }
 
-    /// Takes back a registration made by [`Self::register_stored_attachment`]
-    /// (the row only; the caller owns the object).
-    pub(crate) async fn unregister_stored_attachment(&self, storage_key: &str) {
-        if let (Some(reg), Some(sid)) = (&self.attachment_registry, &self.agent_session_id) {
-            let _ = reg
-                .delete_attachment_for_provider(
-                    sid,
-                    storage_key,
-                    crate::llm::domain::ProviderKind::Generated,
-                )
-                .await;
-        }
+    /// The registry and the session that registered files belong to, when both exist
+    /// (what an output ledger removes rows from).
+    pub(crate) fn registry_handle(&self) -> Option<crate::tabular_run::outputs::RowRegistry> {
+        Some((
+            self.attachment_registry.clone()?,
+            self.agent_session_id.clone()?,
+        ))
+    }
+
+    /// The session returned files are registered in.
+    pub(crate) fn session_for_outputs(&self) -> Option<String> {
+        self.attachment_registry.as_ref()?;
+        self.agent_session_id.clone()
     }
 
     /// How many files, and how many bytes, the session already holds that this
