@@ -482,7 +482,7 @@ pub fn enter(spec: &JailSpec, hdr: &CallHeader, conn: UnixStream) -> Result<Unix
 
     // 7. Syscall filter, last: it refuses calls the steps above make, and
     //    no_new_privs lets a process without privileges install it.
-    super::seccomp::apply(staged_jail(spec)).map_err(at("syscall_filter"))?;
+    super::seccomp::apply().map_err(at("syscall_filter"))?;
 
     Ok(unsafe { UnixStream::from_raw_fd(CHANNEL_FD) })
 }

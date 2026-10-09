@@ -1099,7 +1099,7 @@ mod tests {
                             zero,
                         )
                     };
-                    super::super::seccomp::apply(true).unwrap();
+                    super::super::seccomp::apply().unwrap();
                     let held = capabilities_empty();
                     i32::from(!held.ok)
                 });
