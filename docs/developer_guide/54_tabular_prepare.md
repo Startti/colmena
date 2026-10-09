@@ -1649,3 +1649,22 @@ arrive, and a file truncated after the check is refused and stored nowhere. Not 
 attachments in the registry, and the Python `emit_table` helper that writes them; the runtime does not yet pass a sink.
 The jail proof (`hostile_outputs_never_reach_the_sink_and_the_good_one_does`) lets real code leave a good file, a name outside
 the charset, a hard link, and a link and a pipe where the sandbox allows making them.
+
+### The `/v2/run` wire (`wire.rs`)
+
+One request and one response, each a stream, framed by us so the same bytes travel over HTTP/1.1 chunked transfer and over
+HTTP/2 (nothing depends on a streaming feature of either). A frame is a big-endian `u32` length (at most 64 KiB) and that many
+bytes of JSON.
+
+| Part | Content |
+|---|---|
+| Request | `frame(CallHeader {v:2, code, mode, timeout_ms, inputs, out_mb})`; for each file `frame(FileEntry {path, size})` then exactly `size` raw bytes; then an empty frame. Nothing may follow it. |
+| Request paths | only `manifest.json` and canonical `t<n>/part-NNNNN.parquet`; never a key, URL or host path |
+| Response (200) | `frame(ResponseHeader {v:2, status: ok\|python_error\|timeout\|internal, message, output, stdout, files:[{name,size}], dropped:[{name?,reason}], too_many_entries})` then the raw bytes of each listed file, in order |
+| Refusal (non-200) | JSON body `{refusal: busy\|mounts_disabled\|no_staging_root\|too_large\|bad_request, reason?}` |
+
+Sizes are declared per file when the file starts, so a sender never needs the size of everything before its first byte. A
+receiver checks each file's bytes against its declaration and the running total against its cap. `Reader` holds at most one
+chunk and reads the next only after the previous is consumed, so the transport's backpressure holds the sender; every wait has
+an idle limit (30 s without a chunk) and the whole transfer a deadline (240 s); the header must arrive within 10 s. Errors carry
+no peer text.
