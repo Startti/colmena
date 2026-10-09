@@ -5,7 +5,7 @@
 
 **How to use (for the exploration/spec phase):** before opening files to assess a change, look up the target file below. **Used by** is its blast radius — the files that break if you change its public surface. **Depends on** is what it needs. Start by reading only those, not the whole repo.
 
-- Files indexed: **461**
+- Files indexed: **463**
 - Modules with at least one importer: **229**
 
 ## Blast-radius ranking (change these with the most care)
@@ -1647,7 +1647,7 @@
 
 #### `src/libs/colmena/src/llm/domain/large_tabular.rs`
 - Module: `llm::domain::large_tabular`
-- **Used by (8)**: `src/libs/colmena/src/dag_engine/infrastructure/dag_tool_executor/large_object_guard.rs`, `src/libs/colmena/src/dag_engine/infrastructure/dag_tool_executor.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm/load_attachment_redirect.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm/storage_ref_turn.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm/whole_read_guard.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm.rs`, `src/libs/colmena/src/llm/application/load_failure.rs`, `src/libs/colmena/src/llm/infrastructure/attachments/stream_resolver_impl.rs`
+- **Used by (9)**: `src/libs/colmena/src/dag_engine/infrastructure/dag_tool_executor/large_object_guard.rs`, `src/libs/colmena/src/dag_engine/infrastructure/dag_tool_executor.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm/load_attachment_redirect.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm/storage_ref_turn.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm/whole_read_guard.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm.rs`, `src/libs/colmena/src/llm/application/load_failure.rs`, `src/libs/colmena/src/llm/infrastructure/attachments/stream_resolver_impl.rs`, `src/libs/colmena/src/tabular_run/refusal.rs`
 - Depends on (0): — (no intra-crate imports)
 
 #### `src/libs/colmena/src/llm/domain/llm_config.rs`
@@ -2308,6 +2308,18 @@
 - Module: `tabular_prepare::zipfix`
 - **Used by (7)**: `src/libs/colmena/src/tabular_prepare/driver_xlsx_tests.rs`, `src/libs/colmena/src/tabular_prepare/precheck.rs`, `src/libs/colmena/src/tabular_prepare/xlsx_package.rs`, `src/libs/colmena/src/tabular_prepare/xlsx_strings.rs`, `src/libs/colmena/src/tabular_prepare/xlsx_styles.rs`, `src/libs/colmena/src/tabular_prepare/xlsx_workbook.rs`, `src/libs/colmena/src/tabular_prepare/xlsxfix.rs`
 - Depends on (0): — (no intra-crate imports)
+
+### tabular_run
+
+#### `src/libs/colmena/src/tabular_run/mod.rs`
+- Module: `tabular_run`
+- **Used by (0)**: — (leaf / entrypoint / not imported intra-crate)
+- Depends on (0): — (no intra-crate imports)
+
+#### `src/libs/colmena/src/tabular_run/refusal.rs`
+- Module: `tabular_run::refusal`
+- **Used by (0)**: — (leaf / entrypoint / not imported intra-crate)
+- Depends on (1): `llm::domain::large_tabular`
 
 ### text
 

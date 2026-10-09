@@ -1430,3 +1430,31 @@ No refusal and no mismatch was found, so no converter change came out of it. Not
 the writer: files written by Excel itself (the container has none), and a zip64 end-of-central-directory
 record (a streaming writer produces one only past 4 GiB or 65,535 entries, both over this reader's
 limits, which refuses it as `Unsupported`).
+
+## Running over prepared tables (`tabular_run`)
+
+Module `tabular_run` takes a PREPARED file (the parts and manifest the driver wrote) into the Python sandbox and brings
+results back. Dark like the rest: it is used only with `COLMENA_LARGE_TABULAR=on`, and with the switch off no code in it
+runs. The sandbox side is described in [53_python_executors.md](./53_python_executors.md).
+
+### Refusals (`refusal.rs`)
+
+Every reason a run is refused is a `RunRefusal` with a stable `code` and a sentence for the model. There is no variant
+that offers the original file: a refusal is never a fallback to loading it into memory. The sentences are fixed text. They
+hold no storage key, no signed URL, no registry error detail and no cell; the only echo is a table name the model asked
+for, cleaned as inert text and clipped to 64 characters. A failure reason is shown as one of a few fixed sentences chosen
+from the reason code the preparation recorded (an unknown code reads as an internal error; the recorded detail is free
+adapter text and is never shown).
+
+| Code | Variants | The model can |
+|---|---|---|
+| `large_tabular_disabled` | `NotEnabled` | nothing: the environment does not support it |
+| `large_tabular_not_ready` | `NotPrepared`, `StillPreparing` | retry shortly |
+| `large_tabular_failed` | `PreparationFailed` (final or not), `BeingRemoved` | nothing, or wait for a new attempt |
+| `large_tabular_over_budget` | `OverBudget` (data, part, volumes) | name fewer tables, or retry later |
+| `large_tabular_no_such_table` | `NoSuchTable` | list the tables and choose one |
+| `large_tabular_invalid` | `Invalid` (record, no root, manifest, parts) | nothing: the copy does not match its record |
+| `large_tabular_storage` | `Storage` | retry later |
+| `large_tabular_unavailable` | `Unavailable` (no staging root, mounts disabled, unsupported executor, registry, executor) | nothing, or retry later |
+
+`to_tool_error()` is the object a tool returns: `{error, code, source: "execution"}` and nothing else.
