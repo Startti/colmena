@@ -19,6 +19,8 @@
 //! - [`prelude`]: the Python the model's code finds (`tables`, a guarded `df`) and
 //!   how that code is wrapped.
 //!
+//! - [`runtime`]: one call start to finish (ensure prepared, verify, run, report).
+//!
 //! See docs/developer_guide/53_python_executors.md and
 //! docs/developer_guide/54_tabular_prepare.md.
 
@@ -28,6 +30,7 @@ pub mod mounted;
 pub mod prelude;
 pub mod refusal;
 pub mod remote_seam;
+pub mod runtime;
 #[cfg(unix)]
 pub mod stage;
 #[cfg(test)]
