@@ -251,6 +251,64 @@ pub(crate) fn resolve_synthetic_enabled_tools<'a>(
     (wants, excludes)
 }
 
+/// The `enabled_tools` value that governs a node: the run's `inputs` REPLACE the
+/// node's `config` (they are not merged), exactly as the catalog filter reads it.
+pub(crate) fn enabled_tools_source<'a>(
+    inputs: &'a NodeInputs,
+    config: &'a Value,
+) -> Option<&'a Value> {
+    inputs
+        .get("enabled_tools")
+        .or_else(|| config.get("enabled_tools"))
+}
+
+/// Whether `enabled_tools` excludes `name` by spelling it: an entry exactly `!name`.
+/// Aliases and `!*` are not looked at: they are how the catalog filter excludes, and the
+/// tools that need a declaration were never reached by them.
+pub(crate) fn excluded_by_name(enabled_tools_config: Option<&Value>, name: &str) -> bool {
+    let exact = format!("!{name}");
+    match enabled_tools_config {
+        Some(Value::String(s)) => *s == exact,
+        Some(Value::Array(items)) => items.iter().any(|v| v.as_str() == Some(exact.as_str())),
+        _ => false,
+    }
+}
+
+/// What makes a synthetic tool available before any exclusion is applied.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum OfferedBy {
+    /// Only a `tool_configurations` entry (the SQL tools and `attachment_run_python`,
+    /// as in every release so far).
+    Declaration,
+    /// A `tool_configurations` entry, or `enabled_tools` naming it (directly, through a
+    /// toolkit alias such as `gsheets`, or as `"*"`): `data_run_python`.
+    DeclarationOrName,
+}
+
+/// Whether a synthetic tool that is added AFTER the catalog filter is offered. What
+/// makes it available is each tool's own pre-existing condition ([`OfferedBy`]); the one
+/// thing added on top is the filter's exclusion rule: `!name` in `enabled_tools` removes
+/// it even when it is declared. Nothing is offered that was not offered before.
+pub(crate) fn synthetic_tool_offered(
+    name: &str,
+    enabled_tools_config: Option<&Value>,
+    configured_aliases: &std::collections::HashSet<String>,
+    by: OfferedBy,
+) -> bool {
+    match by {
+        // Only the tool's own spelled-out `!name` removes it: `!*` and `!<alias>` never did.
+        OfferedBy::Declaration => {
+            configured_aliases.contains(name) && !excluded_by_name(enabled_tools_config, name)
+        }
+        // As in every release so far: `!name`, `!*` and `!<alias>` all remove it.
+        OfferedBy::DeclarationOrName => {
+            let known = [name];
+            let (wants, excludes) = resolve_synthetic_enabled_tools(enabled_tools_config, &known);
+            !excludes.contains(name) && (configured_aliases.contains(name) || wants.contains(name))
+        }
+    }
+}
+
 /// Pairs each of the parent's tool-call frames with the child scope its call
 /// opened under (`ToolExecutor::child_scope`).
 ///
@@ -2375,8 +2433,21 @@ impl ExecutableNode for LlmNode {
                     name
                 );
             }
-            catalog.extend(assembled.entries);
-            lookup_for_describe.extend(assembled.lookup);
+            // A tool the owner excluded by name is not callable, so it is neither listed
+            // for discovery nor described: the model would be told to call it forever.
+            let enabled = enabled_tools_source(inputs, config);
+            catalog.extend(
+                assembled
+                    .entries
+                    .into_iter()
+                    .filter(|e| !excluded_by_name(enabled, &e.name)),
+            );
+            lookup_for_describe.extend(
+                assembled
+                    .lookup
+                    .into_iter()
+                    .filter(|t| !excluded_by_name(enabled, &t.name)),
+            );
         }
 
         // Tools the LLM node has discovered via describe_tool during this execution
@@ -2938,9 +3009,7 @@ impl ExecutableNode for LlmNode {
         //
         // When a user lists a name under `enabled_tools` that is already
         // covered by `tool_configurations`, the dedup silently collapses it.
-        let enabled_tools_config = inputs
-            .get("enabled_tools")
-            .or_else(|| config.get("enabled_tools"));
+        let enabled_tools_config = enabled_tools_source(inputs, config);
 
         let all_tools = tool_executor.available_tools().await;
 
@@ -2972,10 +3041,20 @@ impl ExecutableNode for LlmNode {
                 build_sql_inspect_attachment_tool_definition, SQL_BULK_INSERT_TOOL_NAME,
                 SQL_INSPECT_ATTACHMENT_TOOL_NAME,
             };
-            if configured_aliases.contains(SQL_INSPECT_ATTACHMENT_TOOL_NAME) {
+            // These are added after the catalog filter, so they apply its rule
+            // themselves: declared or named, and not excluded with `!name`.
+            let offered = |name: &str| {
+                synthetic_tool_offered(
+                    name,
+                    enabled_tools_config,
+                    &configured_aliases,
+                    OfferedBy::Declaration,
+                )
+            };
+            if offered(SQL_INSPECT_ATTACHMENT_TOOL_NAME) {
                 tools.push(build_sql_inspect_attachment_tool_definition());
             }
-            if configured_aliases.contains(SQL_BULK_INSERT_TOOL_NAME) {
+            if offered(SQL_BULK_INSERT_TOOL_NAME) {
                 tools.push(build_sql_bulk_insert_tool_definition());
             }
             // attachment_run_python (post item 13, 2026-06-10) — opt-in by name.
@@ -2987,7 +3066,7 @@ impl ExecutableNode for LlmNode {
                 build_attachment_run_python_tool_definition_for_large_files,
                 ATTACHMENT_RUN_PYTHON_TOOL_NAME,
             };
-            if configured_aliases.contains(ATTACHMENT_RUN_PYTHON_TOOL_NAME) {
+            if offered(ATTACHMENT_RUN_PYTHON_TOOL_NAME) {
                 // The large-file text and `tables` argument are shown only while
                 // a runtime that can serve them is wired; otherwise the tool is
                 // exactly what it always was.
@@ -3024,11 +3103,12 @@ impl ExecutableNode for LlmNode {
             // `data_run_python`) to the unified tool. `!data_run_python` opts
             // back out. `find_package("gsheets")` includes `data_run_python`
             // (see toolkit_packages.rs), so the alias expands to it here.
-            let (drp_wants, drp_excludes) =
-                resolve_synthetic_enabled_tools(enabled_tools_config, &[TOOL_DATA_RUN_PYTHON]);
-            let drp_enabled = (configured_aliases.contains(TOOL_DATA_RUN_PYTHON)
-                || drp_wants.contains(TOOL_DATA_RUN_PYTHON))
-                && !drp_excludes.contains(TOOL_DATA_RUN_PYTHON);
+            let drp_enabled = synthetic_tool_offered(
+                TOOL_DATA_RUN_PYTHON,
+                enabled_tools_config,
+                &configured_aliases,
+                OfferedBy::DeclarationOrName,
+            );
             if drp_enabled && !tools.iter().any(|t| t.name == TOOL_DATA_RUN_PYTHON) {
                 let agent_has_gsheets = Self::agent_has_gsheets_write_tools(config, inputs)
                     || Self::agent_has_gsheets_format_tool(config, inputs)
@@ -8782,6 +8862,9 @@ mod storage_key_entries;
 mod node_harness;
 
 #[cfg(test)]
+mod synthetic_offering_turn;
+
+#[cfg(test)]
 mod attachment_notices;
 
 #[cfg(test)]
@@ -8792,3 +8875,169 @@ mod storage_ref_turn;
 
 #[cfg(test)]
 mod whole_read_guard;
+
+#[cfg(test)]
+mod synthetic_tool_offering_tests {
+    //! The tools added after the catalog filter keep the condition that made each of them
+    //! available, and obey the filter's exclusion rule on top: nothing is offered that was
+    //! not offered before, and `!name` removes what was.
+    use super::*;
+    use serde_json::json;
+    use std::collections::HashSet;
+
+    const ARP: &str = "attachment_run_python";
+    const DRP: &str = "data_run_python";
+    const SQL: [&str; 2] = ["sql_inspect_attachment", "sql_bulk_insert_from_attachment"];
+
+    fn aliases(names: &[&str]) -> HashSet<String> {
+        names.iter().map(|s| s.to_string()).collect()
+    }
+
+    fn offered(name: &str, enabled: Option<Value>, declared: &[&str], by: OfferedBy) -> bool {
+        synthetic_tool_offered(name, enabled.as_ref(), &aliases(declared), by)
+    }
+
+    use OfferedBy::{Declaration, DeclarationOrName};
+
+    #[test]
+    fn a_declared_tool_is_offered_with_no_enabled_tools_at_all() {
+        for tool in [ARP, SQL[0], SQL[1]] {
+            assert!(offered(tool, None, &[tool], Declaration), "{tool}");
+            assert!(
+                !offered(tool, None, &[], Declaration),
+                "{tool}: nothing declares it"
+            );
+        }
+        assert!(offered(DRP, None, &[DRP], DeclarationOrName));
+    }
+
+    /// The regression the review found: naming a tool is not declaring it, and the three
+    /// tools that need a declaration (the SQL tools would only fail without their
+    /// connection) are never offered by a name, an alias or the wildcard.
+    #[test]
+    fn naming_or_a_wildcard_never_offers_a_tool_that_needs_a_declaration() {
+        for tool in [ARP, SQL[0], SQL[1]] {
+            for config in [json!([tool]), json!(tool), json!(["*"]), json!(["gsheets"])] {
+                assert!(
+                    !offered(tool, Some(config.clone()), &[], Declaration),
+                    "{tool} {config}"
+                );
+            }
+        }
+    }
+
+    /// `data_run_python` keeps its own rule: a name, the wildcard or the toolkit alias.
+    #[test]
+    fn data_run_python_is_still_offered_by_a_name_the_wildcard_or_the_alias() {
+        for config in [json!(["data_run_python"]), json!(["*"]), json!(["gsheets"])] {
+            assert!(
+                offered(DRP, Some(config.clone()), &[], DeclarationOrName),
+                "{config}"
+            );
+        }
+        assert!(!offered(
+            DRP,
+            Some(json!(["tavily_search"])),
+            &[],
+            DeclarationOrName
+        ));
+    }
+
+    #[test]
+    fn an_exclusion_removes_a_declared_tool() {
+        for tool in [ARP, SQL[0], SQL[1]] {
+            let excluded = Some(json!([format!("!{tool}")]));
+            assert!(!offered(tool, excluded, &[tool], Declaration), "{tool}");
+        }
+        assert!(!offered(
+            DRP,
+            Some(json!(["!data_run_python"])),
+            &[DRP],
+            DeclarationOrName
+        ));
+        // A single string works like a one-entry list.
+        assert!(!offered(
+            ARP,
+            Some(json!("!attachment_run_python")),
+            &[ARP],
+            Declaration
+        ));
+    }
+
+    /// `!*` and `!<alias>` are how the catalog filter excludes, and the tools that need a
+    /// declaration were never reached by them: only their own `!name` removes them.
+    #[test]
+    fn only_a_spelled_out_name_removes_a_declaration_only_tool() {
+        for tool in [ARP, SQL[0], SQL[1]] {
+            for config in [
+                json!(["!*"]),
+                json!(["*", "!*"]),
+                json!("!*"),
+                json!(["!gsheets"]),
+                json!(["!attachment_run_pythonX"]),
+            ] {
+                assert!(
+                    offered(tool, Some(config.clone()), &[tool], Declaration),
+                    "{tool} {config}"
+                );
+            }
+            assert!(!offered(
+                tool,
+                Some(json!(["*", format!("!{tool}")])),
+                &[tool],
+                Declaration
+            ));
+        }
+    }
+
+    /// `data_run_python` keeps exactly what it always had: `!*` and the alias remove it.
+    #[test]
+    fn data_run_python_is_still_removed_by_bang_star_and_by_its_alias() {
+        for config in [json!(["!*"]), json!(["*", "!*"]), json!(["!gsheets"])] {
+            assert!(
+                !offered(DRP, Some(config.clone()), &[DRP], DeclarationOrName),
+                "{config}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_allow_list_that_omits_a_declared_tool_does_not_remove_it() {
+        // `tool_configurations` auto-enables; `enabled_tools` only adds to that set.
+        let other = Some(json!(["tavily_search"]));
+        assert!(offered(ARP, other.clone(), &[ARP], Declaration));
+        assert!(offered(DRP, other, &[DRP], DeclarationOrName));
+    }
+
+    #[test]
+    fn the_wildcard_never_overrides_an_exclusion() {
+        let star_minus = Some(json!(["*", "!attachment_run_python", "!data_run_python"]));
+        assert!(!offered(ARP, star_minus.clone(), &[ARP], Declaration));
+        assert!(!offered(DRP, star_minus, &[DRP], DeclarationOrName));
+        assert!(
+            offered(ARP, Some(json!(["*"])), &[ARP], Declaration),
+            "declared and not excluded"
+        );
+    }
+
+    #[test]
+    fn the_runs_inputs_replace_the_nodes_config() {
+        let inputs: NodeInputs = [(
+            "enabled_tools".to_string(),
+            json!(["!attachment_run_python"]),
+        )]
+        .into();
+        let config = json!({"enabled_tools": ["attachment_run_python"]});
+        let source = enabled_tools_source(&inputs, &config).cloned();
+        assert!(!offered(ARP, source, &[ARP], Declaration), "inputs exclude");
+        // Without it in the inputs, the config governs.
+        let none: NodeInputs = HashMap::new();
+        let config = json!({"enabled_tools": ["!attachment_run_python"]});
+        let source = enabled_tools_source(&none, &config).cloned();
+        assert!(!offered(ARP, source, &[ARP], Declaration));
+        // The inputs replace, they do not merge: the config's `!` is gone.
+        let inputs: NodeInputs = [("enabled_tools".to_string(), json!(["tavily_search"]))].into();
+        let source = enabled_tools_source(&inputs, &config).cloned();
+        assert!(offered(ARP, source, &[ARP], Declaration));
+    }
+}
