@@ -1481,3 +1481,7 @@ storage placed there. `prepared_bytes` (what the row recorded for the live parts
 (128 KiB) however the storage declares its size: the declared size is checked first and the stream is cut off at the cap,
 so an object that lies about its size is never buffered. A manifest that does not parse is `Invalid(Manifest)` and the
 parse error is not shown. A verification opens only the manifest; no part is read.
+
+Two cross-checks tie the storage to the registry. The manifest's table list must equal the row's `tables_json` byte for
+byte (the row stores exactly `Manifest::tables_json`), else `Invalid(Manifest)`; and every part the manifest lists must be a
+blob the row tracks, else `Invalid(Parts)`. A manifest the storage holds but the registry did not record is not trusted.
