@@ -112,6 +112,9 @@ pub enum RunRefusal {
     },
     /// The cleanup pass is removing the prepared copy.
     BeingRemoved,
+    /// The host's trigger refused to request a preparation: a file that will
+    /// never be prepared (terminal, not a transient failure).
+    NeverPrepared,
     OverBudget(Budget),
     NoSuchTable {
         name: String,
@@ -128,7 +131,9 @@ impl RunRefusal {
         match self {
             Self::NotEnabled => "large_tabular_disabled",
             Self::NotPrepared | Self::StillPreparing { .. } => "large_tabular_not_ready",
-            Self::PreparationFailed { .. } | Self::BeingRemoved => "large_tabular_failed",
+            Self::PreparationFailed { .. } | Self::BeingRemoved | Self::NeverPrepared => {
+                "large_tabular_failed"
+            }
             Self::OverBudget(_) => "large_tabular_over_budget",
             Self::NoSuchTable { .. } => "large_tabular_no_such_table",
             Self::Invalid(_) => "large_tabular_invalid",
@@ -167,6 +172,10 @@ impl RunRefusal {
                     reason.text()
                 )
             }
+            Self::NeverPrepared => format!(
+                "this file cannot be prepared for analysis and will not be retried, so it cannot be \
+                 analysed here. {NOT_LOADED}"
+            ),
             Self::BeingRemoved => format!(
                 "the prepared copy of this file is being removed; it cannot be analysed now. \
                  {NOT_LOADED}"
@@ -241,6 +250,7 @@ mod tests {
             RunRefusal::StillPreparing { percent: None },
             RunRefusal::StillPreparing { percent: Some(40) },
             RunRefusal::BeingRemoved,
+            RunRefusal::NeverPrepared,
             RunRefusal::OverBudget(Budget::Data {
                 limit_bytes: 1024 * MIB,
             }),
