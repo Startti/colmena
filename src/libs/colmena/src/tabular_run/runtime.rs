@@ -135,14 +135,31 @@ pub enum LargeRunError {
         secs: u64,
     },
     /// The executor failed for a reason that is not the code's. The detail is
-    /// logged, never returned: it can carry a socket path of the host.
-    Internal,
+    /// logged, never returned: it can carry a socket path of the host. `retryable`
+    /// is false when the failure reads as a setup problem, which no wait fixes.
+    Internal {
+        retryable: bool,
+    },
 }
 
 /// What the model is told when the child ended without a result.
 const MEMORY_TEXT: &str = "the run ended without returning a result; it probably ran out of \
     memory. Select fewer columns with `read(columns=[...])`, or loop \
     `for part in tables[name].parts(columns=[...])` and combine per-part results";
+
+/// Whether an executor failure's text reads as a setup problem (no wait fixes it).
+/// A heuristic on the executor's own fixed texts; unknown text is a moment.
+fn reads_as_setup_problem(text: &str) -> bool {
+    let lower = text.to_lowercase();
+    [
+        "misconfigured",
+        "is not configured",
+        "no staging directory",
+        "requires linux",
+    ]
+    .iter()
+    .any(|k| lower.contains(k))
+}
 
 /// Why an output was not kept, in words for the model.
 fn reason_text(reason: RejectReason) -> &'static str {
@@ -151,6 +168,7 @@ fn reason_text(reason: RejectReason) -> &'static str {
         RejectReason::NotARegularFile => "not a regular file",
         RejectReason::HardLinked => "more than one name for the file",
         RejectReason::TooLarge => "over the size limit for one file",
+        RejectReason::NameCollision => "another file has the same name ignoring case; neither was kept",
         RejectReason::OverFileCount => "over the number of files allowed",
         RejectReason::OverTotal => "over the size limit for all files together",
         RejectReason::Unreadable => "could not be read",
@@ -305,6 +323,17 @@ impl LargeTabularRuntime {
                     guard,
                 })
             }
+            Err(MountedError::Refused(RunRefusal::CopyDamaged)) => {
+                // Make the next claim prepare it again (the row must still be exactly
+                // what was observed); best effort, and the answer is the same.
+                if let Ok(Some(row)) = self.registry.get(&req.source_key).await {
+                    let _ = self
+                        .registry
+                        .mark_manifest_missing(&row, chrono::Utc::now())
+                        .await;
+                }
+                Err(refused(RunRefusal::CopyDamaged))
+            }
             Err(MountedError::Refused(r)) => Err(refused(r)),
             Err(MountedError::Run(PythonRunError::Python(text))) => {
                 if text == CRASHED_MESSAGE || text.contains("MemoryError") {
@@ -318,7 +347,9 @@ impl LargeTabularRuntime {
             }),
             Err(MountedError::Run(PythonRunError::Internal(text))) => {
                 tracing::warn!(target: "colmena::tabular_run", detail = %text, "large-file call: executor failure");
-                Err(LargeRunError::Internal)
+                Err(LargeRunError::Internal {
+                    retryable: !reads_as_setup_problem(&text),
+                })
             }
         }
     }
@@ -526,7 +557,7 @@ mod tests {
             ),
             (
                 PythonRunError::Internal("PythonExecutorError: boom".into()),
-                LargeRunError::Internal,
+                LargeRunError::Internal { retryable: true },
             ),
         ];
         for (run_error, expected) in cases {
@@ -744,5 +775,41 @@ mod tests {
             (c.prepare_wait, c.heavy_timeout, c.limits.total_time),
             (PREPARE_BUDGET, RUN_BUDGET, STAGE_BUDGET)
         );
+    }
+
+    /// A damaged copy is reported as such (not retryable as it is) and its row is
+    /// demoted so the next claim prepares it again.
+    #[tokio::test]
+    async fn a_damaged_copy_is_demoted_so_it_is_prepared_again() {
+        use crate::tabular_prepare::registry::PrepareStatus;
+        let p = prepared(&[("sales", 1)], 4).await;
+        let exec = Recorder::answering(Err(MountedError::Refused(RunRefusal::CopyDamaged)));
+        let err = runtime(&p, exec, true)
+            .run(request("pass", &[]))
+            .await
+            .unwrap_err();
+        assert_eq!(err, LargeRunError::Refused(RunRefusal::CopyDamaged));
+        let row = p.registry.get(SOURCE).await.unwrap().unwrap();
+        assert_eq!(row.status, PrepareStatus::Failed);
+        assert_eq!(row.error_code.as_deref(), Some("manifest_missing"));
+    }
+
+    /// What storage is given is unique per call: the same file name from two calls
+    /// reaches it under two names.
+    #[tokio::test]
+    async fn the_same_returned_name_reaches_storage_under_a_name_unique_to_the_call() {
+        let p = prepared(&[("sales", 1)], 4).await;
+        for _ in 0..2 {
+            let exec = Recorder::ok_with_files(json!(1), &[("out.csv", b"1")]);
+            let out = runtime(&p, exec, true)
+                .run(request("pass", &[]))
+                .await
+                .unwrap();
+            out.guard.commit();
+        }
+        let names = p.storage.stored_filenames.lock().unwrap().clone();
+        assert_eq!(names.len(), 2);
+        assert_ne!(names[0], names[1]);
+        assert!(names.iter().all(|n| n.ends_with("-out.csv")));
     }
 }

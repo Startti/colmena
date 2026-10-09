@@ -295,7 +295,7 @@ pub async fn run_mounts(State(st): State<AppState>, req: Request) -> Response {
         inputs: header.inputs,
     };
     let mounts = volume.get().mounts();
-    let outcome = st.exec.run_staged(run, mounts).await;
+    let outcome = st.exec.run_staged_confirmed(run, mounts).await;
     let mut head = ResponseHeader {
         v: WIRE_V2,
         status: RunStatus::Ok,
@@ -418,9 +418,11 @@ pub async fn run_mounts(State(st): State<AppState>, req: Request) -> Response {
                     Ok(n) if n > 0 => n,
                     _ => {
                         // Shorter than checked: the body ends in an error.
-                        let _ = tx
-                            .send(Err(std::io::Error::other("output ended early")))
-                            .await;
+                        let _ = tokio::time::timeout(
+                            IDLE_TIMEOUT,
+                            tx.send(Err(std::io::Error::other("output ended early"))),
+                        )
+                        .await;
                         return;
                     }
                 };

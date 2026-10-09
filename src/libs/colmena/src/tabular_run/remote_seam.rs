@@ -67,6 +67,13 @@ fn refusal_of(status: u16, retry_after: bool, body: Option<Refusal>) -> MountedE
             limit_bytes: super::verify::DATA_MAX_BYTES,
         })),
         (401 | 403, _) => MountedError::Run(PythonRunError::Internal(REJECTED.to_string())),
+        (_, Some("executor_not_ready")) => refused(RunRefusal::Unavailable(Unavailable::NotReady)),
+        (_, Some("volume_io")) => refused(RunRefusal::Unavailable(Unavailable::VolumeIo)),
+        // The server does not accept what was sent (wire version, an output size, a
+        // header it cannot read): the same request will not work, a setup question.
+        (400, _) | (_, Some("bad_request")) => {
+            refused(RunRefusal::Unavailable(Unavailable::Misconfigured))
+        }
         _ => unavailable(),
     }
 }
@@ -130,7 +137,7 @@ async fn produce(
                 .storage
                 .read_stream(&key)
                 .await
-                .map_err(|_| RunRefusal::Storage)?;
+                .map_err(super::stage::damaged_or_storage)?;
             let declared = stream.size_bytes;
             if declared > limits.part_bytes {
                 abort(&tx).await;
@@ -217,6 +224,17 @@ where
     if head.files.len() > limits.max_files {
         return Err(unavailable());
     }
+    // Bounded: only so many responses spool at once.
+    let _permit = if head.files.is_empty() {
+        None
+    } else {
+        Some(
+            spool_slots()
+                .acquire_owned()
+                .await
+                .map_err(|_| unavailable())?,
+        )
+    };
     let mut total = 0u64;
     let mut names = std::collections::HashSet::new();
     let mut spooled: Vec<OutFile> = vec![];
@@ -230,7 +248,10 @@ where
         else {
             return Err(unavailable());
         };
-        let std_file = spool().map_err(|_| unavailable())?;
+        let std_file = tokio::task::spawn_blocking(spool)
+            .await
+            .map_err(|_| unavailable())?
+            .map_err(|_| unavailable())?;
         let mut file = tokio::fs::File::from_std(std_file.try_clone().map_err(|_| unavailable())?);
         reader
             .copy_exact(entry.size, &mut file)
@@ -284,6 +305,31 @@ fn dropped(list: &[Dropped]) -> Vec<Rejection> {
             reason: RejectReason::from_wire(&d.reason),
         })
         .collect()
+}
+
+/// What to tell the model when the call header does not fit a frame: the part that
+/// is too large decides the advice (the model writes the code; the inputs come from the
+/// table list).
+fn header_overflow(code_len: usize, inputs: &serde_json::Map<String, serde_json::Value>) -> String {
+    let inputs_len = serde_json::to_vec(inputs).map_or(usize::MAX, |v| v.len());
+    if inputs_len > code_len {
+        "the list of tables is too large for one large-file call; name fewer tables with the `tables` argument".to_string()
+    } else {
+        "the code is too large for a large-file call (over 1 MiB with its inputs); shorten the code"
+            .to_string()
+    }
+}
+
+/// How many responses may be spooled at once. A spool lives in the system temp
+/// directory, which can be memory-backed: this bounds it (2 x the 128 MiB a response
+/// may carry) however many calls are running.
+static SPOOL_SLOTS: std::sync::OnceLock<std::sync::Arc<tokio::sync::Semaphore>> =
+    std::sync::OnceLock::new();
+
+pub(crate) fn spool_slots() -> std::sync::Arc<tokio::sync::Semaphore> {
+    SPOOL_SLOTS
+        .get_or_init(|| std::sync::Arc::new(tokio::sync::Semaphore::new(2)))
+        .clone()
 }
 
 /// The most a small answer body (a refusal) is read: a server that sends more is
@@ -341,19 +387,27 @@ impl RemoteExecutor {
     ) -> Result<MountedResult, MountedError> {
         // The header must fit a frame: checked before anything else, so a call too
         // large to send is the model's to shorten, not an executor that is "unavailable".
+        let timeout_ms = u64::try_from(
+            req.timeout
+                .unwrap_or(self.transport().2)
+                .min(self.transport().2)
+                .as_millis(),
+        )
+        .unwrap_or(u64::MAX);
         let sized = CallHeader {
             v: WIRE_V2,
             code: req.code.clone(),
             mode: req.mode.clone(),
-            timeout_ms: 0,
+            timeout_ms,
             inputs: req.inputs.clone(),
             out_mb: call.out_mb,
             probe: false,
         };
         if serde_json::to_vec(&sized).map_or(true, |j| try_frame(&j).is_err()) {
-            return Err(MountedError::Run(PythonRunError::Python(
-                "the code and its inputs are too large for a large-file call (over 1 MiB together); shorten the code".to_string(),
-            )));
+            return Err(MountedError::Run(PythonRunError::Python(header_overflow(
+                req.code.len(),
+                &req.inputs,
+            ))));
         }
         // Credentials and readiness are checked BEFORE any part is read from
         // storage: a server that refuses the caller answers while the body
@@ -454,7 +508,7 @@ impl RemoteExecutor {
             timeout + IDLE_TIMEOUT,
             timeout + super::runtime::COLLECT_BUDGET,
         )
-        .with_min_rate(MIN_BYTES_PER_SEC, RATE_GRACE + timeout);
+        .with_min_rate(MIN_BYTES_PER_SEC, RATE_GRACE);
         let head: ResponseHeader = reader.json().await.map_err(|_| unavailable())?;
         reader.set_idle(IDLE_TIMEOUT);
         if head.v != WIRE_V2 {
@@ -1004,5 +1058,67 @@ mod tests {
             other => panic!("{other:?}"),
         }
         assert_eq!(seen.load(Ordering::SeqCst), 0, "nothing was sent");
+    }
+
+    /// Only two responses spool at a time; a third waits for one to end.
+    #[tokio::test]
+    async fn the_number_of_responses_spooled_at_once_is_bounded() {
+        let held = (
+            spool_slots().acquire_owned().await.unwrap(),
+            spool_slots().acquire_owned().await.unwrap(),
+        );
+        let waiting =
+            tokio::time::timeout(Duration::from_millis(200), hostile(&[("a.csv", 1)], b"x")).await;
+        assert!(
+            waiting.is_err(),
+            "a third spool must wait while two are held"
+        );
+        drop(held);
+        let (got, _) = hostile(&[("a.csv", 1)], b"x").await;
+        assert!(got.is_ok());
+    }
+
+    /// The advice follows what overflowed: the table list is not the model's code.
+    #[test]
+    fn the_overflow_message_names_the_part_that_is_too_large() {
+        let mut wide = serde_json::Map::new();
+        wide.insert("_ct_tables".into(), serde_json::json!("x".repeat(2000)));
+        assert!(header_overflow(10, &wide).contains("fewer tables"));
+        assert!(header_overflow(5000, &serde_json::Map::new()).contains("shorten the code"));
+    }
+
+    /// The finer server answers have their own typed refusals, and a 400 is a setup
+    /// problem, not a moment.
+    #[test]
+    fn the_servers_finer_answers_have_their_own_refusals() {
+        let body = |r: &str| {
+            Some(Refusal {
+                refusal: r.into(),
+                reason: None,
+            })
+        };
+        let refusal = |e: MountedError| match e {
+            MountedError::Refused(r) => r,
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(
+            refusal(refusal_of(503, false, body("executor_not_ready"))),
+            RunRefusal::Unavailable(Unavailable::NotReady)
+        );
+        assert_eq!(
+            refusal(refusal_of(503, false, body("volume_io"))),
+            RunRefusal::Unavailable(Unavailable::VolumeIo)
+        );
+        for (status, b) in [(400, body("bad_request")), (400, None)] {
+            let r = refusal(refusal_of(status, false, b));
+            assert_eq!(r, RunRefusal::Unavailable(Unavailable::Misconfigured));
+            assert!(!r.retryable());
+        }
+        assert!(RunRefusal::Unavailable(Unavailable::NotReady).retryable());
+        assert!(!RunRefusal::CopyDamaged.retryable());
+        assert_eq!(
+            refusal(refusal_of(408, false, body("timeout"))),
+            RunRefusal::Unavailable(Unavailable::Executor)
+        );
     }
 }

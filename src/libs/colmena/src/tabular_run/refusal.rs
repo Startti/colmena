@@ -103,6 +103,10 @@ pub enum Unavailable {
     Registry,
     /// Staging or running failed for a reason that is not the model's.
     Executor,
+    /// The server's template is not ready yet (starting, or failed to start).
+    NotReady,
+    /// The staging volume's I/O failed.
+    VolumeIo,
     /// The executor is set up in a way that can never work (an output size it
     /// refuses): a configuration error, not a moment to wait out.
     Misconfigured,
@@ -138,6 +142,9 @@ pub enum RunRefusal {
     Storage,
     /// The conversation already holds as many returned files as it may.
     SessionQuota,
+    /// A part the registry tracks is gone from storage: the copy is damaged until it
+    /// is prepared again.
+    CopyDamaged,
     Unavailable(Unavailable),
 }
 
@@ -155,6 +162,7 @@ impl RunRefusal {
             Self::NoSuchTable { .. } => "large_tabular_no_such_table",
             Self::Invalid(_) => "large_tabular_invalid",
             Self::Storage => "large_tabular_storage",
+            Self::CopyDamaged => "large_tabular_damaged",
             Self::SessionQuota => "large_tabular_quota",
             Self::Unavailable(_) => "large_tabular_unavailable",
         }
@@ -168,7 +176,8 @@ impl RunRefusal {
             Self::NotEnabled
             | Self::NeverPrepared
             | Self::NoSuchTable { .. }
-            | Self::SessionQuota => false,
+            | Self::SessionQuota
+            | Self::CopyDamaged => false,
             Self::NotPrepared | Self::StillPreparing { .. } | Self::Storage | Self::CopyChanged => {
                 true
             }
@@ -181,7 +190,13 @@ impl RunRefusal {
             // The record and the storage disagree, a part is missing: asking again
             // reads the same record.
             Self::Invalid(_) => false,
-            Self::Unavailable(u) => matches!(u, Unavailable::Registry | Unavailable::Executor),
+            Self::Unavailable(u) => matches!(
+                u,
+                Unavailable::Registry
+                    | Unavailable::Executor
+                    | Unavailable::NotReady
+                    | Unavailable::VolumeIo
+            ),
         }
     }
 
@@ -273,6 +288,16 @@ impl RunRefusal {
             Self::Unavailable(Unavailable::Registry) => {
                 "the preparation record could not be read; retry later".to_string()
             }
+            Self::CopyDamaged => format!(
+                "the prepared copy of this file is damaged (a part is missing from storage); it will be prepared again, \
+                 and this request will not work until then. {NOT_LOADED}"
+            ),
+            Self::Unavailable(Unavailable::NotReady) => {
+                "the large-file executor is not ready yet; retry shortly".to_string()
+            }
+            Self::Unavailable(Unavailable::VolumeIo) => {
+                "the large-file executor could not make its working volume; retry later".to_string()
+            }
             Self::Unavailable(Unavailable::Misconfigured) => {
                 "large-file analysis is misconfigured on this executor and cannot run here".to_string()
             }
@@ -324,6 +349,7 @@ mod tests {
             RunRefusal::NoSuchTable { name: "x".into() },
             RunRefusal::Storage,
             RunRefusal::SessionQuota,
+            RunRefusal::CopyDamaged,
         ];
         for reason in [
             FailureReason::Time,
@@ -357,6 +383,8 @@ mod tests {
             Unavailable::Registry,
             Unavailable::Executor,
             Unavailable::Misconfigured,
+            Unavailable::NotReady,
+            Unavailable::VolumeIo,
         ] {
             all.push(RunRefusal::Unavailable(u));
         }
@@ -463,6 +491,8 @@ mod tests {
             RunRefusal::Storage,
             RunRefusal::Unavailable(Unavailable::Registry),
             RunRefusal::Unavailable(Unavailable::Executor),
+            RunRefusal::Unavailable(Unavailable::NotReady),
+            RunRefusal::Unavailable(Unavailable::VolumeIo),
         ];
         let no = [
             RunRefusal::NotEnabled,
@@ -476,6 +506,7 @@ mod tests {
             RunRefusal::OverBudget(Budget::Data { limit_bytes: 1 }),
             RunRefusal::OverBudget(Budget::Part { limit_bytes: 1 }),
             RunRefusal::OverBudget(Budget::Table { limit_bytes: 1 }),
+            RunRefusal::CopyDamaged,
             RunRefusal::Invalid(Invalid::Record),
             RunRefusal::Invalid(Invalid::Parts),
             RunRefusal::Unavailable(Unavailable::NoStagingRoot),

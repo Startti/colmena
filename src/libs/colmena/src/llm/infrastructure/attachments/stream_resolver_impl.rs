@@ -29,6 +29,9 @@ use crate::storage::domain::{OutputStorageRepository, StoredStream};
 pub struct AttachmentStreamResolverImpl {
     registry: Arc<dyn AttachmentRegistry>,
     storage: Arc<dyn OutputStorageRepository>,
+    /// Whether the large-file tool is served (see `large_tabular::tool_served`); the
+    /// refusal of a host object points at it only then. Shared with the node registry.
+    large_tool_served: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl AttachmentStreamResolverImpl {
@@ -41,7 +44,17 @@ impl AttachmentStreamResolverImpl {
         registry: Arc<dyn AttachmentRegistry>,
         storage: Arc<dyn OutputStorageRepository>,
     ) -> Self {
-        Self { registry, storage }
+        Self {
+            registry,
+            storage,
+            large_tool_served: Arc::default(),
+        }
+    }
+
+    /// Shares the flag that says whether the large-file tool is served.
+    pub fn with_large_tool_flag(mut self, flag: Arc<std::sync::atomic::AtomicBool>) -> Self {
+        self.large_tool_served = flag;
+        self
     }
 }
 
@@ -90,7 +103,11 @@ impl AttachmentStreamResolverImpl {
             .await?
         {
             if buffering && row.is_host_storage_ref() {
-                return Err(AttachmentResolveError::HostObject);
+                return Err(AttachmentResolveError::HostObject {
+                    large_tool_served: self
+                        .large_tool_served
+                        .load(std::sync::atomic::Ordering::Relaxed),
+                });
             }
             let key = row.storage_key.clone().ok_or_else(|| {
                 AttachmentResolveError::StorageKeyMissing {
@@ -457,7 +474,10 @@ mod tests {
             .resolve_for_buffering("agent_x", "doc-1")
             .await
             .unwrap_err();
-        assert!(matches!(err, AttachmentResolveError::HostObject), "{err:?}");
+        assert!(
+            matches!(err, AttachmentResolveError::HostObject { .. }),
+            "{err:?}"
+        );
         assert_eq!(
             err.to_string(),
             crate::llm::domain::large_tabular::refusal_text()
@@ -519,5 +539,28 @@ mod tests {
             !err.contains("secret") && !err.contains("/var/data"),
             "{err}"
         );
+    }
+
+    /// The refusal follows the shared flag: pointed at the tool only while it is served.
+    #[tokio::test]
+    async fn the_host_object_refusal_follows_whether_the_tool_is_served() {
+        use crate::llm::domain::large_tabular::refusal_text_for;
+        let flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let resolver = AttachmentStreamResolverImpl::new(
+            registry_with(host_row()).await,
+            Arc::new(MockOutputStorageRepository::new()),
+        )
+        .with_large_tool_flag(flag.clone());
+        let err = resolver
+            .resolve_for_buffering("agent_x", "doc-1")
+            .await
+            .unwrap_err();
+        assert_eq!(err.to_string(), refusal_text_for(false));
+        flag.store(true, std::sync::atomic::Ordering::Relaxed);
+        let err = resolver
+            .resolve_for_buffering("agent_x", "doc-1")
+            .await
+            .unwrap_err();
+        assert_eq!(err.to_string(), refusal_text_for(true));
     }
 }

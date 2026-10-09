@@ -166,7 +166,9 @@ pub struct Reader<S> {
     deadline: Instant,
     /// `(bytes per second, grace)`: past the grace, slower than this is a stall.
     min_rate: Option<(u64, Duration)>,
-    started: Instant,
+    /// Time spent waiting on the PEER since its first byte (not the receiver's own
+    /// time writing what it got, and not the wait for the first byte).
+    waited: Duration,
     seen: u64,
 }
 
@@ -181,7 +183,7 @@ where
             idle,
             deadline: Instant::now() + total,
             min_rate: None,
-            started: Instant::now(),
+            waited: Duration::ZERO,
             seen: 0,
         }
     }
@@ -196,8 +198,7 @@ where
         let Some((bps, grace)) = self.min_rate else {
             return false;
         };
-        let elapsed = self.started.elapsed();
-        elapsed > grace && (self.seen as f64) < elapsed.as_secs_f64() * bps as f64
+        self.waited > grace && (self.seen as f64) < self.waited.as_secs_f64() * bps as f64
     }
 
     /// Changes the idle limit: the first frame of a response waits for the code
@@ -215,6 +216,7 @@ where
             let wait = self
                 .idle
                 .min(self.deadline.saturating_duration_since(Instant::now()));
+            let asked = Instant::now();
             let next = tokio::time::timeout(wait, self.stream.next())
                 .await
                 .map_err(|_| {
@@ -224,6 +226,12 @@ where
                         WireError::Stalled
                     }
                 })?;
+            // The rate counts only the peer's time, and only after its first byte: a
+            // call's mounting, the executor's backpressure and the receiver's own writes
+            // are not the peer's slowness.
+            if self.seen > 0 {
+                self.waited += asked.elapsed();
+            }
             match next {
                 None => return Ok(false),
                 Some(Err(_)) => return Err(WireError::Transport),
@@ -591,5 +599,57 @@ mod tests {
         r.copy_exact(50 << 20, &mut tokio::io::sink())
             .await
             .unwrap();
+    }
+
+    /// The rate is the peer's: a receiver that is slow to write what it got, and a
+    /// peer that is slow to start, are not "too slow".
+    #[tokio::test]
+    async fn the_minimum_rate_does_not_count_the_receivers_own_time() {
+        use tokio::io::AsyncWrite;
+        struct Slow;
+        impl AsyncWrite for Slow {
+            fn poll_write(
+                self: std::pin::Pin<&mut Self>,
+                cx: &mut std::task::Context<'_>,
+                b: &[u8],
+            ) -> std::task::Poll<std::io::Result<usize>> {
+                // A write that takes 20 ms: yield, then sleep via a blocking pause.
+                std::thread::sleep(Duration::from_millis(20));
+                cx.waker().wake_by_ref();
+                std::task::Poll::Ready(Ok(b.len()))
+            }
+            fn poll_flush(
+                self: std::pin::Pin<&mut Self>,
+                _: &mut std::task::Context<'_>,
+            ) -> std::task::Poll<std::io::Result<()>> {
+                std::task::Poll::Ready(Ok(()))
+            }
+            fn poll_shutdown(
+                self: std::pin::Pin<&mut Self>,
+                _: &mut std::task::Context<'_>,
+            ) -> std::task::Poll<std::io::Result<()>> {
+                std::task::Poll::Ready(Ok(()))
+            }
+        }
+        let fast = stream::iter((0..20).map(|_| Ok::<_, ()>(Bytes::from(vec![0u8; 100 * 1024]))));
+        let mut r = Reader::new(fast, Duration::from_secs(1), Duration::from_secs(30))
+            .with_min_rate(10_000_000, Duration::from_millis(50));
+        // 2 MB at 20 ms a write is 5 MB/s overall, under the 10 MB/s floor: counting the
+        // receiver's time would cut a peer that sent everything at once.
+        r.copy_exact(20 * 100 * 1024, &mut Slow).await.unwrap();
+        // A first byte that comes late is not counted either.
+        let late = stream::unfold(0, |n| async move {
+            if n == 0 {
+                tokio::time::sleep(Duration::from_millis(300)).await;
+            }
+            (n < 5).then(|| (Ok::<_, ()>(Bytes::from(vec![0u8; 1 << 20])), n + 1))
+        });
+        let mut r = Reader::new(
+            Box::pin(late),
+            Duration::from_secs(2),
+            Duration::from_secs(30),
+        )
+        .with_min_rate(1_000_000, Duration::from_millis(50));
+        r.copy_exact(5 << 20, &mut tokio::io::sink()).await.unwrap();
     }
 }

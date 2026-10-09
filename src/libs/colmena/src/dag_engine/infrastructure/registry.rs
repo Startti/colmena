@@ -30,6 +30,10 @@ pub struct HashMapNodeRegistry {
     /// `llm_call`'s slot for the runtime over prepared large files.
     llm_large_runtime:
         Arc<std::sync::OnceLock<Arc<crate::tabular_run::runtime::LargeTabularRuntime>>>,
+    /// Shared with `http_request`'s `$attachment:` resolver: the switch is on and a
+    /// runtime is wired (this resolver is process-wide, so it cannot know a turn's
+    /// tool configuration; it never says more than the switch and the runtime allow).
+    large_tool_flag: Arc<std::sync::atomic::AtomicBool>,
 }
 
 use crate::llm::infrastructure::ConversationRepositoryFactory;
@@ -84,6 +88,7 @@ impl HashMapNodeRegistry {
             // miss is NotFound, never a raw storage_key read. When either
             // dependency is missing, the resolver is not built and http_request
             // reads the id as a storage_key directly (legacy).
+            let large_tool_flag: Arc<std::sync::atomic::AtomicBool> = Arc::default();
             let attachment_resolver: Option<
                 Arc<dyn crate::llm::domain::attachments::AttachmentStreamResolver>,
             > = match (attachment_registry.as_ref(), storage.as_ref()) {
@@ -91,7 +96,8 @@ impl HashMapNodeRegistry {
                     crate::llm::infrastructure::attachments::AttachmentStreamResolverImpl::new(
                         reg.clone(),
                         store.clone(),
-                    ),
+                    )
+                    .with_large_tool_flag(large_tool_flag.clone()),
                 )),
                 _ => None,
             };
@@ -398,6 +404,7 @@ impl HashMapNodeRegistry {
                 llm_host_token_port,
                 llm_large_tabular,
                 llm_large_runtime,
+                large_tool_flag,
             }
         })
     }
@@ -436,6 +443,18 @@ impl HashMapNodeRegistry {
     pub fn set_large_tabular(&self, enabled: bool) {
         self.llm_large_tabular
             .store(enabled, std::sync::atomic::Ordering::Relaxed);
+        self.refresh_large_tool_flag();
+    }
+
+    fn refresh_large_tool_flag(&self) {
+        let served = crate::llm::domain::large_tabular::tool_served(
+            self.llm_large_tabular
+                .load(std::sync::atomic::Ordering::Relaxed),
+            self.llm_large_runtime.get().is_some(),
+            true,
+        );
+        self.large_tool_flag
+            .store(served, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// Injects the runtime that runs the model's code over a prepared large
@@ -446,6 +465,7 @@ impl HashMapNodeRegistry {
         runtime: Arc<crate::tabular_run::runtime::LargeTabularRuntime>,
     ) {
         let _ = self.llm_large_runtime.set(runtime);
+        self.refresh_large_tool_flag();
     }
 
     /// Whether the large tabular switch is on for the nodes of this registry.

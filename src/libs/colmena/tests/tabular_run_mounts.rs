@@ -264,7 +264,11 @@ async fn pandas_reads_a_staged_parquet_part_in_restricted_mode() {
         ])
         .status();
     if !matches!(made, Ok(s) if s.success()) {
-        eprintln!("skipped: python3 with pyarrow is needed to make a Parquet part");
+        let message = "python3 with pyarrow is needed to make a Parquet part";
+        if std::env::var("COLMENA_TABULAR_EXPECT_PANDAS").as_deref() == Ok("1") {
+            panic!("{message} (COLMENA_TABULAR_EXPECT_PANDAS=1)");
+        }
+        eprintln!("skipped: {message}");
         return;
     }
     let ex = executor(Some(&root));

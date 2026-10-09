@@ -37,8 +37,10 @@ pub(crate) struct FakeStorage {
     pub reads: Mutex<Vec<String>>,
     /// What `store_stream` was given: file name and bytes.
     pub stored: Mutex<Vec<(String, Vec<u8>)>>,
+    /// The file names `store_stream` was really given (with the call's prefix).
+    pub stored_filenames: Mutex<Vec<String>>,
     /// Keys `delete` was asked for.
-    pub deleted: Mutex<Vec<String>>,
+    pub deleted: Arc<Mutex<Vec<String>>>,
     /// Fault injection for `store_stream`: fail the nth call (1-based), or
     /// stall it for a while.
     pub store_fail_on: Mutex<Option<usize>>,
@@ -59,7 +61,8 @@ impl FakeStorage {
             chunk: 1024,
             reads: Mutex::new(vec![]),
             stored: Mutex::new(vec![]),
-            deleted: Mutex::new(vec![]),
+            deleted: Arc::default(),
+            stored_filenames: Mutex::new(vec![]),
             store_fail_on: Mutex::new(None),
             store_stall_on: Mutex::new(None),
             store_calls: Mutex::new(0),
@@ -156,12 +159,16 @@ impl OutputStorageRepository for FakeStorage {
             all.extend_from_slice(&chunk?);
         }
         let size_bytes = all.len() as u64;
-        self.stored
+        // The sink prefixes every name with a per-call id; the tests read the name
+        // without it (`stored_filenames` keeps what was really given).
+        self.stored_filenames
             .lock()
             .unwrap()
-            .push((req.filename.clone(), all));
+            .push(req.filename.clone());
+        let plain = strip_call_prefix(&req.filename).to_string();
+        self.stored.lock().unwrap().push((plain.clone(), all));
         Ok(StoredOutput {
-            storage_key: format!("generated/{}", req.filename),
+            storage_key: format!("generated/{plain}"),
             read_url: String::new(),
             mime_type: req.mime_type,
             filename: req.filename,
@@ -170,6 +177,14 @@ impl OutputStorageRepository for FakeStorage {
     }
     fn derived_root(&self, _source: &str) -> Option<String> {
         self.root.clone()
+    }
+}
+
+/// `<12 hex>-name` becomes `name`.
+pub(crate) fn strip_call_prefix(filename: &str) -> &str {
+    match filename.split_once('-') {
+        Some((id, rest)) if id.len() == 12 && id.bytes().all(|b| b.is_ascii_hexdigit()) => rest,
+        _ => filename,
     }
 }
 

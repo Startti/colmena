@@ -512,6 +512,35 @@ mod reads {
     use crate::dag_engine::infrastructure::nodes::python_node::execute_sandboxed_helper;
     use crate::tabular_prepare::manifest::{ColumnInfo, ColumnType, Manifest, TableInfo};
 
+    /// A test that needs python3 libraries the machine lacks: it prints a skip line,
+    /// unless `COLMENA_TABULAR_EXPECT_PANDAS=1` says the environment must have them
+    /// (the CI image does), in which case it FAILS: a missing library must not turn
+    /// the proofs into silent passes.
+    fn skip_or_fail(what: &str) {
+        skip_or_fail_with(
+            std::env::var("COLMENA_TABULAR_EXPECT_PANDAS").as_deref() == Ok("1"),
+            what,
+        );
+    }
+
+    fn skip_or_fail_with(expected: bool, what: &str) {
+        if expected {
+            panic!("{what} (COLMENA_TABULAR_EXPECT_PANDAS=1)");
+        }
+        eprintln!("skipped: {what}");
+    }
+
+    #[test]
+    #[should_panic(expected = "COLMENA_TABULAR_EXPECT_PANDAS=1")]
+    fn a_missing_library_fails_when_the_environment_is_expected_to_have_it() {
+        skip_or_fail_with(true, "pandas is missing");
+    }
+
+    #[test]
+    fn a_missing_library_only_skips_when_it_is_not_expected() {
+        skip_or_fail_with(false, "pandas is missing");
+    }
+
     fn python(code: &str, mode: &str, inputs: &Map<String, Value>) -> Result<Value, String> {
         pyo3::Python::initialize();
         execute_sandboxed_helper(code, mode, 60, inputs).map(|r| r.output.unwrap_or(Value::Null))
@@ -527,7 +556,7 @@ mod reads {
                     for p in range(2):\n    pd.DataFrame({'a': range(5 * p, 5 * p + 5), 'b': list('vwxyz')})\
                     .to_parquet(_dir + '/t0/part-%05d.parquet' % p)\noutput = 1\n";
         if python(make, "none", &inputs).is_err() {
-            eprintln!("skipped: python3 with pandas and pyarrow is needed to make Parquet parts");
+            skip_or_fail("python3 with pandas and pyarrow is needed to make Parquet parts");
             return None;
         }
         let manifest = Manifest::new(vec![TableInfo {
@@ -603,7 +632,7 @@ mod reads {
             return;
         };
         if python("import scipy", "none", &Map::new()).is_err() {
-            eprintln!("skipped: scipy is needed by the wrapper's imports");
+            skip_or_fail("scipy is needed by the wrapper's imports");
             return;
         }
         let code = wrap_large_code("result = int(tables['t'].read(columns=['a'])['a'].sum())");
@@ -710,7 +739,7 @@ mod reads {
             return;
         };
         if python("import scipy", "none", &Map::new()).is_err() {
-            eprintln!("skipped: scipy is needed by the wrapper's imports");
+            skip_or_fail("scipy is needed by the wrapper's imports");
             return;
         }
         let with = python(
@@ -806,5 +835,48 @@ mod reads {
             msg.as_str().unwrap().contains("could not check the size"),
             "{msg}"
         );
+    }
+
+    /// Dates outside datetime64[ns] (a 9999-12-31 sentinel, a year before 1677) do not
+    /// fail the read: that read keeps date objects.
+    #[test]
+    fn dates_outside_the_datetime64_range_are_read_not_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let Some(mut inputs) = staged(dir.path()) else {
+            return;
+        };
+        inputs.insert("_dir2".into(), Value::from(dir.path().to_str().unwrap()));
+        let make = "import datetime, pandas as pd\npd.DataFrame({'d': [datetime.date(9999, 12, 31), datetime.date(1600, 1, 1), datetime.date(2024, 1, 2)], 'a': [1, 2, 3]}).to_parquet(_dir2 + '/t0/part-00000.parquet')\noutput = 1";
+        python(make, "none", &inputs).unwrap();
+        inputs.insert(
+            "_ct_tables".into(),
+            serde_json::json!([{"name": "t", "index": 0, "rows": 3, "parts": 1, "columns": [
+                {"name": "d", "type": "date", "in_memory_bytes": 12},
+                {"name": "a", "type": "int", "in_memory_bytes": 24}]}]),
+        );
+        let out = run("f = tables['t'].read(columns=['d'])\noutput = [str(f['d'][0]), str(f['d'][1]), str(f['d'].dtype)]", &inputs);
+        assert_eq!(
+            out,
+            serde_json::json!(["9999-12-31", "1600-01-01", "object"])
+        );
+        let head = run("output = len(tables['t'].head(2, columns=['d']))", &inputs);
+        assert_eq!(head, 2);
+    }
+
+    /// `head(n)` returns n rows when they exist even if the first batch is shorter
+    /// (a part made of tiny row groups).
+    #[test]
+    fn head_returns_n_rows_across_short_row_groups() {
+        let dir = tempfile::tempdir().unwrap();
+        let Some(mut inputs) = staged(dir.path()) else {
+            return;
+        };
+        inputs.insert("_dir2".into(), Value::from(dir.path().to_str().unwrap()));
+        python("import pandas as pd\npd.DataFrame({'a': list(range(10)), 'b': list('vwxyzvwxyz')}).to_parquet(_dir2 + '/t0/part-00000.parquet', row_group_size=2)\noutput = 1", "none", &inputs).unwrap();
+        let out = run(
+            "h = tables['t'].head(5, columns=['a'])\noutput = [len(h), [int(v) for v in h['a']]]",
+            &inputs,
+        );
+        assert_eq!(out, serde_json::json!([5, [0, 1, 2, 3, 4]]));
     }
 }

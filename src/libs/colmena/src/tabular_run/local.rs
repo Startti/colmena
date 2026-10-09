@@ -67,10 +67,15 @@ impl MountedExecutor for SubprocessExecutor {
                 too_many_entries: false,
             };
             if let Some(sink) = call.sink {
-                let found = collect_out(&staged_call.get().out_dir(), CollectLimits::default())
-                    .map_err(|_| {
-                        MountedError::Refused(RunRefusal::Unavailable(Unavailable::Executor))
-                    })?;
+                let out_dir = staged_call.get().out_dir();
+                let found = tokio::task::spawn_blocking(move || {
+                    collect_out(&out_dir, CollectLimits::default())
+                })
+                .await
+                .map_err(|_| MountedError::Refused(RunRefusal::Unavailable(Unavailable::Executor)))?
+                .map_err(|_| {
+                    MountedError::Refused(RunRefusal::Unavailable(Unavailable::Executor))
+                })?;
                 done.rejected = found.rejected;
                 done.too_many_entries = found.too_many_entries;
                 for file in found.files {
