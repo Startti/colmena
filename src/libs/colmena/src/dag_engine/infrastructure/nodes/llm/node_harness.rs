@@ -19,6 +19,30 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
+/// Hides `DATABASE_URL` while a turn runs. With it set the node keeps its attachments in
+/// that Postgres (a service CI gives some steps) instead of the SQLite database the test
+/// made, so rows would outlive the test and leak into the next one, and the test could not
+/// find what the node registered. It is restored on drop. Only used under the
+/// `OverrideGuard` lock, which every harness turn already holds, so no other harness turn
+/// sees the variable change.
+struct NoDatabaseUrl(Option<std::ffi::OsString>);
+
+impl NoDatabaseUrl {
+    fn hide() -> Self {
+        let previous = std::env::var_os("DATABASE_URL");
+        std::env::remove_var("DATABASE_URL");
+        Self(previous)
+    }
+}
+
+impl Drop for NoDatabaseUrl {
+    fn drop(&mut self) {
+        if let Some(value) = self.0.take() {
+            std::env::set_var("DATABASE_URL", value);
+        }
+    }
+}
+
 /// A model that answers "ok" and records what the node sent it.
 pub(super) struct RecordingModel {
     inner: ScriptedAdapter,
@@ -173,6 +197,7 @@ pub(super) async fn run_turn_without_session(
     use crate::dag_engine::application::ports::NodeRegistryPort;
     let node = reg.get_node("llm_call").expect("llm_call is registered");
     let _guard = OverrideGuard::install(model.clone());
+    let _no_database_url = NoDatabaseUrl::hide();
     let inputs: HashMap<String, Value> = HashMap::from([
         ("__colmena_session_id".to_string(), json!("s1")),
         ("files".to_string(), Value::Array(files)),
@@ -208,6 +233,7 @@ pub(super) async fn run_turn_with_config(
     use crate::dag_engine::application::ports::NodeRegistryPort;
     let node = reg.get_node("llm_call").expect("llm_call is registered");
     let _guard = OverrideGuard::install(model.clone());
+    let _no_database_url = NoDatabaseUrl::hide();
     let inputs: HashMap<String, Value> = HashMap::from([
         ("__colmena_session_id".to_string(), json!("s1")),
         ("__colmena_agent_session_id".to_string(), json!("agent_1")),
