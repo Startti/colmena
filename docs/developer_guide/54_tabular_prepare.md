@@ -1505,3 +1505,9 @@ directory the trusted side owns (the call's `data` directory, which the jail bin
   volume) is `Unavailable(Executor)`. No refusal carries an adapter's text or a path.
 - *Nothing outside, nothing left.* Every file is created new, so a name that already exists (a link included) is refused and
   never followed. A refused or failed staging removes everything it wrote.
+
+The proofs, in `stage.rs`: a part declaring over the part limit is refused with no chunk read; a stream that declares little
+and never ends is cut off at the limit (at most one chunk past it); the call total is enforced on arriving bytes; bytes
+that differ from the declared size are refused; a storage failure mid-part hides the adapter's text; staging 64 MiB in
+1 MiB chunks never has more than two chunks alive (a guard counts the live bytes of each chunk); a link in the directory is
+never followed. They run on any Unix (no jail is involved).
