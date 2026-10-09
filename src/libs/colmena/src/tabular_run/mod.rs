@@ -7,8 +7,11 @@
 //!
 //! - [`refusal`]: the typed, model-readable reasons a run is refused. There is
 //!   no fallback that loads the original file.
+//! - [`verify`]: is the prepared copy one the registry vouches for? Ownership,
+//!   readiness, layout and manifest are checked before anything is staged.
 //!
 //! See docs/developer_guide/53_python_executors.md and
 //! docs/developer_guide/54_tabular_prepare.md.
 
 pub mod refusal;
+pub mod verify;

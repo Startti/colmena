@@ -1458,3 +1458,16 @@ adapter text and is never shown).
 | `large_tabular_unavailable` | `Unavailable` (no staging root, mounts disabled, unsupported executor, registry, executor) | nothing, or retry later |
 
 `to_tool_error()` is the object a tool returns: `{error, code, source: "execution"}` and nothing else.
+
+### Verifying the prepared copy (`verify.rs`)
+
+Before anything is staged the copy must be vouched for by the registry. The `source_key` comes from the session's own
+catalog row, never from the model (the model names an attachment, not a key). `judge_row(row, source_key)` is the pure part:
+no row is `NotPrepared`; `running` is `StillPreparing`; `deleting` is `BeingRemoved`; `failed` is `PreparationFailed` with
+the recorded reason code (final once the attempts reach `MAX_ATTEMPTS`). A `ready` row must be this source's, in
+`FORMAT_VERSION`, and carry a manifest key, else `Invalid(Record)`.
+
+`PreparedTables` is the verified plan: the manifest and the part keys, no data. A part key is the storage's derived root
+and the canonical relative path (`t<n>/part-NNNNN.parquet`, built only by `manifest::part_path`). `select(names)` chooses
+tables by name (ignoring case, each once, in manifest order); a name that is not a table is `NoSuchTable`.
+`DATA_MAX_BYTES` (1 GiB, `D_max`) is the most prepared bytes one call may stage; an estimate until the instance is measured.
