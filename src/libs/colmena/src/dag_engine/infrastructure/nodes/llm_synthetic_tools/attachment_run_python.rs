@@ -141,6 +141,14 @@ pub fn build_attachment_run_python_tool_definition() -> crate::llm::domain::tool
     )
 }
 
+/// [`build_attachment_run_python_tool_definition`] for an engine that serves
+/// large files (dark behind `COLMENA_LARGE_TABULAR`): the same tool with the
+/// large-file text and the `tables` argument.
+pub fn build_attachment_run_python_tool_definition_for_large_files(
+) -> crate::llm::domain::tools::ToolDefinition {
+    large::tool_definition()
+}
+
 /// Wrap the user's Python code with a prelude that materialises the
 /// DataFrame and a postlude that extracts the `result` global.
 ///

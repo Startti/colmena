@@ -12,6 +12,41 @@ use crate::llm::domain::ToolResult;
 use crate::tabular_run::runtime::{LargeRunError, LargeRunRequest};
 use serde::Serialize;
 
+/// What the tool description says about large files, appended to the usual
+/// description only while a runtime that can serve them is wired.
+pub(super) const LARGE_FILES_TEXT: &str = "\n\nLarge files (over 50 MiB): `df` is NOT loaded. Use `tables`:\n\
+- `tables.names`, `tables.schema(name)`: tables, columns, types, row counts.\n\
+- `t = tables[name]` is a handle, not a DataFrame.\n\
+- `t.read(columns=[...], filters=[...])`: load only the columns you need.\n\
+- `for part in t.parts(columns=[...]):` up to 500,000 rows per part; aggregate\n  each part and combine. Use this for anything that touches every row.\n\
+- `t.head()` to look at a few rows.\n\
+A whole table cannot be loaded at once. Runs may take up to 5 minutes.\n\
+No charts or images: return aggregated numbers and build charts from them.\n\
+The optional `tables` argument names the tables to make readable (default: all).";
+
+/// The tool as the model sees it when large files are served: the usual
+/// definition, the text above, and the `tables` argument.
+pub(super) fn tool_definition() -> crate::llm::domain::tools::ToolDefinition {
+    let mut def = super::build_attachment_run_python_tool_definition();
+    def.description.push_str(LARGE_FILES_TEXT);
+    if let Some(properties) = def
+        .input_schema_override
+        .as_mut()
+        .and_then(|schema| schema.get_mut("properties"))
+        .and_then(|p| p.as_object_mut())
+    {
+        properties.insert(
+            "tables".to_string(),
+            serde_json::json!({
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Large files only: the tables to make readable (default: all)."
+            }),
+        );
+    }
+    def
+}
+
 /// The tool's response for a call that ran over a large file.
 #[derive(Debug, Serialize)]
 struct LargeResponse {
@@ -264,5 +299,28 @@ mod tests {
     fn the_tool_schema_is_unchanged_by_the_tables_argument() {
         let def = serde_json::to_string(&build_attachment_run_python_tool_definition()).unwrap();
         assert!(!def.contains("tables"), "{def}");
+    }
+
+    /// With large files served the tool gains the text and the argument, and
+    /// keeps everything else it had.
+    #[test]
+    fn the_large_file_definition_adds_the_text_and_the_argument_only() {
+        let usual = build_attachment_run_python_tool_definition();
+        let large = super::tool_definition();
+        assert_eq!(large.name, usual.name);
+        assert_eq!(large.summary, usual.summary);
+        assert_eq!(
+            large.description,
+            format!("{}{}", usual.description, super::LARGE_FILES_TEXT)
+        );
+        let schema = |d: &crate::llm::domain::tools::ToolDefinition| {
+            d.input_schema_override.clone().unwrap()
+        };
+        let (mut a, b) = (schema(&usual), schema(&large));
+        assert!(b["properties"]["tables"]["items"]["type"] == "string");
+        a["properties"]["tables"] = b["properties"]["tables"].clone();
+        assert_eq!(a, b, "nothing else in the schema changed");
+        assert!(super::LARGE_FILES_TEXT.contains("`df` is NOT loaded"));
+        assert!(super::LARGE_FILES_TEXT.contains("up to 5 minutes"));
     }
 }

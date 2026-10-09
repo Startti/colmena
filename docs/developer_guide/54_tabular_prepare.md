@@ -1575,3 +1575,21 @@ The routed call answers `{stdout, result, duration_ms, tables, error?}` where th
 typed error object `{error, code, source}` and nothing else. The tool's optional `tables` argument (names to make readable;
 default all) is parsed but left out of the schema every call sees (`#[schemars(skip)]`), so the schema the model sees today
 is unchanged; a switch that is on shows it with the tool text (a later slice).
+
+### What the model is told, and the wiring (dark)
+
+`HashMapNodeRegistry::set_large_tabular_runtime(runtime)` gives the `llm_call` node the runtime (a `OnceLock`, like the host
+token port). The node hands it to the tool executor only while the large tabular switch is on; with the switch off, or
+without a runtime, nothing is wired, no call is routed and the tool is exactly what it always was.
+
+While a runtime is wired and the switch is on, `attachment_run_python` is offered with two additions
+(`build_attachment_run_python_tool_definition_for_large_files`): the large-file text appended to its description (`df` is not
+loaded; `tables.names`, `tables.schema(name)`, `t.read(columns=[...], filters=[...])`, `t.parts(columns=[...])`, `t.head()`;
+a whole table cannot be loaded; runs may take up to 5 minutes; no charts) and the optional `tables` argument. The text is a
+Rust constant beside the tool (as the refusal sentences are), not an entry of `text/tools/`: the registry's orphan check
+wants one builder per entry and this text is only ever an appendix of one tool.
+
+The node-level proofs run the real `llm_call` node against a scripted model (`nodes/llm/large_run_turn.rs`): a call over a
+host-owned file reaches the runtime and the model sees the tables and the result, with no key and no byte of the original
+read; with the switch off the file keeps its usual refusal and the tool text is the usual one; with no runtime wired
+the same; a runtime whose own switch is off answers with the typed refusal.

@@ -27,6 +27,9 @@ pub struct HashMapNodeRegistry {
     llm_host_token_port: Arc<std::sync::OnceLock<Arc<dyn HostTokenPort>>>,
     /// `llm_call`'s copy of the large tabular switch (shared with the node).
     llm_large_tabular: Arc<std::sync::atomic::AtomicBool>,
+    /// `llm_call`'s slot for the runtime over prepared large files.
+    llm_large_runtime:
+        Arc<std::sync::OnceLock<Arc<crate::tabular_run::runtime::LargeTabularRuntime>>>,
 }
 
 use crate::llm::infrastructure::ConversationRepositoryFactory;
@@ -176,6 +179,7 @@ impl HashMapNodeRegistry {
             }
             let llm_host_token_port = llm_node.host_token_port.clone();
             let llm_large_tabular = llm_node.large_tabular.clone();
+            let llm_large_runtime = llm_node.large_runtime.clone();
             nodes.insert("llm_call".to_string(), Arc::new(llm_node));
 
             // --- Registrar Nodos Python ---
@@ -393,6 +397,7 @@ impl HashMapNodeRegistry {
                 http_node,
                 llm_host_token_port,
                 llm_large_tabular,
+                llm_large_runtime,
             }
         })
     }
@@ -431,6 +436,16 @@ impl HashMapNodeRegistry {
     pub fn set_large_tabular(&self, enabled: bool) {
         self.llm_large_tabular
             .store(enabled, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Injects the runtime that runs the model's code over a prepared large
+    /// file. It is used only while the large tabular switch is on; once set it
+    /// is not replaced.
+    pub fn set_large_tabular_runtime(
+        &self,
+        runtime: Arc<crate::tabular_run::runtime::LargeTabularRuntime>,
+    ) {
+        let _ = self.llm_large_runtime.set(runtime);
     }
 
     /// Whether the large tabular switch is on for the nodes of this registry.
