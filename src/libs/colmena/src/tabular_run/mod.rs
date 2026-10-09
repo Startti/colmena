@@ -24,6 +24,8 @@
 //! - [`collect`]: read back what the code wrote to `/out`, treating all of it as
 //!   hostile (Unix).
 //!
+//! - [`outputs`]: stream the kept outputs to storage, one chunk at a time.
+//!
 //! See docs/developer_guide/53_python_executors.md and
 //! docs/developer_guide/54_tabular_prepare.md.
 
@@ -32,6 +34,8 @@ pub mod collect;
 #[cfg(target_os = "linux")]
 pub mod local;
 pub mod mounted;
+#[cfg(unix)]
+pub mod outputs;
 pub mod prelude;
 pub mod refusal;
 pub mod remote_seam;

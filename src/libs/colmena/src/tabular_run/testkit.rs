@@ -328,6 +328,9 @@ impl Recorder {
                 parts: 0,
                 bytes: 0,
             },
+            emitted: vec![],
+            rejected: vec![],
+            too_many_entries: false,
         }))
     }
     pub fn calls(&self) -> usize {

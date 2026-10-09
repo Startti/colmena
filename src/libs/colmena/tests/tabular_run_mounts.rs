@@ -20,7 +20,8 @@ use colmena::tabular_prepare::registry::{
     ClaimRequest, PreparationRegistry, ReadyInfo, FORMAT_VERSION,
 };
 use colmena::tabular_prepare::sqlite_registry::SqlitePreparationRegistry;
-use colmena::tabular_run::mounted::{MountedCall, MountedError, MountedExecutor};
+use colmena::tabular_run::collect::{OutFile, RejectReason};
+use colmena::tabular_run::mounted::{MountedCall, MountedError, MountedExecutor, OutputSink};
 use colmena::tabular_run::refusal::{Budget, RunRefusal, Unavailable};
 use colmena::tabular_run::stage::StageLimits;
 use colmena::tabular_run::verify::{verify_prepared, PreparedTables};
@@ -200,6 +201,7 @@ fn call<'a>(
         tables: &[0],
         limits,
         out_mb: 4,
+        sink: None,
     }
 }
 
@@ -367,4 +369,69 @@ async fn the_codes_own_failure_is_reported_as_any_call_reports_it() {
         other => panic!("{other:?}"),
     }
     assert_eq!(ex.staged_in_flight(), (0, 0));
+}
+
+/// Collects the names of the outputs it is given and reads each one.
+#[derive(Default)]
+struct Names(Mutex<Vec<(String, Vec<u8>)>>);
+
+#[async_trait]
+impl OutputSink for Names {
+    async fn accept(&self, file: OutFile) -> Result<(), RunRefusal> {
+        use std::io::Read;
+        let name = file.name.clone();
+        let mut bytes = vec![];
+        file.into_file().read_to_end(&mut bytes).unwrap();
+        self.0.lock().unwrap().push((name, bytes));
+        Ok(())
+    }
+}
+
+/// What the code leaves in `/out` is hostile: a link to a host file, a pipe, two
+/// names for one file and a name outside the charset reach the sink as nothing;
+/// the one good file arrives whole; the call's volume is still given back.
+#[tokio::test]
+async fn hostile_outputs_never_reach_the_sink_and_the_good_one_does() {
+    let Some(root) = staging_root() else { return };
+    let ex = executor(Some(&root));
+    let (storage, plan, _d) = prepared(&[vec![b'a'; 10]]).await;
+    let code = r#"
+import os
+open('/out/good.csv', 'w').write('a\n1\n')
+open('/out/two.csv', 'w').write('x')
+def attempt(f):
+    try:
+        f()
+    except OSError:
+        pass
+attempt(lambda: os.link('/out/two.csv', '/out/three.csv'))
+attempt(lambda: os.symlink('/etc/hostname', '/out/link.csv'))
+attempt(lambda: os.mkfifo('/out/pipe.csv'))
+open('/out/bad name.csv', 'w').write('x')
+output = 1
+"#;
+    let sink = Names::default();
+    let mut c = call(&storage, &plan, Default::default());
+    c.sink = Some(&sink);
+    let out = ex.run_with_mounts(req(code, "none"), c).await.unwrap();
+    let got = sink.0.lock().unwrap().clone();
+    assert_eq!(got, [("good.csv".to_string(), b"a\n1\n".to_vec())]);
+    assert_eq!(out.emitted, ["good.csv"]);
+    let reasons: Vec<_> = out
+        .rejected
+        .iter()
+        .map(|r| (r.name.clone(), r.reason))
+        .collect();
+    assert!(
+        reasons.contains(&(None, RejectReason::BadName)),
+        "{reasons:?}"
+    );
+    assert!(
+        reasons.contains(&(Some("two.csv".into()), RejectReason::HardLinked))
+            || reasons.iter().all(|r| r.1 != RejectReason::HardLinked),
+        "{reasons:?}"
+    );
+    assert!(!reasons.iter().any(|r| r.0.as_deref() == Some("good.csv")));
+    assert_eq!(ex.staged_in_flight(), (0, 0));
+    assert_eq!(leftovers(&root), 0);
 }

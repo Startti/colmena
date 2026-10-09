@@ -1637,3 +1637,15 @@ sizes at and past each limit, a name swapped after the check) and on the real ja
 A trigger error from `ensure_prepared` is terminal: the host's trigger answers it for a file it will never prepare (the ADP
 side defines this), so it is `NeverPrepared` (`large_tabular_failed`, "cannot be prepared ... will not be retried"), not a
 retry-later and not an executor problem; the adapter's text is dropped.
+
+### Handing the outputs on (`OutputSink`, `outputs.rs`)
+
+`MountedCall.sink` is where the kept outputs go. The subprocess executor reads `/out` with `collect_out` after `run_staged`
+returns and BEFORE the staged call is dropped (the volume is unmounted only then), and calls `sink.accept(OutFile)` for each
+file the reader kept; `MountedResult` lists `emitted` names, `rejected` entries (a name only when it passed the charset) and
+`too_many_entries`. With no sink whatever the code wrote is discarded. `StoreSink` streams each file to the host's storage with
+`store_stream` (`Generated` placement) one 1 MiB chunk at a time, so no output is held whole; the size the reader checked must
+arrive, and a file truncated after the check is refused and stored nowhere. Not built: registering the stored outputs as
+attachments in the registry, and the Python `emit_table` helper that writes them; the runtime does not yet pass a sink.
+The jail proof (`hostile_outputs_never_reach_the_sink_and_the_good_one_does`) lets real code leave a good file, a name outside
+the charset, a hard link, and a link and a pipe where the sandbox allows making them.

@@ -9,6 +9,7 @@
 //! streamed request (the `/v2/run` protocol of the design, NOT built: see
 //! `remote_seam`). Nothing above this trait knows which.
 
+use super::collect::{OutFile, Rejection};
 use super::refusal::RunRefusal;
 use super::stage::{StageLimits, Staged};
 use super::verify::PreparedTables;
@@ -22,6 +23,14 @@ use async_trait::async_trait;
 /// the instance measurement, spike item 5): the executor's own bound is 1,024.
 pub const OUT_MIB: u64 = 256;
 
+/// Where the checked outputs of a call go. The executor hands over each file
+/// the reader kept, while the call's volume is still mounted; the sink streams
+/// it out (it holds an open descriptor, never a path).
+#[async_trait]
+pub trait OutputSink: Send + Sync {
+    async fn accept(&self, file: OutFile) -> Result<(), RunRefusal>;
+}
+
 /// What a call over prepared tables carries besides its code.
 pub struct MountedCall<'a> {
     pub storage: &'a dyn OutputStorageRepository,
@@ -31,6 +40,8 @@ pub struct MountedCall<'a> {
     pub limits: StageLimits,
     /// Size of the output volume, in MiB.
     pub out_mb: u64,
+    /// Where the outputs go. `None`: whatever the code wrote is discarded.
+    pub sink: Option<&'a dyn OutputSink>,
 }
 
 /// A call that ran.
@@ -38,6 +49,12 @@ pub struct MountedCall<'a> {
 pub struct MountedResult {
     pub result: PythonRunResult,
     pub staged: Staged,
+    /// Names of the outputs handed to the sink.
+    pub emitted: Vec<String>,
+    /// What was not kept, and why (names only when they passed the charset).
+    pub rejected: Vec<Rejection>,
+    /// The volume held more entries than allowed, so nothing was kept.
+    pub too_many_entries: bool,
 }
 
 /// Why a call did not produce a result.
