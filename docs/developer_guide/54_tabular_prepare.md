@@ -1750,3 +1750,12 @@ lists what reached storage (`name`, `mime_type`, `size_bytes`, the engine's `sto
 dtypes the code reported for it when the report matches a kept file by name (untrusted, cleaned; a report for a file that was
 not kept is ignored), and `not_kept` says in words what was written and dropped (a name only when it passed the charset). The
 result is the code's own (`unwrap_emitted` removes the report).
+
+### Returned files become attachments
+
+The routed answer gains `emitted` (`name`, `mime_type`, `size_bytes`, `document_id`, `rows`, `dtypes`) and `not_kept` when there are any.
+Each returned file is registered with `DagToolExecutor::register_stored_attachment`, the path every generated file takes
+(`register_attachment_bytes` now calls it too): provider `Generated`, the engine's own key as the id, origin
+`generated_by:attachment_run_python`, never a host reference, so later tools can use it. Registration is fail-soft like the small
+path's: a registry that refuses is logged and the file stays in storage. The `document_id` is the engine's own handle for a generated
+object, as it is for every generated attachment; no host key or URL is in the answer.

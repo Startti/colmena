@@ -57,8 +57,28 @@ struct LargeResponse {
     /// What the code could read: `[{name, rows, columns: [{name, type}]}]`.
     #[serde(skip_serializing_if = "serde_json::Value::is_null")]
     tables: serde_json::Value,
+    /// The files the code returned, already attachments of the session.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    emitted: Vec<EmittedFile>,
+    /// What was written and not kept, and why.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    not_kept: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
+}
+
+/// A returned file, as the model sees it: its id is the engine's own handle for
+/// a generated attachment, never a host key.
+#[derive(Debug, Serialize)]
+struct EmittedFile {
+    name: String,
+    mime_type: String,
+    size_bytes: u64,
+    document_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    rows: Option<u64>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    dtypes: Vec<(String, String)>,
 }
 
 fn answer(call_id: &str, response: &LargeResponse) -> ToolResult {
@@ -67,6 +87,7 @@ fn answer(call_id: &str, response: &LargeResponse) -> ToolResult {
 }
 
 pub(super) async fn dispatch(
+    executor: &crate::dag_engine::infrastructure::dag_tool_executor::DagToolExecutor,
     call_id: &str,
     args: &AttachmentRunPythonArgs,
     target: LargeTarget,
@@ -87,16 +108,42 @@ pub(super) async fn dispatch(
         .await;
     let duration_ms = started.elapsed().as_millis() as u64;
     match outcome {
-        Ok(out) => answer(
-            call_id,
-            &LargeResponse {
-                stdout: truncate(&out.stdout, OUTPUT_BYTE_CAP),
-                result: out.result,
-                duration_ms,
-                tables: out.tables,
-                error: None,
-            },
-        ),
+        Ok(out) => {
+            // Each returned file becomes an attachment of the session, through
+            // the path every generated file takes (engine-owned, not a host reference).
+            let mut emitted = vec![];
+            for f in out.emitted {
+                executor
+                    .register_stored_attachment(
+                        &f.storage_key,
+                        &f.mime_type,
+                        &f.name,
+                        f.size_bytes,
+                        super::ATTACHMENT_RUN_PYTHON_TOOL_NAME,
+                    )
+                    .await;
+                emitted.push(EmittedFile {
+                    name: f.name,
+                    mime_type: f.mime_type,
+                    size_bytes: f.size_bytes,
+                    document_id: f.storage_key,
+                    rows: f.rows,
+                    dtypes: f.dtypes,
+                });
+            }
+            answer(
+                call_id,
+                &LargeResponse {
+                    stdout: truncate(&out.stdout, OUTPUT_BYTE_CAP),
+                    result: out.result,
+                    duration_ms,
+                    tables: out.tables,
+                    emitted,
+                    not_kept: out.not_kept,
+                    error: None,
+                },
+            )
+        }
         Err(LargeRunError::Refused(refusal)) => {
             ToolResult::success(call_id.to_string(), refusal.to_tool_error().to_string())
         }
@@ -107,6 +154,8 @@ pub(super) async fn dispatch(
                 result: serde_json::Value::Null,
                 duration_ms,
                 tables: serde_json::Value::Null,
+                emitted: vec![],
+                not_kept: vec![],
                 error: Some(truncate(&text, OUTPUT_BYTE_CAP)),
             },
         ),

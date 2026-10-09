@@ -240,7 +240,7 @@ pub async fn dispatch_attachment_run_python_via_executor(
     // A large file (dark behind COLMENA_LARGE_TABULAR) never reaches the code
     // below: it runs over its prepared tables, or is refused with a typed reason.
     if let Some(target) = executor.large_target(&args.attachment_id) {
-        return Ok(large::dispatch(call_id, &args, target).await);
+        return Ok(large::dispatch(executor, call_id, &args, target).await);
     }
 
     // 2. Fetch attachment bytes via the shared plumbing (Bulk T0).
