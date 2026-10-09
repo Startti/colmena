@@ -1,0 +1,6 @@
+# pyarrow for the isolated Python executor job (Debian bookworm, x86_64, CPython 3.11).
+# --no-deps: numpy comes from Debian. Hash: the sha256 PyPI lists for
+# pyarrow-21.0.0-cp311-cp311-manylinux_2_28_x86_64.whl
+# (https://pypi.org/pypi/pyarrow/21.0.0/json), re-checked by downloading that wheel.
+pyarrow==21.0.0 \
+    --hash=sha256:40ebfcb54a4f11bcde86bc586cbd0272bac0d516cfa539c799c2453768477569
