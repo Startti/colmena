@@ -4,7 +4,8 @@ use crate::llm::domain::{
 };
 use crate::llm::infrastructure::gemini_schema;
 use crate::llm::infrastructure::transient::{
-    is_transient_status, send_with_transient_retry, RetryPolicy, CREDENTIAL_CHECK_TIMEOUT,
+    backoff_with_jitter, is_transient_status, send_with_transient_retry, RetryPolicy,
+    CREDENTIAL_CHECK_TIMEOUT,
 };
 use async_trait::async_trait;
 use futures::{Stream, StreamExt};
@@ -358,38 +359,45 @@ impl LlmRepository for GeminiAdapter {
             request.config().model()
         );
 
-        let http_request = self
-            .client
-            .post(&url)
-            .header("Content-Type", "application/json")
-            .header("x-goog-api-key", request.config().api_key())
-            .json(&body);
-        let response = send_with_transient_retry("gemini", &self.retry, http_request).await?;
-
-        if !response.status().is_success() {
-            let error_text = response
+        // An empty `MALFORMED_FUNCTION_CALL` is sent again (see
+        // `is_empty_malformed_call`); what the dropped answers billed is
+        // added to the usage of the one that is returned.
+        let mut malformed_retries = 0u32;
+        let mut discarded_usage: Option<LlmUsage> = None;
+        let gemini_response = loop {
+            let response = open_gemini(
+                &self.client,
+                &self.retry,
+                &url,
+                request.config().api_key(),
+                &body,
+            )
+            .await?;
+            let response_text = response
                 .text()
                 .await
-                .unwrap_or_else(|_| "Unknown error".to_string());
-            return Err(LlmError::request_failed(format!(
-                "Gemini API error: {}",
-                error_text
-            )));
-        }
+                .map_err(|e| LlmError::parsing_error(e.to_string()))?;
 
-        let response_text = response
-            .text()
-            .await
-            .map_err(|e| LlmError::parsing_error(e.to_string()))?;
-
-        let gemini_response: GeminiResponse =
-            serde_json::from_str(&response_text).map_err(|e| {
-                LlmError::parsing_error(format!(
-                    "JSON parse error: {} - Response: {}",
-                    e, response_text
-                ))
-            })?;
-        gemini_response.ensure_answer()?;
+            let gemini_response: GeminiResponse =
+                serde_json::from_str(&response_text).map_err(|e| {
+                    LlmError::parsing_error(format!(
+                        "JSON parse error: {} - Response: {}",
+                        e, response_text
+                    ))
+                })?;
+            gemini_response.ensure_answer()?;
+            if !gemini_response.is_empty_malformed_call() || malformed_retries >= self.retry.retries
+            {
+                break gemini_response;
+            }
+            if let Some(u) = &gemini_response.usage_metadata {
+                discarded_usage
+                    .get_or_insert_with(LlmUsage::default)
+                    .add(&u.to_usage());
+            }
+            malformed_retries += 1;
+            wait_before_malformed_retry(&self.retry, malformed_retries).await;
+        };
 
         // Extract function calls if present
         let tool_calls = gemini_response.candidates.first().and_then(|candidate| {
@@ -484,19 +492,14 @@ impl LlmRepository for GeminiAdapter {
             });
 
         let block_reason = gemini_response.block_reason().map(str::to_string);
-        let usage = gemini_response.usage_metadata.map(|u| {
-            let mut usage = LlmUsage::new(
-                u.prompt_token_count.unwrap_or(0),
-                u.candidates_token_count.unwrap_or(0),
-            );
-            if let Some(t) = u.thoughts_token_count.filter(|&n| n > 0) {
-                usage = usage.with_thinking_tokens(t);
+        let usage = match (gemini_response.usage_metadata.as_ref(), discarded_usage) {
+            (Some(u), Some(mut discarded)) => {
+                discarded.add(&u.to_usage());
+                Some(discarded)
             }
-            if let Some(c) = u.cached_content_token_count.filter(|&n| n > 0) {
-                usage = usage.with_cached_input_tokens_included(c);
-            }
-            usage
-        });
+            (Some(u), None) => Some(u.to_usage()),
+            (None, discarded) => discarded,
+        };
 
         let mut response = LlmResponse::new(
             request.id().clone(),
@@ -540,218 +543,238 @@ impl LlmRepository for GeminiAdapter {
             request.config().model()
         );
 
-        let http_request = self
-            .client
-            .post(&url)
-            .header("Content-Type", "application/json")
-            .header("x-goog-api-key", request.config().api_key())
-            .json(&body);
-        let response = send_with_transient_retry("gemini", &self.retry, http_request).await?;
-
-        if !response.status().is_success() {
-            let error_text = response
-                .text()
-                .await
-                .unwrap_or_else(|_| "Unknown error".to_string());
-            return Err(LlmError::request_failed(format!(
-                "Gemini API error: {}",
-                error_text
-            )));
-        }
+        let api_key = request.config().api_key().to_string();
+        let response = open_gemini(&self.client, &self.retry, &url, &api_key, &body).await?;
 
         let request_id = request.id().clone();
         let provider = request.config().provider().clone();
-
-        let byte_stream = response.bytes_stream();
-        let mut json_parser = JsonStreamParser::new(byte_stream);
+        // To open the stream again after an empty `MALFORMED_FUNCTION_CALL`.
+        let client = self.client.clone();
+        let policy = self.retry;
 
         let json_stream = async_stream::try_stream! {
-            let mut latest_usage = None;
-            let mut tool_call_index: usize = 0;
-            // Track whether we are currently inside a thinking block across chunks.
-            let mut in_thinking = false;
-            // What the answer carried, so an empty one is named like `call` does.
-            let mut answered = false;
-            let mut last_finish_reason: Option<String> = None;
-            let mut block_reason: Option<String> = None;
-            while let Some(json_bytes_result) = json_parser.next().await {
-                let json_bytes = json_bytes_result?;
-                let chunk_response = serde_json::from_slice::<GeminiResponse>(&json_bytes)
-                    .map_err(|e| LlmError::parsing_error(e.to_string()))?;
-                chunk_response.ensure_no_error()?;
-                if chunk_response.is_metadata_only() {
-                    continue;
-                }
-                if let Some(reason) = chunk_response.block_reason() {
-                    block_reason = Some(reason.to_string());
-                }
-
-                if let Some(candidate) = chunk_response.candidates.first() {
-                    let is_final = candidate.finish_reason.is_some();
-                    let finish_reason = candidate.finish_reason.clone();
-                    if finish_reason.is_some() {
-                        last_finish_reason = finish_reason.clone();
+            let mut response = Some(response);
+            let mut malformed_retries = 0u32;
+            // What the dropped answers billed: each `Usage` of the next one
+            // carries it, so the last `Usage` is still the call's total.
+            let mut discarded_usage: Option<LlmUsage> = None;
+            loop {
+                let opened = match response.take() {
+                    Some(opened) => opened,
+                    None => open_gemini(&client, &policy, &url, &api_key, &body).await?,
+                };
+                let mut json_parser = JsonStreamParser::new(opened.bytes_stream());
+                let mut latest_usage = None;
+                let mut tool_call_index: usize = 0;
+                // Track whether we are currently inside a thinking block across chunks.
+                let mut in_thinking = false;
+                // What the answer carried, so an empty one is named like `call` does.
+                let mut answered = false;
+                // A thought went out: the client saw something, so the answer is
+                // not sent again even if it ends empty.
+                let mut thought_shown = false;
+                let mut last_finish_reason: Option<String> = None;
+                let mut block_reason: Option<String> = None;
+                // The empty final chunk of a `MALFORMED_FUNCTION_CALL`, held until
+                // the stream ends: dropped if the request is sent again.
+                let mut held_final: Option<LlmStreamChunk> = None;
+                while let Some(json_bytes_result) = json_parser.next().await {
+                    let json_bytes = json_bytes_result?;
+                    let chunk_response = serde_json::from_slice::<GeminiResponse>(&json_bytes)
+                        .map_err(|e| LlmError::parsing_error(e.to_string()))?;
+                    chunk_response.ensure_no_error()?;
+                    if chunk_response.is_metadata_only() {
+                        continue;
+                    }
+                    if let Some(reason) = chunk_response.block_reason() {
+                        block_reason = Some(reason.to_string());
                     }
 
-                    let candidate_content = candidate.content.as_ref();
-                    if let Some(parts) = candidate_content.and_then(|c| c.parts.as_ref()) {
-                        for part in parts {
-                            let is_thought = part.thought == Some(true);
+                    if let Some(candidate) = chunk_response.candidates.first() {
+                        let is_final = candidate.finish_reason.is_some();
+                        let finish_reason = candidate.finish_reason.clone();
+                        if finish_reason.is_some() {
+                            last_finish_reason = finish_reason.clone();
+                        }
 
-                            if let Some(text) = &part.text {
-                                if !text.is_empty() {
-                                    if is_thought {
-                                        if !in_thinking {
-                                            in_thinking = true;
+                        let candidate_content = candidate.content.as_ref();
+                        if let Some(parts) = candidate_content.and_then(|c| c.parts.as_ref()) {
+                            for part in parts {
+                                let is_thought = part.thought == Some(true);
+
+                                if let Some(text) = &part.text {
+                                    if !text.is_empty() {
+                                        if is_thought {
+                                            thought_shown = true;
+                                            if !in_thinking {
+                                                in_thinking = true;
+                                                yield LlmStreamChunk::new(
+                                                    request_id.clone(),
+                                                    LlmStreamPart::ThinkingStart,
+                                                    provider.clone(),
+                                                    false,
+                                                );
+                                            }
                                             yield LlmStreamChunk::new(
                                                 request_id.clone(),
-                                                LlmStreamPart::ThinkingStart,
+                                                LlmStreamPart::ThinkingContent(text.clone()),
                                                 provider.clone(),
                                                 false,
                                             );
-                                        }
-                                        yield LlmStreamChunk::new(
-                                            request_id.clone(),
-                                            LlmStreamPart::ThinkingContent(text.clone()),
-                                            provider.clone(),
-                                            false,
-                                        );
-                                    } else {
-                                        if in_thinking {
-                                            in_thinking = false;
-                                            yield LlmStreamChunk::new(
+                                        } else {
+                                            if in_thinking {
+                                                in_thinking = false;
+                                                yield LlmStreamChunk::new(
+                                                    request_id.clone(),
+                                                    LlmStreamPart::ThinkingEnd,
+                                                    provider.clone(),
+                                                    false,
+                                                );
+                                            }
+                                            answered = true;
+                                            let mut chunk = LlmStreamChunk::new(
                                                 request_id.clone(),
-                                                LlmStreamPart::ThinkingEnd,
+                                                LlmStreamPart::Content(text.clone()),
                                                 provider.clone(),
-                                                false,
+                                                is_final,
                                             );
+                                            if let Some(reason) = &finish_reason {
+                                                chunk = chunk.with_finish_reason(reason.clone());
+                                            }
+                                            yield chunk;
                                         }
-                                        answered = true;
-                                        let mut chunk = LlmStreamChunk::new(
-                                            request_id.clone(),
-                                            LlmStreamPart::Content(text.clone()),
-                                            provider.clone(),
-                                            is_final,
-                                        );
-                                        if let Some(reason) = &finish_reason {
-                                            chunk = chunk.with_finish_reason(reason.clone());
-                                        }
-                                        yield chunk;
                                     }
                                 }
-                            }
 
-                            if let Some(fc) = &part.function_call {
-                                answered = true;
-                                let call_id = format!("call_{}", uuid::Uuid::new_v4());
-                                let args_str =
-                                    super::tool_args::serialize_tool_args(&fc.args, &fc.name);
+                                if let Some(fc) = &part.function_call {
+                                    answered = true;
+                                    let call_id = format!("call_{}", uuid::Uuid::new_v4());
+                                    let args_str =
+                                        super::tool_args::serialize_tool_args(&fc.args, &fc.name);
 
-                                let mut chunk = LlmStreamChunk::new(
-                                    request_id.clone(),
-                                    LlmStreamPart::ToolCallChunk(ToolCallChunk {
-                                        index: tool_call_index,
-                                        id: call_id,
-                                        name: fc.name.clone(),
-                                        args_chunk: args_str,
-                                        provider_signature: part.thought_signature.clone(),
-                                    }),
-                                    provider.clone(),
-                                    is_final,
-                                );
-                                tool_call_index += 1;
-                                if let Some(reason) = &finish_reason {
-                                    chunk = chunk.with_finish_reason(reason.clone());
+                                    let mut chunk = LlmStreamChunk::new(
+                                        request_id.clone(),
+                                        LlmStreamPart::ToolCallChunk(ToolCallChunk {
+                                            index: tool_call_index,
+                                            id: call_id,
+                                            name: fc.name.clone(),
+                                            args_chunk: args_str,
+                                            provider_signature: part.thought_signature.clone(),
+                                        }),
+                                        provider.clone(),
+                                        is_final,
+                                    );
+                                    tool_call_index += 1;
+                                    if let Some(reason) = &finish_reason {
+                                        chunk = chunk.with_finish_reason(reason.clone());
+                                    }
+                                    yield chunk;
                                 }
+                            }
+                        } else if let Some(text) = candidate_content.and_then(|c| c.text.as_ref()) {
+                            answered |= !text.is_empty();
+                            let mut chunk = LlmStreamChunk::new(
+                                request_id.clone(),
+                                LlmStreamPart::Content(text.clone()),
+                                provider.clone(),
+                                is_final,
+                            );
+                            if let Some(reason) = &finish_reason {
+                                chunk = chunk.with_finish_reason(reason.clone());
+                            }
+                            yield chunk;
+                        } else if is_final {
+                            // Close any open thinking block before the final content marker.
+                            if in_thinking {
+                                in_thinking = false;
+                                yield LlmStreamChunk::new(
+                                    request_id.clone(),
+                                    LlmStreamPart::ThinkingEnd,
+                                    provider.clone(),
+                                    false,
+                                );
+                            }
+                            let mut chunk = LlmStreamChunk::new(
+                                request_id.clone(),
+                                LlmStreamPart::Content(String::new()),
+                                provider.clone(),
+                                true,
+                            );
+                            if let Some(reason) = &finish_reason {
+                                chunk = chunk.with_finish_reason(reason.clone());
+                            }
+                            if finish_reason.as_deref() == Some(MALFORMED_FUNCTION_CALL) {
+                                held_final = Some(chunk);
+                            } else {
                                 yield chunk;
                             }
                         }
-                    } else if let Some(text) = candidate_content.and_then(|c| c.text.as_ref()) {
-                        answered |= !text.is_empty();
-                        let mut chunk = LlmStreamChunk::new(
-                            request_id.clone(),
-                            LlmStreamPart::Content(text.clone()),
-                            provider.clone(),
-                            is_final,
-                        );
-                        if let Some(reason) = &finish_reason {
-                            chunk = chunk.with_finish_reason(reason.clone());
-                        }
-                        yield chunk;
-                    } else if is_final {
-                        // Close any open thinking block before the final content marker.
-                        if in_thinking {
-                            in_thinking = false;
+                    }
+
+                    if let Some(u) = &chunk_response.usage_metadata {
+                        let usage = u.to_usage();
+                        // Cumulative: each one goes out as it changes, so a call
+                        // cut mid-stream still reports what the provider billed.
+                        if latest_usage.as_ref() != Some(&usage) {
+                            latest_usage = Some(usage.clone());
+                            let mut billed = discarded_usage.clone().unwrap_or_default();
+                            billed.add(&usage);
                             yield LlmStreamChunk::new(
                                 request_id.clone(),
-                                LlmStreamPart::ThinkingEnd,
+                                LlmStreamPart::Usage(billed),
                                 provider.clone(),
                                 false,
                             );
                         }
-                        let mut chunk = LlmStreamChunk::new(
-                            request_id.clone(),
-                            LlmStreamPart::Content(String::new()),
-                            provider.clone(),
-                            true,
-                        );
-                        if let Some(reason) = &finish_reason {
-                            chunk = chunk.with_finish_reason(reason.clone());
-                        }
-                        yield chunk;
                     }
                 }
 
-                if let Some(u) = &chunk_response.usage_metadata {
-                    let mut usage = LlmUsage::new(
-                        u.prompt_token_count.unwrap_or(0),
-                        u.candidates_token_count.unwrap_or(0),
-                    );
-                    if let Some(t) = u.thoughts_token_count.filter(|&n| n > 0) {
-                        usage = usage.with_thinking_tokens(t);
+                // An empty `MALFORMED_FUNCTION_CALL` the client saw nothing of
+                // (no text, no call, no thought, no completion tokens): send the
+                // same request again, like `call` does.
+                let empty_malformed = !answered
+                    && !thought_shown
+                    && last_finish_reason.as_deref() == Some(MALFORMED_FUNCTION_CALL)
+                    && latest_usage.as_ref().map_or(0, |u| u.completion_tokens) == 0;
+                if empty_malformed && malformed_retries < policy.retries {
+                    if let Some(usage) = &latest_usage {
+                        discarded_usage.get_or_insert_with(LlmUsage::default).add(usage);
                     }
-                    if let Some(c) = u.cached_content_token_count.filter(|&n| n > 0) {
-                        usage = usage.with_cached_input_tokens_included(c);
-                    }
-                    // Cumulative: each one goes out as it changes, so a call
-                    // cut mid-stream still reports what the provider billed.
-                    if latest_usage.as_ref() != Some(&usage) {
-                        latest_usage = Some(usage.clone());
+                    malformed_retries += 1;
+                    wait_before_malformed_retry(&policy, malformed_retries).await;
+                    continue;
+                }
+                if let Some(chunk) = held_final.take() {
+                    yield chunk;
+                }
+
+                // No text and no call: say why, with the same text as `call`, so
+                // the host does not get a silent empty answer.
+                if !answered {
+                    if in_thinking {
                         yield LlmStreamChunk::new(
                             request_id.clone(),
-                            LlmStreamPart::Usage(usage),
+                            LlmStreamPart::ThinkingEnd,
                             provider.clone(),
                             false,
                         );
                     }
-                }
-            }
-
-            // No text and no call: say why, with the same text as `call`, so
-            // the host does not get a silent empty answer.
-            if !answered {
-                if in_thinking {
-                    yield LlmStreamChunk::new(
+                    let text = empty_response_text(last_finish_reason.as_deref(), block_reason.as_deref());
+                    let mut chunk = LlmStreamChunk::new(
                         request_id.clone(),
-                        LlmStreamPart::ThinkingEnd,
+                        LlmStreamPart::Content(text),
                         provider.clone(),
-                        false,
+                        true,
                     );
+                    if let Some(reason) = last_finish_reason {
+                        chunk = chunk.with_finish_reason(reason);
+                    }
+                    if let Some(reason) = block_reason {
+                        chunk = chunk.with_block_reason(reason);
+                    }
+                    yield chunk;
                 }
-                let text = empty_response_text(last_finish_reason.as_deref(), block_reason.as_deref());
-                let mut chunk = LlmStreamChunk::new(
-                    request_id.clone(),
-                    LlmStreamPart::Content(text),
-                    provider.clone(),
-                    true,
-                );
-                if let Some(reason) = last_finish_reason {
-                    chunk = chunk.with_finish_reason(reason);
-                }
-                if let Some(reason) = block_reason {
-                    chunk = chunk.with_block_reason(reason);
-                }
-                yield chunk;
+                break;
             }
         };
 
@@ -904,6 +927,81 @@ impl GeminiResponse {
     fn block_reason(&self) -> Option<&str> {
         self.prompt_feedback.as_ref()?.block_reason.as_deref()
     }
+
+    /// `MALFORMED_FUNCTION_CALL` with nothing in it: no text, no function call
+    /// and no completion tokens. Gemini drops a call it could not write (often
+    /// one with a long argument, a whole HTML page or a contract) and the same
+    /// request usually goes through when sent again.
+    fn is_empty_malformed_call(&self) -> bool {
+        let Some(candidate) = self.candidates.first() else {
+            return false;
+        };
+        if candidate.finish_reason.as_deref() != Some(MALFORMED_FUNCTION_CALL) {
+            return false;
+        }
+        let completion = self
+            .usage_metadata
+            .as_ref()
+            .and_then(|u| u.candidates_token_count)
+            .unwrap_or(0);
+        let content = candidate.content.as_ref();
+        let text = content
+            .and_then(|c| c.text.as_deref())
+            .is_some_and(|t| !t.is_empty());
+        let answered = content.and_then(|c| c.parts.as_ref()).is_some_and(|parts| {
+            parts.iter().any(|p| {
+                p.function_call.is_some()
+                    || (p.thought != Some(true) && p.text.as_deref().is_some_and(|t| !t.is_empty()))
+            })
+        });
+        completion == 0 && !text && !answered
+    }
+}
+
+const MALFORMED_FUNCTION_CALL: &str = "MALFORMED_FUNCTION_CALL";
+
+/// Sends one `generateContent`/`streamGenerateContent` request, through
+/// `send_with_transient_retry`; a non-2xx answer is an error with its body.
+async fn open_gemini(
+    client: &Client,
+    policy: &RetryPolicy,
+    url: &str,
+    api_key: &str,
+    body: &serde_json::Value,
+) -> Result<reqwest::Response, LlmError> {
+    let http_request = client
+        .post(url)
+        .header("Content-Type", "application/json")
+        .header("x-goog-api-key", api_key)
+        .json(body);
+    let response = send_with_transient_retry("gemini", policy, http_request).await?;
+    if !response.status().is_success() {
+        let error_text = response
+            .text()
+            .await
+            .unwrap_or_else(|_| "Unknown error".to_string());
+        return Err(LlmError::request_failed(format!(
+            "Gemini API error: {}",
+            error_text
+        )));
+    }
+    Ok(response)
+}
+
+/// The wait before sending again a request whose answer was an empty
+/// `MALFORMED_FUNCTION_CALL`: the backoff of a transient status, without
+/// `Retry-After` (there is none in a 200). `retry` counts from 1.
+async fn wait_before_malformed_retry(policy: &RetryPolicy, retry: u32) {
+    let wait = backoff_with_jitter(retry, policy.base, policy.cap);
+    tracing::warn!(
+        target: "colmena::llm",
+        provider = "gemini",
+        finish_reason = MALFORMED_FUNCTION_CALL,
+        retry,
+        wait_ms = wait.as_millis() as u64,
+        "provider answered an empty MALFORMED_FUNCTION_CALL; sending the request again"
+    );
+    tokio::time::sleep(wait).await;
 }
 
 #[derive(Debug, Deserialize)]
@@ -948,6 +1046,22 @@ struct GeminiUsage {
     /// with OpenAI's `cached_tokens` and Anthropic's `cache_read_input_tokens`.
     #[serde(rename = "cachedContentTokenCount")]
     cached_content_token_count: Option<u32>,
+}
+
+impl GeminiUsage {
+    fn to_usage(&self) -> LlmUsage {
+        let mut usage = LlmUsage::new(
+            self.prompt_token_count.unwrap_or(0),
+            self.candidates_token_count.unwrap_or(0),
+        );
+        if let Some(t) = self.thoughts_token_count.filter(|&n| n > 0) {
+            usage = usage.with_thinking_tokens(t);
+        }
+        if let Some(c) = self.cached_content_token_count.filter(|&n| n > 0) {
+            usage = usage.with_cached_input_tokens_included(c);
+        }
+        usage
+    }
 }
 
 // Custom Stream Parser for Gemini's JSON array stream
@@ -1749,7 +1863,9 @@ mod tests {
             .respond_with(ResponseTemplate::new(200).set_body_json(body))
             .mount(&server)
             .await;
-        let adapter = GeminiAdapter::with_base_url(server.uri());
+        let mut adapter = GeminiAdapter::with_base_url(server.uri());
+        // An empty `MALFORMED_FUNCTION_CALL` is sent again: no waits here.
+        adapter.retry = RetryPolicy::immediate(2);
         std::mem::forget(server); // keep it serving for the whole test
         adapter
     }
@@ -1938,6 +2054,185 @@ mod tests {
             .collect();
         let expected = [(0, "Hola"), (1, "usage"), (0, ", listo."), (4, "usage")];
         assert_eq!(seen, expected);
+    }
+
+    // ── Empty MALFORMED_FUNCTION_CALL: the same request is sent again ──
+    //
+    // 2026-10-09, ADP dev, artifacts bench on gemini-2.5-flash: 6 of 100 turns
+    // ended with `MALFORMED_FUNCTION_CALL`, 0 completion tokens and no call,
+    // mostly when the call carried a long argument (a whole HTML page).
+
+    const MALFORMED: &str = "MALFORMED_FUNCTION_CALL";
+    const MALFORMED_TEXT: &str = "[Empty response - finish_reason: MALFORMED_FUNCTION_CALL]";
+
+    fn with_usage(mut answer: serde_json::Value, candidates: u32) -> serde_json::Value {
+        answer["usageMetadata"] =
+            json!({ "promptTokenCount": 8771, "candidatesTokenCount": candidates });
+        answer
+    }
+
+    fn empty_malformed() -> serde_json::Value {
+        with_usage(json!({ "candidates": [{ "finishReason": MALFORMED }] }), 0)
+    }
+
+    /// A server that answers `first` once and `then` afterwards, and the
+    /// adapter on it; `call` gets each element, `stream` each one in an array.
+    async fn stub_sequence(
+        first: serde_json::Value,
+        then: serde_json::Value,
+        streaming: bool,
+    ) -> (wiremock::MockServer, GeminiAdapter) {
+        use crate::llm::infrastructure::transient::stub_answering;
+        use wiremock::ResponseTemplate;
+        let body = |v: serde_json::Value| match streaming {
+            false => ResponseTemplate::new(200).set_body_json(v),
+            true => ResponseTemplate::new(200).set_body_json(json!([v])),
+        };
+        let server = stub_answering(body(first), Some(body(then))).await;
+        let mut adapter = GeminiAdapter::with_base_url(server.uri());
+        adapter.retry = RetryPolicy::immediate(2);
+        (server, adapter)
+    }
+
+    async fn sent(server: &wiremock::MockServer) -> usize {
+        server.received_requests().await.unwrap().len()
+    }
+
+    #[tokio::test]
+    async fn an_empty_malformed_call_is_sent_again_and_the_next_answer_wins() {
+        let text = with_usage(element(json!([{ "text": "Listo." }]), Some("STOP")), 3);
+        let call = json!({ "functionCall": { "name": "html_create", "args": { "html": "<p/>" } } });
+        let tool = with_usage(element(json!([call]), Some("STOP")), 40);
+        for (answer, is_call) in [(text, false), (tool, true)] {
+            // `call`
+            let (server, adapter) = stub_sequence(empty_malformed(), answer.clone(), false).await;
+            let called = adapter.call(gemini_req_with_suffix(None)).await.unwrap();
+            assert_eq!(sent(&server).await, 2);
+            assert_eq!(called.finish_reason(), Some("STOP"));
+            assert!(
+                !called.content().contains(MALFORMED),
+                "{}",
+                called.content()
+            );
+            match is_call {
+                true => assert_eq!(called.tool_calls().unwrap()[0].function.name, "html_create"),
+                false => assert_eq!(called.content(), "Listo."),
+            }
+            // The dropped answer's prompt was billed too.
+            assert_eq!(called.usage().unwrap().prompt_tokens, 2 * 8771);
+
+            // `stream`
+            let (server, adapter) = stub_sequence(empty_malformed(), answer, true).await;
+            let stream = adapter.stream(gemini_req_with_suffix(None)).await.unwrap();
+            let parts: Vec<LlmStreamChunk> = stream.map(|c| c.unwrap()).collect().await;
+            assert_eq!(sent(&server).await, 2);
+            let streamed: String = parts.iter().map(|c| c.content()).collect();
+            assert_eq!(streamed, if is_call { "" } else { "Listo." });
+            assert!(parts.iter().all(|c| c.finish_reason() != Some(MALFORMED)));
+            assert_eq!(
+                has(
+                    &parts,
+                    |p| matches!(p, LlmStreamPart::ToolCallChunk(tc) if tc.name == "html_create")
+                ),
+                is_call
+            );
+            let last_usage = parts.iter().rev().find_map(|c| match c.part() {
+                LlmStreamPart::Usage(u) => Some(u.clone()),
+                _ => None,
+            });
+            assert_eq!(last_usage.unwrap().prompt_tokens, 2 * 8771);
+        }
+    }
+
+    #[tokio::test]
+    async fn a_malformed_call_until_the_retries_run_out_keeps_the_placeholder() {
+        for streaming in [false, true] {
+            let (server, adapter) =
+                stub_sequence(empty_malformed(), empty_malformed(), streaming).await;
+            let request = gemini_req_with_suffix(None);
+            let (content, reason) = match streaming {
+                false => {
+                    let r = adapter.call(request).await.unwrap();
+                    (
+                        r.content().to_string(),
+                        r.finish_reason().map(str::to_string),
+                    )
+                }
+                true => {
+                    let parts: Vec<LlmStreamChunk> = adapter
+                        .stream(request)
+                        .await
+                        .unwrap()
+                        .map(|c| c.unwrap())
+                        .collect()
+                        .await;
+                    let last = parts
+                        .iter()
+                        .rev()
+                        .find(|c| !c.content().is_empty())
+                        .unwrap();
+                    let reason = last.finish_reason().map(str::to_string);
+                    (parts.iter().map(|c| c.content()).collect(), reason)
+                }
+            };
+            // The first send and the 2 retries of `immediate(2)`.
+            assert_eq!(sent(&server).await, 3, "streaming: {streaming}");
+            assert_eq!(content, MALFORMED_TEXT, "streaming: {streaming}");
+            assert_eq!(reason.as_deref(), Some(MALFORMED));
+        }
+        // 0 turns it off.
+        let (server, mut adapter) =
+            stub_sequence(empty_malformed(), empty_malformed(), false).await;
+        adapter.retry = RetryPolicy::immediate(0);
+        let called = adapter.call(gemini_req_with_suffix(None)).await.unwrap();
+        assert_eq!(sent(&server).await, 1);
+        assert_eq!(called.content(), MALFORMED_TEXT);
+    }
+
+    #[tokio::test]
+    async fn a_malformed_call_after_something_went_out_is_not_sent_again() {
+        let next = with_usage(element(json!([{ "text": "otra vez" }]), Some("STOP")), 2);
+        // `stream`: text, or a thought, already reached the client.
+        for first in [
+            json!([{ "text": "Armo el HTML…" }]),
+            json!([{ "text": "pienso…", "thought": true }]),
+        ] {
+            use crate::llm::infrastructure::transient::stub_answering;
+            use wiremock::ResponseTemplate;
+            let chunks = json!([
+                element(first.clone(), None),
+                with_usage(element(json!([{ "text": "" }]), Some(MALFORMED)), 0)
+            ]);
+            let server = stub_answering(
+                ResponseTemplate::new(200).set_body_json(chunks),
+                Some(ResponseTemplate::new(200).set_body_json(json!([next.clone()]))),
+            )
+            .await;
+            let mut adapter = GeminiAdapter::with_base_url(server.uri());
+            adapter.retry = RetryPolicy::immediate(2);
+            let parts: Vec<LlmStreamChunk> = adapter
+                .stream(gemini_req_with_suffix(None))
+                .await
+                .unwrap()
+                .map(|c| c.unwrap())
+                .collect()
+                .await;
+            assert_eq!(sent(&server).await, 1, "{first}");
+            let streamed: String = parts.iter().map(|c| c.content()).collect();
+            assert!(!streamed.contains("otra vez"), "{streamed}");
+        }
+        // `call`: the answer has text, or completion tokens.
+        let with_text = with_usage(
+            element(json!([{ "text": "Armo el HTML…" }]), Some(MALFORMED)),
+            4,
+        );
+        let with_tokens = with_usage(json!({ "candidates": [{ "finishReason": MALFORMED }] }), 7);
+        for first in [with_text, with_tokens] {
+            let (server, adapter) = stub_sequence(first, next.clone(), false).await;
+            let called = adapter.call(gemini_req_with_suffix(None)).await.unwrap();
+            assert_eq!(sent(&server).await, 1);
+            assert_ne!(called.content(), "otra vez");
+        }
     }
 
     #[test]
