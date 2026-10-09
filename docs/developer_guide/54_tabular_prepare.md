@@ -1554,3 +1554,8 @@ with its percent, a failure is `PreparationFailed` with the recorded reason and 
 `verify_prepared`, then the choice of tables (`tables` empty means all), then `run_with_mounts` on the executor with the
 wrapped code, mode `restricted`, the heavy deadline (`HEAVY_TIMEOUT_SECS`, 300 s, on the large path only) and an output
 volume of `OUT_MIB`. The `source_key` is the catalog row's, never the model's.
+
+The answer is `LargeRunOutput {stdout, result, tables}` or a `LargeRunError`: `Refused(RunRefusal)` before any code ran
+(the executor is never asked in that case), `Python(text)` for the code's own failure, `Timeout`, or `Internal(text)` for an
+executor failure. A child that ended without a result and a `MemoryError` both read as one fixed sentence telling the model
+to select fewer columns or iterate parts (the limit is memory or CPU; the sentence says "probably").
