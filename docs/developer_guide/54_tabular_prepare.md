@@ -1534,3 +1534,14 @@ wraps the model's code like the small path (`pd`, `np`, `stats`, `result = None`
 
 Using a handle as a DataFrame (`groupby`, `[...]`, `len`, iteration, any other attribute) raises `LargeTableError` (a
 `ValueError`) saying how to read the table. There is no method that loads a whole table.
+
+The read estimate starts from the manifest's `in_memory_bytes` and applies the per-type multipliers of the table in
+[Manifest](#manifest-manifestrs) (bool x8, date x2, a string adds 57 bytes of Python object per row), then doubles it for the
+moment Arrow's table and the pandas frame exist together. `READ_MAX_BYTES` (1,536 MiB, half of the heavy run's 3,072 MiB) and
+the factor of two are ESTIMATES: the design calibrates them against the spike's item 2 records, which were not re-run against
+this estimate. Reads call `pd.read_parquet(path, columns=, filters=, use_threads=False, pre_buffer=False, memory_map=False)`.
+
+The prelude's tests run it in `restricted` mode through the in-process helper. The ones that need real Parquet parts
+(`parts` visits every row once, `read` with columns and filters, the wrapped code end to end) make the parts with pandas and
+need python3 with pandas, pyarrow and scipy; without them each prints a skip line, so a developer machine without pandas
+runs the rest (names, schema, handle misuse, `df`, limits, estimate, wrapper, inputs).
