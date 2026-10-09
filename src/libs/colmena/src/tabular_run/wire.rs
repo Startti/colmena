@@ -154,6 +154,12 @@ where
         }
     }
 
+    /// Changes the idle limit: the first frame of a response waits for the code
+    /// to run, the rest of it must flow.
+    pub fn set_idle(&mut self, idle: Duration) {
+        self.idle = idle;
+    }
+
     /// Makes `buf` non-empty. `false` at the end of the stream.
     async fn fill(&mut self) -> Result<bool, WireError> {
         while self.buf.is_empty() {

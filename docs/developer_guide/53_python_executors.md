@@ -303,10 +303,12 @@ result or a refusal. Nothing above the trait knows how the tables get there.
   is `OverBudget(Volumes)` (retry later); any other failure to stage is `Unavailable(Executor)`; the executor's own text is
   logged and never shown. The code's own failure (a Python error, a timeout, a crash) comes back as the usual
   `PythonRunError`.
-- *Remote executor: not built.* The design carries the tables on one streamed HTTP/2 request (`POST /v2/run`). Whether a
-  Cloud Run service accepts a 60 MiB to 1 GiB body that way is spike item 3, which needs the deployed executor and could not
-  be measured here, so `RemoteExecutor` implements the trait by refusing with `Unavailable(Unsupported)` rather than guessing
-  at a wire. The in-process executor has no run mounts and does not implement the trait.
+- *Remote executor.* `RemoteExecutor` sends the call as one streamed `POST /v2/run` (wire and server in
+  [54_tabular_prepare.md](./54_tabular_prepare.md)), with the SAME credentials and client as `/v1/run` (`authorized`, the token
+  file or the GCP identity token), and no automatic retry: a busy server is `OverBudget(Volumes)` for the model to retry. The
+  server's answers become the existing refusals (busy, mounts disabled, no staging root, no route as `Unsupported`, too large);
+  a 401 is the usual rejected-credentials error. It was not measured against the deployed service: see "To measure" in
+  54_tabular_prepare.md. The in-process executor has no run mounts and does not implement the trait.
 
 `python_exec::mounted_executor()` gives the process executor as a `MountedExecutor` (an additive accessor: `run`, the
 dispatcher's routing and every existing signature are unchanged). The subprocess executor answers with itself, the remote one
