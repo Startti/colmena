@@ -21,6 +21,8 @@ pub(crate) struct LargeTarget {
     pub mime_type: String,
     pub filename: String,
     pub size_bytes: u64,
+    pub session_id: Option<String>,
+    pub agent_session_id: Option<String>,
 }
 
 impl DagToolExecutor {
@@ -49,6 +51,8 @@ impl DagToolExecutor {
             mime_type: row.mime_type.clone(),
             filename: row.filename.clone(),
             size_bytes: row.size_bytes.unwrap_or(0),
+            session_id: self.session_id.clone(),
+            agent_session_id: self.agent_session_id.clone(),
         })
     }
 }

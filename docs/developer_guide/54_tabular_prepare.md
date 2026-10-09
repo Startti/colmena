@@ -1741,3 +1741,12 @@ over a limit raises an error saying to return fewer rows or aggregate. That chec
 limits again and drops what is over. The helper records `{name, format, rows, dtypes, size}` of each file; when any file was
 written the wrapped answer is `{"__colmena_emitted": [...], "result": <result>}` and `unwrap_emitted` splits it, cleaning every
 field (it comes from the sandbox: it is only shown beside a file the reader kept, matched by name). The tool text names it.
+
+### The runtime stores the outputs
+
+`LargeTabularRuntime::run` now passes a `StoreSink` (session ids from the request, `Generated` placement) as the call's sink, for the
+local and the remote executor alike: the sink takes an `OutFile`, whichever executor produced it. `LargeRunOutput.emitted`
+lists what reached storage (`name`, `mime_type`, `size_bytes`, the engine's `storage_key`), each described with the rows and
+dtypes the code reported for it when the report matches a kept file by name (untrusted, cleaned; a report for a file that was
+not kept is ignored), and `not_kept` says in words what was written and dropped (a name only when it passed the charset). The
+result is the code's own (`unwrap_emitted` removes the report).
