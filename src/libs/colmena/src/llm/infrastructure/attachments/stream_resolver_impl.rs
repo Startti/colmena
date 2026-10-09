@@ -104,9 +104,16 @@ impl AttachmentStreamResolverImpl {
         {
             if buffering && row.is_host_storage_ref() {
                 return Err(AttachmentResolveError::HostObject {
-                    large_tool_served: self
+                    // The registry sets this flag to false and leaves it so: this resolver
+                    // is shared by every node (`http_request` among them) and cannot know
+                    // which tools the calling node offers, so it names none. The LLM node's
+                    // own paths, which do know, name the tool the node has.
+                    large_tool: self
                         .large_tool_served
-                        .load(std::sync::atomic::Ordering::Relaxed),
+                        .load(std::sync::atomic::Ordering::Relaxed)
+                        .then_some(
+                            crate::llm::domain::large_tabular::LargeTool::AttachmentRunPython,
+                        ),
                 });
             }
             let key = row.storage_key.clone().ok_or_else(|| {

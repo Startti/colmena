@@ -21,13 +21,87 @@ pub const LARGE_TABULAR_ERROR_CODE: &str = "large_tabular_file";
 /// refusal must not send the model to a tool that is not there.
 pub const LARGE_FILE_TOOL_AVAILABLE: bool = false;
 
+/// The tools that serve a large file over its prepared tables (they take a `tables`
+/// argument). A node offers one, the other, or both; the refusal names the one the
+/// model actually has.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LargeTool {
+    AttachmentRunPython,
+    DataRunPython,
+}
+
+impl LargeTool {
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::AttachmentRunPython => "attachment_run_python",
+            Self::DataRunPython => "data_run_python",
+        }
+    }
+}
+
+/// The refusal text for a node that has `tool` (or none).
+pub fn refusal_text_for_tool(tool: Option<LargeTool>) -> &'static str {
+    match tool {
+        Some(LargeTool::AttachmentRunPython) => {
+            "this file is large; use `attachment_run_python` with `tables`"
+        }
+        Some(LargeTool::DataRunPython) => "this file is large; use `data_run_python` with `tables`",
+        None => {
+            "this file is too large to be read by this tool, and the large-file analysis \
+             tool is not available yet, so it cannot be analysed in this turn"
+        }
+    }
+}
+
 /// The refusal text for each state of [`LARGE_FILE_TOOL_AVAILABLE`].
 pub fn refusal_text_for(tool_available: bool) -> &'static str {
-    if tool_available {
-        "this file is large; use `attachment_run_python` with `tables`"
-    } else {
-        "this file is too large to be read by this tool, and the large-file analysis \
-         tool is not available yet, so it cannot be analysed in this turn"
+    refusal_text_for_tool(tool_available.then_some(LargeTool::AttachmentRunPython))
+}
+
+/// The tools that serve a large file on a node, each decided on its own: a tool
+/// serves only when the switch is on, a runtime is wired AND the node offers THAT tool
+/// (its own offering decision, `enabled_tools` included).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct LargeServed {
+    pub attachment_run_python: bool,
+    pub data_run_python: bool,
+}
+
+impl LargeServed {
+    pub fn decide(
+        switch_on: bool,
+        runtime_wired: bool,
+        attachment_run_python_offered: bool,
+        data_run_python_offered: bool,
+    ) -> Self {
+        let on = switch_on && runtime_wired;
+        Self {
+            attachment_run_python: on && attachment_run_python_offered,
+            data_run_python: on && data_run_python_offered,
+        }
+    }
+
+    pub fn serves(self, tool: LargeTool) -> bool {
+        match tool {
+            LargeTool::AttachmentRunPython => self.attachment_run_python,
+            LargeTool::DataRunPython => self.data_run_python,
+        }
+    }
+
+    pub fn any(self) -> bool {
+        self.attachment_run_python || self.data_run_python
+    }
+
+    /// The tool a refusal names: `data_run_python` when both serve, as it is the tool
+    /// agents really have.
+    pub fn named(self) -> Option<LargeTool> {
+        if self.data_run_python {
+            Some(LargeTool::DataRunPython)
+        } else if self.attachment_run_python {
+            Some(LargeTool::AttachmentRunPython)
+        } else {
+            None
+        }
     }
 }
 
@@ -47,10 +121,14 @@ pub fn refusal_text() -> &'static str {
 
 /// [`LARGE_TABULAR_ERROR_CODE`] when `message` is one of the refusal texts.
 pub fn refusal_code_for(message: &str) -> Option<&'static str> {
-    [false, true]
-        .into_iter()
-        .any(|available| message == refusal_text_for(available))
-        .then_some(LARGE_TABULAR_ERROR_CODE)
+    [
+        None,
+        Some(LargeTool::AttachmentRunPython),
+        Some(LargeTool::DataRunPython),
+    ]
+    .into_iter()
+    .any(|tool| message == refusal_text_for_tool(tool))
+    .then_some(LARGE_TABULAR_ERROR_CODE)
 }
 
 /// `value` (a tool's error object) with `"code": "large_tabular_file"` added when
@@ -155,6 +233,50 @@ pub fn is_large_tabular(mime_type: &str, size_bytes: Option<u64>, switch_on: boo
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Each tool serves only when the switch, a runtime AND its own offering say so;
+    /// `data_run_python` is the one a refusal names when both serve.
+    #[test]
+    fn each_tool_serves_only_when_it_is_offered_itself() {
+        use LargeTool::*;
+        let served = |a, d| LargeServed::decide(true, true, a, d);
+        assert_eq!(served(true, false).named(), Some(AttachmentRunPython));
+        assert!(served(true, false).serves(AttachmentRunPython));
+        assert!(
+            !served(true, false).serves(DataRunPython),
+            "not offered, not served"
+        );
+        assert_eq!(served(false, true).named(), Some(DataRunPython));
+        assert!(!served(false, true).serves(AttachmentRunPython));
+        assert_eq!(served(true, true).named(), Some(DataRunPython));
+        assert!(served(true, true).serves(AttachmentRunPython));
+        assert!(!served(false, false).any());
+        assert!(
+            !LargeServed::decide(false, true, true, true).any(),
+            "switch off"
+        );
+        assert!(
+            !LargeServed::decide(true, false, true, true).any(),
+            "no runtime"
+        );
+    }
+
+    /// Each tool has its own sentence, naming that tool; every one carries the code.
+    #[test]
+    fn each_refusal_names_the_tool_it_is_about_and_carries_the_code() {
+        let texts = [
+            refusal_text_for_tool(None),
+            refusal_text_for_tool(Some(LargeTool::AttachmentRunPython)),
+            refusal_text_for_tool(Some(LargeTool::DataRunPython)),
+        ];
+        assert!(texts[1].contains("`attachment_run_python`") && !texts[1].contains("data_run"));
+        assert!(texts[2].contains("`data_run_python`") && !texts[2].contains("attachment_run"));
+        for t in texts {
+            assert_eq!(refusal_code_for(t), Some(LARGE_TABULAR_ERROR_CODE), "{t}");
+        }
+        assert_eq!(refusal_text_for(true), texts[1]);
+        assert_eq!(refusal_text_for(false), texts[0]);
+    }
 
     const CSV: &str = "text/csv";
     const XLSX: &str = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";

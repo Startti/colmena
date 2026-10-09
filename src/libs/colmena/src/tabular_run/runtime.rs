@@ -10,7 +10,7 @@ use super::collect::RejectReason;
 use super::mounted::{MountedCall, MountedError, MountedExecutor, OutputSink, OUT_MIB};
 use super::outputs::{OutputGuard, StoreSink};
 use super::prelude::{
-    prelude_inputs, skipped_summary, tables_summary, unwrap_emitted, wrap_large_code,
+    prelude_inputs, skipped_summary, tables_summary, unwrap_emitted, wrap_large_code_for,
 };
 use super::refusal::{FailureReason, RunRefusal, Unavailable};
 use super::stage::StageLimits;
@@ -98,6 +98,9 @@ pub struct LargeRunRequest {
     /// still runs, but files it returns are not stored (nothing is uploaded to be
     /// deleted), and the answer says so.
     pub keep_files: bool,
+    /// The code may leave its answer in `output` as well as `result` (the
+    /// `data_run_python` convention).
+    pub accept_output: bool,
 }
 
 /// A file the code returned, stored and described.
@@ -290,7 +293,7 @@ impl LargeTabularRuntime {
             req.agent_session_id.clone(),
         );
         let call = PythonRunRequest {
-            code: wrap_large_code(&req.code),
+            code: wrap_large_code_for(&req.code, req.accept_output),
             mode: "restricted".to_string(),
             timeout: Some(timeout),
             inputs: prelude_inputs(plan.manifest(), &chosen),
@@ -414,6 +417,7 @@ mod tests {
             agent_session_id: Some("a1".into()),
             phase: Default::default(),
             keep_files: true,
+            accept_output: false,
         }
     }
 

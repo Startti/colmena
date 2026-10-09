@@ -2027,3 +2027,67 @@ still checked (lists, structs and maps are flattened for the check).
   malformed (`400`) is a setup problem.
 - The refusal shared by nodes that cannot know which tools the calling node offers
   (the `http_request` `$attachment:` resolver) never names `attachment_run_python`.
+
+## Which tool serves a large file
+
+Two tools take the `tables` argument over a prepared large file:
+`attachment_run_python` (deprecated, kept for old graphs) and `data_run_python`.
+`LargeServed::decide` (domain `large_tabular.rs`) is the one place that decides which of
+them serves a turn, EACH ON ITS OWN: the engine switch is on, the runtime is wired, and the
+node OFFERS that tool (`synthetic_tool_offered`: the tool's own availability condition, and
+not excluded with `!name`). The executor is wired with that set, and a call that names a
+tool outside it never reaches the LARGE path, whichever caller made it. (The agent loop
+already refuses a name the request did not offer: `agent_service::dispatch_call`.) When both
+serve, the refusals name `data_run_python`.
+
+**Known pre-existing limitation, not changed here:** `DagToolExecutor::execute` has no
+"offered" check of its own. The resume path (`execute_with_resume_answer`, replaying the call
+a previous run left SUSPENDED) reaches it without passing `dispatch_call`, and the executor's
+SMALL path of `attachment_run_python` / `data_run_python` runs a tool by name if some other
+caller asks it to. Neither Python tool ever suspends, and every call a model makes goes through
+`dispatch_call`, so a model cannot use it; but a future caller of the executor would have to
+check offering itself.
+
+Every message that points the model at a tool uses that answer, so a refusal never
+names a tool the node was not given: the load-whole-file refusals say
+``use `data_run_python` with `tables` ``, ``use `attachment_run_python` with `tables` ``
+or, with no tool, that large-file analysis is not available. The three sentences carry the
+same `large_tabular_file` code. The `http_request` `$attachment:` resolver is shared by
+every node and never names a tool.
+
+## `data_run_python` over a large file
+
+`data_run_python` is the Python tool agents really have, so the large path is reachable
+through it. **When it is available** (all four, decided per turn and per node):
+
+1. the engine switch `COLMENA_LARGE_TABULAR` is on and the host wired a runtime
+   (storage, preparation registry and executor);
+2. the node OFFERS `data_run_python`: it is declared in `tool_configurations`, or named in
+   `enabled_tools` (directly, as `"*"`, or through the `gsheets` toolkit alias), and not
+   excluded: `!data_run_python`, `!*` and `!gsheets` all exclude it, as they always did
+   (`inputs.enabled_tools` replaces `config.enabled_tools`, never merged);
+3. the turn carries a host-owned file (a catalog row that is a storage reference) that is large;
+4. the call names that file in `bindings`.
+
+With 1-3 the tool is shown with the large-file text and a `tables` argument; with any of 1-3
+missing it is exactly the tool it always was (no text, no argument, nothing routed). With 1-3
+and a call whose bindings name no large file, the call also runs exactly as before.
+
+A call whose bindings name a large file runs over its prepared tables the way
+`attachment_run_python` does (`tables`, `emit_table`, typed refusals, progress, the
+per-conversation quota and the output ledger are the same code). What differs:
+
+- the file is passed as ONE binding, `bindings: [{"var": "big", "attachment_id": "<id>"}]`;
+  `var` is not used. Mixing it with other bindings, or passing `code_ref`, is refused
+  with `large_tabular_file` and `retryable: false`; nothing runs.
+- the code may leave its answer in `output` (the `data_run_python` habit) or `result`;
+  `result` wins when both are set. The answer is the large path's own (`result`, `tables`,
+  `emitted`, `not_kept`, `stdout`), not the small path's `output`.
+- `output_tables`, `output_sheets` and `output_attachments` are not available; files go back
+  with `emit_table`. The returned files are attachments tagged `generated_by:data_run_python`
+  and count against that tool's per-conversation quota (together with any file its small
+  `output_attachments` sink registered).
+- a refusal that sends the model to a tool names `data_run_python` when the node has it.
+
+`attachment_run_python` keeps working for old graphs on the same terms; it is not the tool
+that is named when the node has both.

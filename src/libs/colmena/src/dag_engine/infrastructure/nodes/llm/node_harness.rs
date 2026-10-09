@@ -19,6 +19,30 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
+/// Hides `DATABASE_URL` while a turn runs. With it set the node keeps its attachments in
+/// that Postgres (a service CI gives some steps) instead of the SQLite database the test
+/// made, so rows would outlive the test and leak into the next one, and the test could not
+/// find what the node registered. It is restored on drop. Only used under the
+/// `OverrideGuard` lock, which every harness turn already holds, so no other harness turn
+/// sees the variable change.
+struct NoDatabaseUrl(Option<std::ffi::OsString>);
+
+impl NoDatabaseUrl {
+    fn hide() -> Self {
+        let previous = std::env::var_os("DATABASE_URL");
+        std::env::remove_var("DATABASE_URL");
+        Self(previous)
+    }
+}
+
+impl Drop for NoDatabaseUrl {
+    fn drop(&mut self) {
+        if let Some(value) = self.0.take() {
+            std::env::set_var("DATABASE_URL", value);
+        }
+    }
+}
+
 /// A model that answers "ok" and records what the node sent it.
 pub(super) struct RecordingModel {
     inner: ScriptedAdapter,
@@ -28,6 +52,8 @@ pub(super) struct RecordingModel {
     calls: AtomicUsize,
     /// The description of every tool the node offered, in order.
     tools: Mutex<Vec<String>>,
+    /// The full definition of every tool the node offered, in order.
+    definitions: Mutex<Vec<crate::llm::domain::ToolDefinition>>,
 }
 
 impl RecordingModel {
@@ -47,6 +73,7 @@ impl RecordingModel {
             files: AtomicUsize::new(0),
             calls: AtomicUsize::new(0),
             tools: Mutex::default(),
+            definitions: Mutex::default(),
         })
     }
 
@@ -59,6 +86,10 @@ impl RecordingModel {
                 .fetch_add(m.files().map_or(0, |f| f.len()), Ordering::SeqCst);
         }
         if let Some(tools) = request.tools() {
+            self.definitions
+                .lock()
+                .unwrap()
+                .extend(tools.iter().cloned());
             let mut offered = self.tools.lock().unwrap();
             offered.extend(
                 tools
@@ -79,6 +110,12 @@ impl RecordingModel {
     /// `name: description` of every tool offered to the model, in order.
     pub(super) fn tools_offered(&self) -> Vec<String> {
         self.tools.lock().unwrap().clone()
+    }
+
+    /// The last definition of the tool `name` the node offered, whole.
+    pub(super) fn tool_definition(&self, name: &str) -> Option<crate::llm::domain::ToolDefinition> {
+        let all = self.definitions.lock().unwrap();
+        all.iter().rev().find(|t| t.name == name).cloned()
     }
 
     /// How many times the model was called (summaries included).
@@ -160,6 +197,7 @@ pub(super) async fn run_turn_without_session(
     use crate::dag_engine::application::ports::NodeRegistryPort;
     let node = reg.get_node("llm_call").expect("llm_call is registered");
     let _guard = OverrideGuard::install(model.clone());
+    let _no_database_url = NoDatabaseUrl::hide();
     let inputs: HashMap<String, Value> = HashMap::from([
         ("__colmena_session_id".to_string(), json!("s1")),
         ("files".to_string(), Value::Array(files)),
@@ -195,6 +233,7 @@ pub(super) async fn run_turn_with_config(
     use crate::dag_engine::application::ports::NodeRegistryPort;
     let node = reg.get_node("llm_call").expect("llm_call is registered");
     let _guard = OverrideGuard::install(model.clone());
+    let _no_database_url = NoDatabaseUrl::hide();
     let inputs: HashMap<String, Value> = HashMap::from([
         ("__colmena_session_id".to_string(), json!("s1")),
         ("__colmena_agent_session_id".to_string(), json!("agent_1")),

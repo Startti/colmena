@@ -36,7 +36,7 @@
 //! source types — inline `data:` base64 uploads AND signed-URL pulls. The
 //! dispatcher does not need to know the source type.
 
-mod large;
+pub(crate) mod large;
 
 use crate::llm::domain::{LlmError, ToolCall, ToolResult};
 use schemars::JsonSchema;
@@ -232,7 +232,10 @@ pub async fn dispatch_attachment_run_python_via_executor(
 
     // A large file (dark behind COLMENA_LARGE_TABULAR) never reaches the code
     // below: it runs over its prepared tables, or is refused with a typed reason.
-    if let Some(target) = executor.large_target(&args.attachment_id) {
+    if let Some(target) = executor.large_target_for(
+        crate::llm::domain::large_tabular::LargeTool::AttachmentRunPython,
+        &args.attachment_id,
+    ) {
         return Ok(large::dispatch(
             executor,
             call_id,

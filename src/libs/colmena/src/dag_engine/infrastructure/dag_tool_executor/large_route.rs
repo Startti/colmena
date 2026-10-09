@@ -10,6 +10,7 @@
 //! and no storage call to a small file's call.
 
 use super::DagToolExecutor;
+use crate::llm::domain::large_tabular::{LargeServed, LargeTool};
 use crate::tabular_run::runtime::LargeTabularRuntime;
 use std::sync::Arc;
 
@@ -32,6 +33,28 @@ impl DagToolExecutor {
         self
     }
 
+    /// Which tools serve a large file on this node. What the node said with
+    /// [`Self::with_large_served`], whichever order the builders ran in; when it said
+    /// nothing, a wired runtime serves `attachment_run_python` (the tool it was first
+    /// wired for), and no runtime serves nothing.
+    pub(crate) fn large_served(&self) -> LargeServed {
+        match self.large_served {
+            Some(served) => served,
+            None if self.large_tabular.is_some() => LargeServed {
+                attachment_run_python: true,
+                data_run_python: false,
+            },
+            None => LargeServed::default(),
+        }
+    }
+
+    /// Builder: exactly which tools serve a large file on this node. A tool the node
+    /// does not offer is not in it, so a call to that tool by name never reaches the runtime.
+    pub fn with_large_served(mut self, served: LargeServed) -> Self {
+        self.large_served = Some(served);
+        self
+    }
+
     /// Builder: a shorter clock for a large-file call than the tool's own 900 s, so a
     /// test can prove the cut-off end to end. Not for production wiring.
     #[doc(hidden)]
@@ -44,10 +67,19 @@ impl DagToolExecutor {
         self.large_call_budget
     }
 
-    /// The large path for `document_id`, or `None` when the call keeps its
-    /// usual path: no runtime is wired, the row is not in the catalog snapshot,
-    /// or it is not a host-owned reference.
-    pub(crate) fn large_target(&self, document_id: &str) -> Option<LargeTarget> {
+    /// The large path for `document_id` for a call made through `tool`, or `None` when
+    /// the call keeps its usual path: the node does not serve THAT tool (the check that
+    /// keeps a tool the node excluded, or never offered, off the large path even if a
+    /// call names it), no runtime is wired, the row is not in the catalog snapshot, or
+    /// it is not a host-owned reference.
+    pub(crate) fn large_target_for(
+        &self,
+        tool: LargeTool,
+        document_id: &str,
+    ) -> Option<LargeTarget> {
+        if !self.large_served().serves(tool) {
+            return None;
+        }
         let runtime = self.large_tabular.clone()?;
         let row = self
             .attachment_catalog

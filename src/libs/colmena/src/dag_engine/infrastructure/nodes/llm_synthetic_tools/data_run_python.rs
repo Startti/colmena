@@ -726,6 +726,18 @@ pub async fn dispatch_data_run_python_via_executor(
         }
     };
 
+    // A binding that names a large host-owned file (and only then) is analysed over
+    // its prepared tables; every other call goes on exactly as before.
+    if let Some(answer) = super::attachment_run_python::large::dispatch_from_data_run_python(
+        exec,
+        &tool_call.id,
+        &args,
+    )
+    .await
+    {
+        return answer;
+    }
+
     // Inject the operator-set gsheets collision policy from fixed_config so
     // it reaches `DataRunPythonArgs.on_existing_sheet` (not an LLM field).
     if let Some(policy) = fixed.get("on_existing_sheet") {
@@ -931,6 +943,12 @@ pub fn tool_data_run_python(enabled: &EnabledSources) -> ToolDefinition {
     )
 }
 
+/// [`tool_data_run_python`] as the model sees it while a large file is served (see
+/// `attachment_run_python::large`).
+pub fn tool_data_run_python_for_large_files(enabled: &EnabledSources) -> ToolDefinition {
+    super::attachment_run_python::large::data_run_python_definition(tool_data_run_python(enabled))
+}
+
 // ── Tests ────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -944,6 +962,34 @@ mod tests {
     }
     fn noop_registrar<'a>() -> AttachmentRegistrar<'a> {
         Box::new(|_n, _b| Box::pin(async { Err("no registrar in this test".to_string()) }))
+    }
+
+    /// The large-file tool is the usual one plus the text and the `tables` argument.
+    #[test]
+    fn the_large_file_definition_adds_only_the_text_and_the_tables_argument() {
+        let enabled = EnabledSources {
+            sql: false,
+            gsheets: false,
+        };
+        let usual = tool_data_run_python(&enabled);
+        let large = tool_data_run_python_for_large_files(&enabled);
+        assert_eq!(large.name, usual.name);
+        assert_eq!(
+            large.description,
+            format!(
+                "{}{}",
+                usual.description,
+                super::super::attachment_run_python::large::DATA_RUN_LARGE_FILES_TEXT
+            )
+        );
+        let (mut a, b) = (
+            usual.input_schema_override.clone().unwrap(),
+            large.input_schema_override.clone().unwrap(),
+        );
+        assert_eq!(b["properties"]["tables"]["items"]["type"], "string");
+        a["properties"]["tables"] = b["properties"]["tables"].clone();
+        assert_eq!(a, b, "nothing else in the schema changed");
+        assert!(!usual.description.contains("Large files"));
     }
 
     #[tokio::test]

@@ -49,6 +49,116 @@ pub(super) fn tool_definition() -> crate::llm::domain::tools::ToolDefinition {
     def
 }
 
+/// What `data_run_python` says about large files: the same helpers as
+/// [`LARGE_FILES_TEXT`], reached through its own argument shape.
+pub(crate) const DATA_RUN_LARGE_FILES_TEXT: &str = "\n\nLarge files (over 50 MiB): pass ONE binding that names the file, \
+`bindings: [{\"var\": \"big\", \"attachment_id\": \"<id>\"}]` (`var` is not used and the file cannot be combined with other bindings). \
+The records variable is NOT loaded. Use `tables`:\n\
+- `tables.names`, `tables.schema(name)`: tables, columns, types, row counts.\n\
+- `t = tables[name]` is a handle, not a DataFrame.\n\
+- `t.read(columns=[...], filters=[...])`: load only the columns you need.\n\
+- `for part in t.parts(columns=[...]):` up to 500,000 rows per part; aggregate\n  each part and combine. Use this for anything that touches every row.\n\
+- `t.head()` to look at a few rows.\n\
+A whole table cannot be loaded at once. Runs may take up to 5 minutes.\n\
+Set `output` (or `result`); the answer carries it as `result`, with `tables`, `stdout` and the files you returned.\n\
+To return a file, call `emit_table(df_or_parts, \"name\", \"csv\" | \"parquet\")` (up to 8 files; parquet takes one DataFrame).\n\
+`code_ref`, `output_tables`, `output_sheets` and `output_attachments` are not available over a large file.\n\
+No charts or images: return aggregated numbers and build charts from them.\n\
+The optional `tables` argument names the tables to make readable (default: all).";
+
+/// `data_run_python` as the model sees it when a large file is served: the usual
+/// definition (its sources and gating unchanged), the text above and the `tables`
+/// argument.
+pub(crate) fn data_run_python_definition(
+    usual: crate::llm::domain::tools::ToolDefinition,
+) -> crate::llm::domain::tools::ToolDefinition {
+    let mut def = usual;
+    def.description.push_str(DATA_RUN_LARGE_FILES_TEXT);
+    if let Some(properties) = def
+        .input_schema_override
+        .as_mut()
+        .and_then(|schema| schema.get_mut("properties"))
+        .and_then(|p| p.as_object_mut())
+    {
+        properties.insert(
+            "tables".to_string(),
+            serde_json::json!({
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Large files only: the tables to make readable (default: all)."
+            }),
+        );
+    }
+    def
+}
+
+/// A `data_run_python` call whose bindings name a large host-owned file runs over
+/// the file's prepared tables, exactly as `attachment_run_python` does: `None` when no
+/// binding names one (the call is then handled as it always was, untouched). A
+/// large file is analysed on its own, so a mix with other bindings, or with
+/// `code_ref`, is refused with a sentence the model can act on.
+pub(crate) async fn dispatch_from_data_run_python(
+    executor: &crate::dag_engine::infrastructure::dag_tool_executor::DagToolExecutor,
+    call_id: &str,
+    args: &serde_json::Value,
+) -> Option<serde_json::Value> {
+    use crate::dag_engine::infrastructure::nodes::llm_synthetic_tools::data_run_python::DataRunPythonArgs;
+    let parsed: DataRunPythonArgs = serde_json::from_value(args.clone()).ok()?;
+    let mut targets = parsed
+        .bindings
+        .iter()
+        .filter_map(|b| b.attachment_id.as_deref())
+        .filter_map(|id| {
+            executor
+                .large_target_for(
+                    crate::llm::domain::large_tabular::LargeTool::DataRunPython,
+                    id,
+                )
+                .map(|t| (id.to_string(), t))
+        });
+    let (attachment_id, target) = targets.next()?;
+    let refuse = |message: &str| {
+        Some(serde_json::json!({
+            "error": message,
+            "retryable": false,
+            "source": "execution",
+            "code": crate::llm::domain::large_tabular::LARGE_TABULAR_ERROR_CODE,
+        }))
+    };
+    if parsed.bindings.len() != 1 || targets.next().is_some() {
+        return refuse(
+            "a large file is analysed on its own: call `data_run_python` with only that file \
+             in `bindings` and read it through `tables`",
+        );
+    }
+    let Some(code) = parsed.code.clone().filter(|_| parsed.code_ref.is_none()) else {
+        return refuse("`code_ref` is not available over a large file: pass the Python in `code`");
+    };
+    let large_args = AttachmentRunPythonArgs {
+        attachment_id,
+        code,
+        delimiter: None,
+        sheet_name: None,
+        header_row: None,
+    };
+    let every = std::time::Duration::from_secs(
+        crate::dag_engine::infrastructure::dag_tool_executor::TOOL_PROGRESS_INTERVAL_SECS,
+    );
+    let raw = args.to_string();
+    let result = dispatch_bounded(
+        executor,
+        call_id,
+        &large_args,
+        &raw,
+        target,
+        every,
+        executor.large_call_budget().unwrap_or(CALL_BUDGET),
+        true,
+    )
+    .await;
+    serde_json::from_str(&result.output).ok()
+}
+
 /// The tool's response for a call that ran over a large file.
 #[derive(Debug, Serialize)]
 struct LargeResponse {
@@ -157,6 +267,7 @@ pub(super) async fn dispatch(
         target,
         every,
         executor.large_call_budget().unwrap_or(CALL_BUDGET),
+        false,
     )
     .await
 }
@@ -214,6 +325,7 @@ enum Stopped {
 /// asked of the registry, so an upsert that committed but failed is still undone.
 async fn keep_outputs(
     executor: &crate::dag_engine::infrastructure::dag_tool_executor::DagToolExecutor,
+    tool: &str,
     files: &[crate::tabular_run::runtime::EmittedOutput],
     mut ledger: crate::tabular_run::outputs::OutputLedger,
 ) -> Keeping {
@@ -234,7 +346,7 @@ async fn keep_outputs(
             Err(_) => Some(Stopped::Refused(
                 "the conversation was busy saving other returned files, so none was kept; try again".into(),
             )),
-            Ok(_held) => register_all(executor, files, &mut ledger).await.err(),
+            Ok(_held) => register_all(executor, tool, files, &mut ledger).await.err(),
         };
         stopped
     };
@@ -265,14 +377,11 @@ async fn keep_outputs(
 /// The part of [`keep_outputs`] that runs under the conversation's lock.
 async fn register_all(
     executor: &crate::dag_engine::infrastructure::dag_tool_executor::DagToolExecutor,
+    tool: &str,
     files: &[crate::tabular_run::runtime::EmittedOutput],
     ledger: &mut crate::tabular_run::outputs::OutputLedger,
 ) -> Result<(), Stopped> {
-    let usage = tokio::time::timeout(
-        REGISTRY_STEP,
-        executor.generated_usage(super::ATTACHMENT_RUN_PYTHON_TOOL_NAME),
-    )
-    .await;
+    let usage = tokio::time::timeout(REGISTRY_STEP, executor.generated_usage(tool)).await;
     let Ok(Some((used_files, used_bytes))) = usage else {
         return Err(Stopped::Refused(
             "this conversation's limit on returned files could not be checked, so none of the returned files was kept; try again".into(),
@@ -295,7 +404,7 @@ async fn register_all(
                 &f.mime_type,
                 &f.name,
                 f.size_bytes,
-                super::ATTACHMENT_RUN_PYTHON_TOOL_NAME,
+                tool,
             ),
         )
         .await;
@@ -335,6 +444,8 @@ struct Finished {
 
 /// [`dispatch`] with the ticker's interval and the call's budget given, so a test
 /// can run it in seconds.
+// The ticker interval and the call budget are separate so a test can run it in seconds.
+#[allow(clippy::too_many_arguments)]
 async fn dispatch_bounded(
     executor: &crate::dag_engine::infrastructure::dag_tool_executor::DagToolExecutor,
     call_id: &str,
@@ -343,7 +454,14 @@ async fn dispatch_bounded(
     target: LargeTarget,
     every: std::time::Duration,
     budget: std::time::Duration,
+    accept_output: bool,
 ) -> ToolResult {
+    // The files this call returns carry the name of the tool the model called, and
+    // that tool's quota counts them.
+    let tool = match accept_output {
+        true => super::super::data_run_python::TOOL_DATA_RUN_PYTHON,
+        false => super::ATTACHMENT_RUN_PYTHON_TOOL_NAME,
+    };
     use crate::dag_engine::domain::observer::ToolProgressStage;
     use crate::dag_engine::infrastructure::dag_tool_executor::ProgressTick;
     let started = std::time::Instant::now();
@@ -364,15 +482,11 @@ async fn dispatch_bounded(
         // A conversation already at its limit is known before the code runs: the call
         // still runs, its files are not stored (nothing is uploaded to be deleted) and
         // the answer says so. A usage that cannot be read here is left to `keep_outputs`.
-        let keep_files = match tokio::time::timeout(
-            REGISTRY_STEP,
-            executor.generated_usage(super::ATTACHMENT_RUN_PYTHON_TOOL_NAME),
-        )
-        .await
-        {
-            Ok(Some((files, bytes))) => files < SESSION_MAX_FILES && bytes < SESSION_MAX_BYTES,
-            _ => true,
-        };
+        let keep_files =
+            match tokio::time::timeout(REGISTRY_STEP, executor.generated_usage(tool)).await {
+                Ok(Some((files, bytes))) => files < SESSION_MAX_FILES && bytes < SESSION_MAX_BYTES,
+                _ => true,
+            };
         let out = target
             .runtime
             .run(LargeRunRequest {
@@ -386,6 +500,7 @@ async fn dispatch_bounded(
                 agent_session_id: target.agent_session_id,
                 phase: phase.clone(),
                 keep_files,
+                accept_output,
             })
             .await?;
         let crate::tabular_run::runtime::LargeRunOutput {
@@ -398,7 +513,7 @@ async fn dispatch_bounded(
             guard,
         } = out;
         let ledger = guard.into_ledger(executor.registry_handle());
-        let keeping = keep_outputs(executor, &emitted, ledger).await;
+        let keeping = keep_outputs(executor, tool, &emitted, ledger).await;
         Ok(Finished {
             stdout,
             result,
@@ -598,6 +713,38 @@ mod tests {
         }
     }
 
+    /// Defence in depth below the agent loop: the executor serves the large path per
+    /// tool, so a call that reaches it by another route, naming a tool the node does not
+    /// offer, is not run. The sandbox runs for the tool the node serves and for no other.
+    #[tokio::test]
+    async fn the_large_path_runs_only_for_the_tool_the_node_serves() {
+        use crate::llm::domain::large_tabular::LargeServed;
+        let p = prepared(&[("sales", 1)], 4).await;
+        let drp_args = json!({
+            "bindings": [{"var": "big", "attachment_id": "doc-1"}], "code": "output = 1"
+        });
+        // Only data_run_python is served: attachment_run_python is not run.
+        let exec = Recorder::ok(json!({"ran": true}));
+        let ex = executor(true, Some(Arc::new(runtime(&p, exec.clone(), true))))
+            .with_large_served(LargeServed::decide(true, true, false, true));
+        let out = body(&ex, r#"{"attachment_id":"doc-1","code":"result = 1"}"#).await;
+        assert_eq!(exec.calls(), 0, "{out}");
+        assert!(super::dispatch_from_data_run_python(&ex, "c", &drp_args)
+            .await
+            .is_some());
+        assert_eq!(exec.calls(), 1);
+        // Only attachment_run_python is served: data_run_python is left to its own path.
+        let exec = Recorder::ok(json!({"ran": true}));
+        let ex = executor(true, Some(Arc::new(runtime(&p, exec.clone(), true))))
+            .with_large_served(LargeServed::decide(true, true, true, false));
+        assert!(super::dispatch_from_data_run_python(&ex, "c", &drp_args)
+            .await
+            .is_none());
+        assert_eq!(exec.calls(), 0);
+        let out = body(&ex, r#"{"attachment_id":"doc-1","code":"result = 1"}"#).await;
+        assert_eq!(out["result"]["ran"], true, "{out}");
+    }
+
     #[tokio::test]
     async fn a_host_owned_file_runs_over_its_tables_and_answers_with_them() {
         let p = prepared(&[("sales", 2), ("stores", 1)], 4).await;
@@ -735,7 +882,12 @@ mod tests {
         let events = Arc::new(Events::default());
         let ex = executor(true, Some(Arc::new(runtime(p, exec, true))))
             .with_observer(Some(events.clone()));
-        let target = ex.large_target("doc-1").expect("routed");
+        let target = ex
+            .large_target_for(
+                crate::llm::domain::large_tabular::LargeTool::AttachmentRunPython,
+                "doc-1",
+            )
+            .expect("routed");
         (ex, target, events)
     }
 
@@ -759,6 +911,7 @@ mod tests {
             target,
             std::time::Duration::from_secs(1),
             std::time::Duration::from_secs(60),
+            false,
         )
         .await;
         assert!(result.output.contains("\"result\":1"), "{}", result.output);
@@ -794,6 +947,7 @@ mod tests {
             target,
             std::time::Duration::from_secs(1),
             std::time::Duration::from_secs(2),
+            false,
         )
         .await;
         let out: Value = serde_json::from_str(&result.output).unwrap();
@@ -1084,6 +1238,7 @@ mod tests {
             target,
             std::time::Duration::from_secs(1),
             std::time::Duration::from_secs(2),
+            false,
         )
         .await;
         let out: Value = serde_json::from_str(&result.output).unwrap();
@@ -1580,7 +1735,12 @@ mod tests {
         let book = Book::default();
         let faulty = Faulty::over(&book, &p, Fault::UpsertCommitsThenHangs(1));
         let ex = with_faulty(faulty, &p, exec);
-        let target = ex.large_target("doc-1").expect("routed");
+        let target = ex
+            .large_target_for(
+                crate::llm::domain::large_tabular::LargeTool::AttachmentRunPython,
+                "doc-1",
+            )
+            .expect("routed");
         let result = super::dispatch_bounded(
             &ex,
             "c1",
@@ -1589,6 +1749,7 @@ mod tests {
             target,
             std::time::Duration::from_secs(1),
             std::time::Duration::from_millis(120),
+            false,
         )
         .await;
         assert!(
