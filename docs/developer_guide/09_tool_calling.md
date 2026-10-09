@@ -377,3 +377,30 @@ Cuando el LLM decide usar una herramienta ofrecida, `DagToolExecutor`:
 6. Si `secure: true`, llama `hash_output()` — el LLM recibe placeholders, nunca valores reales.
 7. Devuelve el resultado (seguro) al LLM.
 
+
+## Synthetic tools obey `enabled_tools` like every other tool
+
+`sql_inspect_attachment`, `sql_bulk_insert_from_attachment`, `attachment_run_python`
+and `data_run_python` are added to the model's tool list after the catalog filter. What
+makes each of them available has not changed; the one rule added on top is the filter's
+exclusion (`synthetic_tool_offered` in `nodes/llm.rs`):
+
+| Tool | Available when (unchanged) | `!name` in `enabled_tools` |
+|---|---|---|
+| `sql_inspect_attachment`, `sql_bulk_insert_from_attachment`, `attachment_run_python` | declared in `tool_configurations` (naming it, an alias or `"*"` never offers it) | removes it, even when declared |
+| `data_run_python` | declared in `tool_configurations`, or named in `enabled_tools` (directly, as `"*"`, or through the `gsheets` alias) | removes it, even when declared |
+
+`!*` and `!<alias>` remove `data_run_python` (as they always did) but NEVER remove the three
+declaration-only tools: for those only their own spelled-out `!name` counts, as it does not
+for the catalog filter, where `!*` matches nothing. Under lazy tool loading a tool excluded by
+name is also left out of the lazy catalog and cannot be described.
+
+An allow-list that does not list a declared tool does not remove it: `tool_configurations`
+auto-enables and `enabled_tools` only adds. The run's `inputs.enabled_tools` REPLACES the
+node's `config.enabled_tools`; the two are never merged. Before this rule an owner's `!name`
+was ignored for the first three tools.
+
+Known pre-existing limitation: `DagToolExecutor::execute` does not check that the tool was
+offered; the agent loop does (`agent_service::dispatch_call`), the resume path
+(`execute_with_resume_answer`) does not, and neither Python tool can suspend. A new caller of
+the executor must check offering itself.
