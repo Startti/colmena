@@ -308,6 +308,14 @@ result or a refusal. Nothing above the trait knows how the tables get there.
   be measured here, so `RemoteExecutor` implements the trait by refusing with `Unavailable(Unsupported)` rather than guessing
   at a wire. The in-process executor has no run mounts and does not implement the trait.
 
+The proofs are in `tests/tabular_run_mounts.rs` (Linux, root and `CAP_SYS_ADMIN`, enabled with
+`COLMENA_PYEXEC_JAIL_TESTS=1` like the other jail suites; each test prints a skip line otherwise): the code lists and reads
+the staged parts at `/data` and cannot write there; pandas reads a staged Parquet part in `restricted` mode with pyarrow
+loaded by the template (the part is made with python3 and pyarrow, and the test skips without them); an executor without a
+staging root refuses and reads nothing from storage; a call over the data limit is refused, its volume is given back and no
+call directory is left; a full budget of volumes in flight is refused and stages nothing; the code's own failure comes back as
+a Python error.
+
 ### Startup self-test (Linux)
 
 Before it binds its socket, the template forks a throwaway child that enters the jail as slot 9999 (uid
