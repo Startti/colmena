@@ -116,6 +116,20 @@ impl PreparedTables {
     }
 }
 
+/// A refusal of a prepared copy that does not match its record, with the check that
+/// failed logged at WARN. The model only ever reads the one fixed sentence; the operator
+/// needs to know which check it was. The label is a fixed string: no key, name or value
+/// of the row or the manifest is ever written.
+fn invalid(kind: Invalid, check: &'static str) -> RunRefusal {
+    tracing::warn!(
+        target: "colmena::tabular_run",
+        event = "verify.rejected",
+        check,
+        "the prepared copy does not match its registry record"
+    );
+    RunRefusal::Invalid(kind)
+}
+
 /// The registry's answer for `source_key`, judged: a ready row of this source
 /// in this layout, or why not. Pure: no I/O.
 pub fn judge_row(row: Option<PreparedRow>, source_key: &str) -> Result<PreparedRow, RunRefusal> {
@@ -130,13 +144,16 @@ pub fn judge_row(row: Option<PreparedRow>, source_key: &str) -> Result<PreparedR
             final_failure: row.attempts >= MAX_ATTEMPTS,
         }),
         PrepareStatus::Ready => {
-            let ours = row.source_storage_key == source_key;
-            let current = row.format_version == FORMAT_VERSION;
-            if ours && current && row.manifest_key.is_some() {
-                Ok(row)
-            } else {
-                Err(RunRefusal::Invalid(Invalid::Record))
+            if row.source_storage_key != source_key {
+                return Err(invalid(Invalid::Record, "row_is_not_this_source"));
             }
+            if row.format_version != FORMAT_VERSION {
+                return Err(invalid(Invalid::Record, "row_format_version_differs"));
+            }
+            if row.manifest_key.is_none() {
+                return Err(invalid(Invalid::Record, "row_has_no_manifest_key"));
+            }
+            Ok(row)
         }
     }
 }
@@ -224,17 +241,26 @@ pub async fn verify_prepared(
         .map_err(|_| RunRefusal::Unavailable(Unavailable::Registry))?;
     let row = judge_row(row, source_key)?;
 
+    // The same root the preparation and the cleanup use: a trailing `/` is not part of it
+    // (an adapter may report it with one), or `{root}/{path}` would never be the key the
+    // preparation recorded.
     let root = storage
         .derived_root(source_key)
-        .ok_or(RunRefusal::Invalid(Invalid::NoRoot))?;
+        .map(|r| r.trim_end_matches('/').to_string())
+        .filter(|r| !r.is_empty())
+        .ok_or_else(|| invalid(Invalid::NoRoot, "no_derived_root"))?;
     let manifest_key = format!("{root}/{MANIFEST_PATH}");
-    if row.manifest_key.as_deref() != Some(manifest_key.as_str())
-        || !row.blob_keys.contains(&manifest_key)
-    {
-        return Err(RunRefusal::Invalid(Invalid::Record));
+    if row.manifest_key.as_deref() != Some(manifest_key.as_str()) {
+        return Err(invalid(
+            Invalid::Record,
+            "row_manifest_key_is_not_under_the_derived_root",
+        ));
+    }
+    if !row.blob_keys.contains(&manifest_key) {
+        return Err(invalid(Invalid::Record, "row_does_not_track_its_manifest"));
     }
     let prepared_bytes = u64::try_from(row.prepared_bytes.unwrap_or(-1))
-        .map_err(|_| RunRefusal::Invalid(Invalid::Record))?;
+        .map_err(|_| invalid(Invalid::Record, "row_has_no_prepared_bytes"))?;
     // The call's data limit is applied at staging, to the tables actually chosen
     // and on the sizes their parts declare: a whole-copy cap here would refuse a
     // file whose chosen tables fit.
@@ -248,11 +274,11 @@ pub async fn verify_prepared(
         MANIFEST_READ_MAX,
     )
     .await?;
-    let manifest =
-        Manifest::from_json(&bytes).map_err(|_| RunRefusal::Invalid(Invalid::Manifest))?;
+    let manifest = Manifest::from_json(&bytes)
+        .map_err(|_| invalid(Invalid::Manifest, "manifest_unparsable"))?;
     // The registry and the storage must tell the same story.
     if !same_table_list(&manifest, row.tables_json.as_deref()) {
-        return Err(RunRefusal::Invalid(Invalid::Manifest));
+        return Err(invalid(Invalid::Manifest, "table_list_differs"));
     }
     let tracked: HashSet<&str> = row.blob_keys.iter().map(String::as_str).collect();
     let generation = generation_of(&row);
@@ -267,7 +293,7 @@ pub async fn verify_prepared(
     for (t, table) in plan.manifest.tables.iter().enumerate() {
         for p in 0..table.parts as usize {
             if !tracked.contains(plan.part_key(t, p)?.as_str()) {
-                return Err(RunRefusal::Invalid(Invalid::Parts));
+                return Err(invalid(Invalid::Parts, "part_not_tracked"));
             }
         }
     }
@@ -431,6 +457,97 @@ mod tests {
             .unwrap_err();
         assert_eq!(err, RunRefusal::Invalid(Invalid::Record));
         assert!(p.storage.reads.lock().unwrap().is_empty());
+    }
+
+    /// An adapter may report the derived root with a trailing `/` (the ADP worker did): the
+    /// preparation and the cleanup ignore it, so verification must too, or `{root}/{path}`
+    /// is never the key the preparation recorded and every copy reads as "does not match".
+    #[tokio::test]
+    async fn a_derived_root_reported_with_a_trailing_slash_verifies_the_same_copy() {
+        let p = prepared(&[("sales", 2)], 10).await;
+        let with_slash = FakeStorage::new();
+        *with_slash.objects.lock().unwrap() = p.storage.objects.lock().unwrap().clone();
+        let storage = std::sync::Arc::new(FakeStorage {
+            root: Some(format!("{ROOT}/")),
+            ..std::sync::Arc::try_unwrap(with_slash).ok().unwrap()
+        });
+        let plan = verify_prepared(&*p.registry, &*storage, SOURCE)
+            .await
+            .unwrap();
+        assert_eq!(
+            plan.part_key(0, 1).unwrap(),
+            format!("{ROOT}/t0/part-00001.parquet")
+        );
+        for bare in ["", "/", "//"] {
+            let storage = std::sync::Arc::new(FakeStorage {
+                root: Some(bare.to_string()),
+                ..std::sync::Arc::try_unwrap(FakeStorage::new()).ok().unwrap()
+            });
+            assert_eq!(
+                verify_prepared(&*p.registry, &*storage, SOURCE)
+                    .await
+                    .unwrap_err(),
+                RunRefusal::Invalid(Invalid::NoRoot),
+                "{bare:?} is no root"
+            );
+        }
+    }
+
+    /// The model reads one fixed sentence; the operator gets the check that failed, at WARN,
+    /// and never a key or a value.
+    #[tokio::test]
+    async fn a_rejected_copy_logs_which_check_failed_without_any_key() {
+        let p = prepared_with(&[("sales", 1)], 10, FORMAT_VERSION, |info| {
+            info.manifest_key = "chat-attachments/u9/s9/prepared/doc-9/manifest.json".into();
+            info.blob_keys.push(info.manifest_key.clone());
+        })
+        .await;
+        let buf = LogBuf::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(buf.clone())
+            .with_max_level(tracing::Level::WARN)
+            .with_ansi(false)
+            .finish();
+        let err = {
+            let _guard = tracing::subscriber::set_default(subscriber);
+            verify_prepared(&*p.registry, &*p.storage, SOURCE)
+                .await
+                .unwrap_err()
+        };
+        assert_eq!(err, RunRefusal::Invalid(Invalid::Record));
+        let logged = buf.text();
+        assert!(logged.contains("WARN"), "{logged}");
+        assert!(
+            logged.contains("row_manifest_key_is_not_under_the_derived_root"),
+            "{logged}"
+        );
+        assert!(
+            !logged.contains("doc-9") && !logged.contains("chat-attachments"),
+            "{logged}"
+        );
+    }
+
+    #[derive(Clone, Default)]
+    struct LogBuf(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+    impl LogBuf {
+        fn text(&self) -> String {
+            String::from_utf8_lossy(&self.0.lock().unwrap()).into_owned()
+        }
+    }
+    impl std::io::Write for LogBuf {
+        fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(b);
+            Ok(b.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LogBuf {
+        type Writer = LogBuf;
+        fn make_writer(&'a self) -> LogBuf {
+            self.clone()
+        }
     }
 
     /// The data limit is not applied to the whole copy here: a file whose chosen
