@@ -8,6 +8,7 @@
 //! before any part is opened.
 
 use super::refusal::{FailureReason, Invalid, RunRefusal, Unavailable};
+use super::wire::IDLE_TIMEOUT;
 use crate::storage::domain::OutputStorageRepository;
 use crate::tabular_prepare::manifest::{
     part_path, Manifest, TableInfo, MANIFEST_MAX_BYTES, MANIFEST_PATH,
@@ -23,6 +24,9 @@ use std::collections::HashSet;
 /// budget bounds the output side separately.
 pub const DATA_MAX_BYTES: u64 = 1024 * 1024 * 1024;
 
+/// The whole read of a manifest (128 KiB at most) may take this long.
+const MANIFEST_READ_MAX: std::time::Duration = std::time::Duration::from_secs(30);
+
 /// A prepared copy the registry vouched for. Holds no data: only the verified
 /// manifest and where the parts live.
 #[derive(Debug, Clone)]
@@ -31,9 +35,20 @@ pub struct PreparedTables {
     manifest_key: String,
     manifest: Manifest,
     prepared_bytes: u64,
+    /// What identifies the generation of the prepared copy the registry vouched
+    /// for (see [`PreparedTables::generation`]).
+    generation: String,
 }
 
 impl PreparedTables {
+    /// The generation of the copy that was verified: the registry row's identity
+    /// (manifest key, layout version, attempts, last write and recorded size). A
+    /// re-preparation of the same source writes the row again, so a different value
+    /// later means the parts staged may belong to another generation than the manifest.
+    pub fn generation(&self) -> &str {
+        &self.generation
+    }
+
     pub fn manifest(&self) -> &Manifest {
         &self.manifest
     }
@@ -117,16 +132,26 @@ async fn read_capped(
     key: &str,
     cap: usize,
     too_big: RunRefusal,
+    idle: std::time::Duration,
+    total: std::time::Duration,
 ) -> Result<Vec<u8>, RunRefusal> {
-    let mut stream = storage
-        .read_stream(key)
+    // Every wait is bounded: a manifest is small, so the whole read has one short
+    // deadline and each chunk the idle limit; a stalled storage holds nothing.
+    let deadline = tokio::time::Instant::now() + total;
+    let wait = || idle.min(deadline.saturating_duration_since(tokio::time::Instant::now()));
+    let mut stream = tokio::time::timeout(wait(), storage.read_stream(key))
         .await
+        .map_err(|_| RunRefusal::Storage)?
         .map_err(|_| RunRefusal::Storage)?;
     if stream.size_bytes > cap as u64 {
         return Err(too_big);
     }
     let mut out = Vec::with_capacity((stream.size_bytes as usize).min(cap));
-    while let Some(chunk) = stream.stream.next().await {
+    loop {
+        let next = tokio::time::timeout(wait(), stream.stream.next())
+            .await
+            .map_err(|_| RunRefusal::Storage)?;
+        let Some(chunk) = next else { break };
         let chunk = chunk.map_err(|_| RunRefusal::Storage)?;
         if out.len() + chunk.len() > cap {
             return Err(too_big);
@@ -140,6 +165,31 @@ async fn read_capped(
 /// serialised, or a row without one, is a mismatch, never a match.
 fn same_table_list(manifest: &Manifest, recorded: Option<&str>) -> bool {
     matches!((manifest.tables_json(), recorded), (Ok(ours), Some(theirs)) if ours == theirs)
+}
+
+/// The identity of a ready row's generation, from fields a re-preparation rewrites.
+pub fn generation_of(row: &PreparedRow) -> String {
+    format!(
+        "{}|{}|{}|{}|{:?}",
+        row.manifest_key.as_deref().unwrap_or(""),
+        row.format_version,
+        row.attempts,
+        row.updated_at.timestamp_micros(),
+        row.prepared_bytes,
+    )
+}
+
+/// Whether the registry still holds the copy that was verified: the same row, ready,
+/// of the same generation. A read error is "cannot say" (`None`), not "changed".
+pub async fn still_current(
+    registry: &dyn PreparationRegistry,
+    source_key: &str,
+    generation: &str,
+) -> Option<bool> {
+    let row = registry.get(source_key).await.ok()?;
+    Some(
+        matches!(&row, Some(r) if r.status == PrepareStatus::Ready && generation_of(r) == generation),
+    )
 }
 
 /// Verifies the prepared copy of `source_key` through the registry, then reads
@@ -177,6 +227,8 @@ pub async fn verify_prepared(
         &manifest_key,
         MANIFEST_MAX_BYTES,
         RunRefusal::Invalid(Invalid::Manifest),
+        IDLE_TIMEOUT,
+        MANIFEST_READ_MAX,
     )
     .await?;
     let manifest =
@@ -186,11 +238,13 @@ pub async fn verify_prepared(
         return Err(RunRefusal::Invalid(Invalid::Manifest));
     }
     let tracked: HashSet<&str> = row.blob_keys.iter().map(String::as_str).collect();
+    let generation = generation_of(&row);
     let plan = PreparedTables {
         root,
         manifest_key,
         manifest,
         prepared_bytes,
+        generation,
     };
     for (t, table) in plan.manifest.tables.iter().enumerate() {
         for p in 0..table.parts as usize {
@@ -485,6 +539,7 @@ mod tests {
             manifest_key: format!("{ROOT}/manifest.json"),
             manifest: Manifest::new(tables),
             prepared_bytes: 7,
+            generation: String::new(),
         }
     }
 
@@ -530,5 +585,84 @@ mod tests {
     #[test]
     fn the_data_limit_is_one_gibibyte() {
         assert_eq!(DATA_MAX_BYTES, 1_073_741_824);
+    }
+
+    /// A manifest that stalls, or trickles, ends with a retryable storage failure
+    /// inside its limits instead of holding the call.
+    #[tokio::test]
+    async fn a_manifest_that_stalls_or_trickles_is_cut_off() {
+        use crate::storage::domain::StoredStream;
+        use futures::StreamExt;
+        let p = prepared(&[("sales", 1)], 4).await;
+        let key = format!("{ROOT}/manifest.json");
+        let too_big = || RunRefusal::Invalid(Invalid::Manifest);
+        p.storage.serve(&key, || StoredStream {
+            stream: Box::pin(
+                futures::stream::iter(vec![Ok(bytes::Bytes::from_static(b"{"))])
+                    .chain(futures::stream::pending()),
+            ),
+            size_bytes: 100,
+            mime_type: "x".into(),
+            filename: "m".into(),
+        });
+        let started = std::time::Instant::now();
+        let got = read_capped(
+            &*p.storage,
+            &key,
+            1024,
+            too_big(),
+            std::time::Duration::from_millis(100),
+            std::time::Duration::from_secs(5),
+        )
+        .await;
+        assert_eq!(got.unwrap_err(), RunRefusal::Storage);
+        assert!(started.elapsed() < std::time::Duration::from_secs(3));
+        p.storage.serve(&key, || StoredStream {
+            stream: Box::pin(futures::stream::unfold(0, |n| async move {
+                tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+                Some((Ok(bytes::Bytes::from_static(b" ")), n + 1))
+            })),
+            size_bytes: 1000,
+            mime_type: "x".into(),
+            filename: "m".into(),
+        });
+        let started = std::time::Instant::now();
+        let got = read_capped(
+            &*p.storage,
+            &key,
+            1024,
+            too_big(),
+            std::time::Duration::from_millis(500),
+            std::time::Duration::from_millis(300),
+        )
+        .await;
+        assert_eq!(
+            got.unwrap_err(),
+            RunRefusal::Storage,
+            "the deadline, not the idle limit"
+        );
+        assert!(started.elapsed() < std::time::Duration::from_secs(3));
+    }
+
+    /// The generation changes when the row is written again, and not otherwise.
+    #[tokio::test]
+    async fn the_generation_of_a_copy_changes_when_it_is_prepared_again() {
+        let p = prepared(&[("sales", 1)], 4).await;
+        let first = verify_prepared(&*p.registry, &*p.storage, SOURCE)
+            .await
+            .unwrap();
+        let again = verify_prepared(&*p.registry, &*p.storage, SOURCE)
+            .await
+            .unwrap();
+        assert_eq!(first.generation(), again.generation());
+        assert_eq!(
+            still_current(&*p.registry, SOURCE, first.generation()).await,
+            Some(true)
+        );
+        p.registry.delete(SOURCE).await.unwrap();
+        assert_eq!(
+            still_current(&*p.registry, SOURCE, first.generation()).await,
+            Some(false)
+        );
     }
 }

@@ -355,11 +355,11 @@ mod tests {
             .unwrap()
         };
         assert_eq!(est("['id']"), 2 * 8000);
-        assert_eq!(est("['paid']"), 2 * 125 * 8);
+        assert_eq!(est("['paid']"), 2 * 125 * 16);
         assert_eq!(est("['day']"), 2 * 4000 * 2);
         // A string adds the Python object header for every row: 57 * 1000.
         assert_eq!(est("['note']"), 2 * (20_000 + 57 * 1000));
-        assert_eq!(est("['id', 'paid']"), 2 * (8000 + 1000));
+        assert_eq!(est("['id', 'paid']"), 2 * (8000 + 125 * 16));
     }
 
     /// Over the limit nothing is read: the data directory does not exist, so an
@@ -448,7 +448,16 @@ mod tests {
     fn emit_table_refuses_a_bad_format_name_or_count_before_touching_anything() {
         let msg = emit_failure("emit_table(None, 'a', 'xlsx')");
         assert!(msg.contains("'csv' or 'parquet'"), "{msg}");
-        for bad in ["", "a b", "../x", "x.csv", "é", &"n".repeat(49)] {
+        for bad in [
+            "",
+            "a b",
+            "../x",
+            "x.csv",
+            "é",
+            "a\n",
+            "ok\n",
+            &"n".repeat(49),
+        ] {
             let msg = emit_failure(&format!("emit_table(None, {bad:?})"));
             assert!(msg.contains("1 to 48 letters"), "{bad:?}: {msg}");
         }
@@ -458,6 +467,18 @@ mod tests {
             "_ct_emitted.append({'name': 'a.csv', 'size': 0})\n    emit_table(None, 'a')",
         );
         assert!(msg.contains("already written"), "{msg}");
+    }
+
+    /// `in` follows the same case rule as `tables[name]`.
+    #[test]
+    fn membership_follows_the_same_case_rule_as_lookup() {
+        let out = run(
+            "output = ['sales' in tables, 'STORES' in tables, 'Sales' in tables, 'nope' in tables]",
+            inputs(),
+        )
+        .unwrap();
+        assert_eq!(out, serde_json::json!([true, true, true, false]));
+        assert!(run("output = tables['STORES'].name", inputs()).is_ok());
     }
 
     #[test]
@@ -706,5 +727,84 @@ mod reads {
         );
         let without = python(&wrap_large_code("result = 7"), "restricted", &inputs).unwrap();
         assert_eq!(without, 7);
+    }
+
+    /// Dates are datetime64 (not Python objects) and nullable booleans stay
+    /// booleans, whatever the part holds: the factors of the estimate are what
+    /// the frame is.
+    #[test]
+    fn reads_return_dates_as_datetime64_and_nullable_booleans_as_boolean() {
+        let dir = tempfile::tempdir().unwrap();
+        let Some(mut inputs) = staged(dir.path()) else {
+            return;
+        };
+        inputs.insert("_dir2".into(), Value::from(dir.path().to_str().unwrap()));
+        let make = "import datetime, pandas as pd\npd.DataFrame({'d': [datetime.date(2024, 1, 2), None], 'b': pd.array([True, None], dtype='boolean'), 'a': [1, 2]}).to_parquet(_dir2 + '/t0/part-00000.parquet')\noutput = 1";
+        python(make, "none", &inputs).unwrap();
+        inputs.insert(
+            "_ct_tables".into(),
+            serde_json::json!([{"name": "t", "index": 0, "rows": 2, "parts": 1, "columns": [
+                {"name": "d", "type": "date", "in_memory_bytes": 8},
+                {"name": "b", "type": "bool", "in_memory_bytes": 1},
+                {"name": "a", "type": "int", "in_memory_bytes": 16}]}]),
+        );
+        let out = run("f = tables['t'].read(columns=['d', 'b'])\noutput = [str(f['d'].dtype), str(f['b'].dtype)]", &inputs);
+        assert_eq!(out, serde_json::json!(["datetime64[ns]", "boolean"]));
+    }
+
+    /// `head` decodes one batch of the rows asked for, never the part: the reader
+    /// is wrapped to see what it is asked.
+    #[test]
+    fn head_reads_one_batch_of_n_rows_not_the_part() {
+        let dir = tempfile::tempdir().unwrap();
+        let Some(inputs) = staged(dir.path()) else {
+            return;
+        };
+        let out = run(
+            "_orig = _ct_pyarrow\ncalls = []\ndef _ct_pyarrow():\n    pd, pa, pq = _orig()\n    class PF:\n        def __init__(self, path):\n            self._pf = pq.ParquetFile(path)\n        def iter_batches(self, **kw):\n            calls.append(kw['batch_size'])\n            return self._pf.iter_batches(**kw)\n    class PQ:\n        ParquetFile = PF\n        def read_table(self, *a, **k):\n            calls.append('read_table')\n            return pq.read_table(*a, **k)\n    return pd, pa, PQ\nrows = len(tables['t'].head(3, columns=['a']))\noutput = [rows, calls]",
+            &inputs,
+        );
+        assert_eq!(out, serde_json::json!([3, [3]]));
+    }
+
+    /// `parts` with no columns is estimated too: a part too wide to load whole is
+    /// refused with the way out, before anything is read.
+    #[test]
+    fn parts_without_columns_is_estimated_and_refused_when_too_wide() {
+        let dir = tempfile::tempdir().unwrap();
+        let Some(mut inputs) = staged(dir.path()) else {
+            return;
+        };
+        inputs.insert("_ct_read_max".into(), Value::from(100));
+        let out = python(
+            &format!("{PRELUDE}\ntry:\n    next(tables['t'].parts())\nexcept LargeTableError as e:\n    output = str(e)"),
+            "restricted",
+            &inputs,
+        )
+        .unwrap();
+        let text = out.as_str().unwrap();
+        assert!(
+            text.contains("one part of `t` is too large") && text.contains("parts(columns=[...])"),
+            "{text}"
+        );
+    }
+
+    /// A size that cannot be read is not a limit that is met.
+    #[test]
+    fn a_file_whose_size_cannot_be_checked_is_not_returned() {
+        let out = tempfile::tempdir().unwrap();
+        let Some(inputs) = emitting(out.path()) else {
+            return;
+        };
+        let msg = python(
+            &format!("{PRELUDE}\ntry:\n    _ct_file_size('/nonexistent-colmena/x.csv')\nexcept LargeTableError as e:\n    output = str(e)"),
+            "restricted",
+            &inputs,
+        )
+        .unwrap();
+        assert!(
+            msg.as_str().unwrap().contains("could not check the size"),
+            "{msg}"
+        );
     }
 }

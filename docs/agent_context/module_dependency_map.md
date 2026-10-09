@@ -6,7 +6,7 @@
 **How to use (for the exploration/spec phase):** before opening files to assess a change, look up the target file below. **Used by** is its blast radius — the files that break if you change its public surface. **Depends on** is what it needs. Start by reading only those, not the whole repo.
 
 - Files indexed: **479**
-- Modules with at least one importer: **236**
+- Modules with at least one importer: **237**
 
 ## Blast-radius ranking (change these with the most care)
 
@@ -940,7 +940,7 @@
 
 #### `src/libs/colmena/src/dag_engine/infrastructure/python_exec/config.rs`
 - Module: `dag_engine::infrastructure::python_exec::config`
-- **Used by (0)**: — (leaf / entrypoint / not imported intra-crate)
+- **Used by (1)**: `src/libs/colmena/src/tabular_run/remote_seam.rs`
 - Depends on (1): `dag_engine::domain::python_executor`
 
 #### `src/libs/colmena/src/dag_engine/infrastructure/python_exec/frame.rs`
@@ -2364,7 +2364,7 @@
 #### `src/libs/colmena/src/tabular_run/remote_seam.rs`
 - Module: `tabular_run::remote_seam`
 - **Used by (0)**: — (leaf / entrypoint / not imported intra-crate)
-- Depends on (3): `dag_engine::domain::python_executor`, `dag_engine::infrastructure::python_exec::remote`, `tabular_prepare::manifest`
+- Depends on (4): `dag_engine::domain::python_executor`, `dag_engine::infrastructure::python_exec::config`, `dag_engine::infrastructure::python_exec::remote`, `tabular_prepare::manifest`
 
 #### `src/libs/colmena/src/tabular_run/runtime.rs`
 - Module: `tabular_run::runtime`

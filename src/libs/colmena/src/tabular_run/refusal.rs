@@ -83,8 +83,9 @@ pub enum Invalid {
     NoRoot,
     /// The manifest does not parse, or disagrees with the registry row.
     Manifest,
-    /// A part the manifest lists is not one the row tracks, or the bytes read
-    /// differ from what the row records.
+    /// A part the manifest lists is not one the row tracks, or a part sent more
+    /// bytes than it declared. (The row records no part sizes, so nothing compares
+    /// the bytes read with it: see `CopyChanged` for the re-check that exists.)
     Parts,
 }
 
@@ -122,6 +123,9 @@ pub enum RunRefusal {
     },
     /// The cleanup pass is removing the prepared copy.
     BeingRemoved,
+    /// The file was prepared again, or its copy removed, while the call ran: what
+    /// the code saw may mix two generations, so its answer is not given.
+    CopyChanged,
     /// The host's trigger refused to request a preparation: a file that will
     /// never be prepared (terminal, not a transient failure).
     NeverPrepared,
@@ -143,6 +147,7 @@ impl RunRefusal {
         match self {
             Self::NotEnabled => "large_tabular_disabled",
             Self::NotPrepared | Self::StillPreparing { .. } => "large_tabular_not_ready",
+            Self::CopyChanged => "large_tabular_not_ready",
             Self::PreparationFailed { .. } | Self::BeingRemoved | Self::NeverPrepared => {
                 "large_tabular_failed"
             }
@@ -164,7 +169,9 @@ impl RunRefusal {
             | Self::NeverPrepared
             | Self::NoSuchTable { .. }
             | Self::SessionQuota => false,
-            Self::NotPrepared | Self::StillPreparing { .. } | Self::Storage => true,
+            Self::NotPrepared | Self::StillPreparing { .. } | Self::Storage | Self::CopyChanged => {
+                true
+            }
             Self::PreparationFailed { final_failure, .. } => !final_failure,
             // The cleanup is removing the copy; it will not come back by itself.
             Self::BeingRemoved => false,
@@ -208,6 +215,10 @@ impl RunRefusal {
                     reason.text()
                 )
             }
+            Self::CopyChanged => format!(
+                "the prepared copy of this file changed while the call was running, so its answer is not given; \
+                 retry. {NOT_LOADED}"
+            ),
             Self::NeverPrepared => format!(
                 "this file cannot be prepared for analysis and will not be retried, so it cannot be \
                  analysed here. {NOT_LOADED}"
@@ -301,6 +312,7 @@ mod tests {
             RunRefusal::StillPreparing { percent: None },
             RunRefusal::StillPreparing { percent: Some(40) },
             RunRefusal::BeingRemoved,
+            RunRefusal::CopyChanged,
             RunRefusal::NeverPrepared,
             RunRefusal::OverBudget(Budget::Data {
                 limit_bytes: 1024 * MIB,

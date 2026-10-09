@@ -23,8 +23,8 @@ use super::mounted::{MountedCall, MountedError, MountedExecutor, MountedResult};
 use super::refusal::{Budget, Invalid, RunRefusal, Unavailable};
 use super::stage::Staged;
 use super::wire::{
-    end_frame, frame, CallHeader, Dropped, FileEntry, Reader, Refusal, ResponseHeader, RunStatus,
-    IDLE_TIMEOUT, TRANSFER_MAX, WIRE_V2,
+    end_frame, try_frame, CallHeader, Dropped, FileEntry, Reader, Refusal, ResponseHeader,
+    RunStatus, IDLE_TIMEOUT, MIN_BYTES_PER_SEC, RATE_GRACE, TRANSFER_MAX, WIRE_V2,
 };
 use crate::dag_engine::domain::python_executor::{
     PythonExecutor, PythonRunError, PythonRunRequest, PythonRunResult,
@@ -96,7 +96,8 @@ async fn produce(
         }
     };
     let gone = || RunRefusal::Unavailable(Unavailable::Executor);
-    if !send(frame(&header)).await {
+    let head_frame = try_frame(&header).map_err(|_| gone())?;
+    if !send(head_frame).await {
         return Err(gone());
     }
     let manifest = call
@@ -110,7 +111,7 @@ async fn produce(
         size: total,
     };
     let entry = serde_json::to_vec(&entry).map_err(|_| gone())?;
-    if !send(frame(&entry)).await || !send(Bytes::from(manifest)).await {
+    if !send(try_frame(&entry).map_err(|_| gone())?).await || !send(Bytes::from(manifest)).await {
         return Err(gone());
     }
     let deadline = tokio::time::Instant::now() + limits.total_time;
@@ -153,7 +154,7 @@ async fn produce(
                 size: declared,
             })
             .map_err(|_| gone())?;
-            if !send(frame(&entry)).await {
+            if !send(try_frame(&entry).map_err(|_| gone())?).await {
                 return Err(gone());
             }
             let mut sent = 0u64;
@@ -201,27 +202,31 @@ async fn produce(
 }
 
 /// Reads the kept outputs of a 200 response, each spooled and checked, and hands
-/// them to the sink. Returns the names handed on and what was dropped.
-async fn receive<S>(
+/// them to the sink ONLY after the response has ended correctly: a response that
+/// repeats a name (in any case), runs over a cap or carries extra bytes gives the
+/// sink nothing. Returns the names handed on.
+async fn receive<S, E>(
     reader: &mut Reader<S>,
     head: &ResponseHeader,
     call: &MountedCall<'_>,
 ) -> Result<Vec<String>, MountedError>
 where
-    S: futures::Stream<Item = Result<Bytes, reqwest::Error>> + Unpin,
+    S: futures::Stream<Item = Result<Bytes, E>> + Unpin,
 {
     let limits = CollectLimits::default();
     if head.files.len() > limits.max_files {
         return Err(unavailable());
     }
     let mut total = 0u64;
-    let mut emitted = vec![];
+    let mut names = std::collections::HashSet::new();
+    let mut spooled: Vec<OutFile> = vec![];
     for entry in &head.files {
         // A server that sends more than the collector would keep is not followed.
         let named = checked_name(entry.name.as_bytes());
         total = total.saturating_add(entry.size);
-        let Some((name, format)) =
-            named.filter(|_| entry.size <= limits.file_bytes && total <= limits.total_bytes)
+        let Some((name, format)) = named
+            .filter(|_| entry.size <= limits.file_bytes && total <= limits.total_bytes)
+            .filter(|(name, _)| names.insert(name.to_lowercase()))
         else {
             return Err(unavailable());
         };
@@ -236,13 +241,17 @@ where
         std_file
             .seek(SeekFrom::Start(0))
             .map_err(|_| unavailable())?;
-        if let Some(sink) = call.sink {
-            let out = OutFile::spooled(name.clone(), format, entry.size, std_file);
+        spooled.push(OutFile::spooled(name, format, entry.size, std_file));
+    }
+    reader.expect_end().await.map_err(|_| unavailable())?;
+    let mut emitted = vec![];
+    if let Some(sink) = call.sink {
+        for out in spooled {
+            let name = out.name.clone();
             sink.accept(out).await.map_err(refused)?;
             emitted.push(name);
         }
     }
-    reader.expect_end().await.map_err(|_| unavailable())?;
     Ok(emitted)
 }
 
@@ -277,6 +286,36 @@ fn dropped(list: &[Dropped]) -> Vec<Rejection> {
         .collect()
 }
 
+/// The most a small answer body (a refusal) is read: a server that sends more is
+/// not followed, and it is read within the idle limit.
+const SMALL_BODY_MAX: usize = 16 * 1024;
+
+/// A small response body, capped in size and in time; `None` when it is longer
+/// than the cap, stalls or fails (the status alone then decides).
+async fn small_body(mut resp: reqwest::Response) -> Option<Vec<u8>> {
+    let read = async {
+        let mut out = Vec::new();
+        while let Some(chunk) = resp.chunk().await.ok()? {
+            if out.len() + chunk.len() > SMALL_BODY_MAX {
+                return None;
+            }
+            out.extend_from_slice(&chunk);
+        }
+        Some(out)
+    };
+    tokio::time::timeout(IDLE_TIMEOUT, read)
+        .await
+        .ok()
+        .flatten()
+}
+
+/// What the whole call may take besides its code: the probe, the upload, the
+/// download and the waits between. The call's own clock (the tool's) is shorter or
+/// equal; this one guarantees the future ends even if nothing else does.
+fn call_limit(run: std::time::Duration) -> std::time::Duration {
+    IDLE_TIMEOUT + TRANSFER_MAX + run + IDLE_TIMEOUT + TRANSFER_MAX + IDLE_TIMEOUT
+}
+
 #[async_trait]
 impl MountedExecutor for RemoteExecutor {
     async fn run_with_mounts(
@@ -284,6 +323,38 @@ impl MountedExecutor for RemoteExecutor {
         req: PythonRunRequest,
         call: MountedCall<'_>,
     ) -> Result<MountedResult, MountedError> {
+        let run = req
+            .timeout
+            .unwrap_or(self.transport().2)
+            .min(self.transport().2);
+        tokio::time::timeout(call_limit(run), self.run_inner(req, call))
+            .await
+            .unwrap_or_else(|_| Err(unavailable()))
+    }
+}
+
+impl RemoteExecutor {
+    async fn run_inner(
+        &self,
+        req: PythonRunRequest,
+        call: MountedCall<'_>,
+    ) -> Result<MountedResult, MountedError> {
+        // The header must fit a frame: checked before anything else, so a call too
+        // large to send is the model's to shorten, not an executor that is "unavailable".
+        let sized = CallHeader {
+            v: WIRE_V2,
+            code: req.code.clone(),
+            mode: req.mode.clone(),
+            timeout_ms: 0,
+            inputs: req.inputs.clone(),
+            out_mb: call.out_mb,
+            probe: false,
+        };
+        if serde_json::to_vec(&sized).map_or(true, |j| try_frame(&j).is_err()) {
+            return Err(MountedError::Run(PythonRunError::Python(
+                "the code and its inputs are too large for a large-file call (over 1 MiB together); shorten the code".to_string(),
+            )));
+        }
         // Credentials and readiness are checked BEFORE any part is read from
         // storage: a server that refuses the caller answers while the body
         // is still unsent, and a refused upload can look like a dropped connection.
@@ -307,7 +378,9 @@ impl MountedExecutor for RemoteExecutor {
             out_mb: call.out_mb,
             probe: true,
         };
-        let mut body = frame(&serde_json::to_vec(&head).map_err(|_| unavailable())?).to_vec();
+        let mut body = try_frame(&serde_json::to_vec(&head).map_err(|_| unavailable())?)
+            .map_err(|_| unavailable())?
+            .to_vec();
         body.extend_from_slice(&end_frame());
         let probe = client
             .post(endpoint(base, "v2/run"))
@@ -318,10 +391,8 @@ impl MountedExecutor for RemoteExecutor {
         if probed.status().as_u16() != 204 {
             let status = probed.status().as_u16();
             let retry = probed.headers().contains_key(reqwest::header::RETRY_AFTER);
-            let body = probed
-                .bytes()
+            let body = small_body(probed)
                 .await
-                .ok()
                 .and_then(|b| serde_json::from_slice::<Refusal>(&b).ok());
             return Err(refusal_of(status, retry, body));
         }
@@ -367,10 +438,8 @@ impl MountedExecutor for RemoteExecutor {
         let status = resp.status().as_u16();
         if status != 200 {
             let retry = resp.headers().contains_key(reqwest::header::RETRY_AFTER);
-            let body = resp
-                .bytes()
+            let body = small_body(resp)
                 .await
-                .ok()
                 .and_then(|b| serde_json::from_slice::<Refusal>(&b).ok());
             return Err(refusal_of(status, retry, body));
         }
@@ -383,8 +452,9 @@ impl MountedExecutor for RemoteExecutor {
         let mut reader = Reader::new(
             resp.bytes_stream(),
             timeout + IDLE_TIMEOUT,
-            timeout + TRANSFER_MAX,
-        );
+            timeout + super::runtime::COLLECT_BUDGET,
+        )
+        .with_min_rate(MIN_BYTES_PER_SEC, RATE_GRACE + timeout);
         let head: ResponseHeader = reader.json().await.map_err(|_| unavailable())?;
         reader.set_idle(IDLE_TIMEOUT);
         if head.v != WIRE_V2 {
@@ -658,5 +728,281 @@ mod tests {
         );
         assert_eq!(got[1].name, None);
         assert_eq!(got[2].reason, RejectReason::Unreadable);
+    }
+
+    /// Records what reaches it.
+    #[derive(Default)]
+    struct Recording(std::sync::Mutex<Vec<String>>);
+    #[async_trait]
+    impl super::super::mounted::OutputSink for Recording {
+        async fn accept(&self, file: OutFile) -> Result<(), RunRefusal> {
+            self.0.lock().unwrap().push(file.name);
+            Ok(())
+        }
+    }
+
+    /// A server's response of `files` (name, declared size) with `body` after the
+    /// header, run through `receive`; returns its answer and what reached the sink.
+    async fn hostile(
+        files: &[(&str, u64)],
+        body: &[u8],
+    ) -> (Result<Vec<String>, MountedError>, Vec<String>) {
+        let p = prepared(&[("sales", 1)], 4).await;
+        let plan = verify_prepared(&*p.registry, &*p.storage, SOURCE)
+            .await
+            .unwrap();
+        let sink = Recording::default();
+        let call = MountedCall {
+            storage: &*p.storage,
+            plan: &plan,
+            tables: &[0],
+            limits: StageLimits::default(),
+            out_mb: 4,
+            sink: Some(&sink),
+        };
+        let head = ResponseHeader {
+            v: WIRE_V2,
+            status: RunStatus::Ok,
+            message: None,
+            output: None,
+            stdout: String::new(),
+            files: files
+                .iter()
+                .map(|(n, s)| super::super::wire::OutEntry {
+                    name: n.to_string(),
+                    size: *s,
+                })
+                .collect(),
+            dropped: vec![],
+            too_many_entries: false,
+        };
+        let chunks: Vec<Result<Bytes, ()>> = vec![Ok(Bytes::copy_from_slice(body))];
+        let mut reader = Reader::new(
+            futures::stream::iter(chunks),
+            Duration::from_millis(300),
+            Duration::from_secs(5),
+        );
+        let got = receive(&mut reader, &head, &call).await;
+        let seen = sink.0.lock().unwrap().clone();
+        (got, seen)
+    }
+
+    /// A hostile or broken server cannot get anything into the sink: a repeated
+    /// name (any case), an odd name, a size over the caps, too many files, bytes
+    /// after the end, a body that ends early. A good response gives all of it,
+    /// and only after it ended.
+    #[tokio::test]
+    async fn a_hostile_response_gives_the_sink_nothing() {
+        let unavailable = || Err(super::unavailable());
+        for (label, files, body) in [
+            (
+                "duplicate",
+                vec![("a.csv", 1u64), ("a.csv", 1)],
+                b"xx".to_vec(),
+            ),
+            (
+                "duplicate in another case",
+                vec![("a.csv", 1), ("A.csv", 1)],
+                b"xx".to_vec(),
+            ),
+            ("path name", vec![("../x.csv", 1)], b"x".to_vec()),
+            ("odd extension", vec![("x.sh", 1)], b"x".to_vec()),
+            (
+                "over the file cap",
+                vec![("a.csv", 64 * 1024 * 1024 + 1)],
+                vec![],
+            ),
+            (
+                "over the total",
+                vec![
+                    ("a.csv", 60 << 20),
+                    ("b.csv", 60 << 20),
+                    ("c.csv", 60 << 20),
+                ],
+                vec![],
+            ),
+            (
+                "extra bytes after the end",
+                vec![("a.csv", 1)],
+                b"xEXTRA".to_vec(),
+            ),
+            ("ends early", vec![("a.csv", 10)], b"short".to_vec()),
+        ] {
+            let (got, seen) = hostile(&files, &body).await;
+            assert_eq!(
+                got.map_err(|e| format!("{e:?}")),
+                unavailable().map_err(|e: MountedError| format!("{e:?}")),
+                "{label}"
+            );
+            assert!(seen.is_empty(), "{label}: the sink saw {seen:?}");
+        }
+        let many: Vec<(String, u64)> = (0..9).map(|i| (format!("f{i}.csv"), 1)).collect();
+        let many: Vec<(&str, u64)> = many.iter().map(|(n, s)| (n.as_str(), *s)).collect();
+        let (got, seen) = hostile(&many, &[b'x'; 9]).await;
+        assert!(got.is_err() && seen.is_empty(), "too many files");
+        let (got, seen) = hostile(&[("a.csv", 1), ("b.parquet", 2)], b"xyz").await;
+        assert_eq!(got.unwrap(), ["a.csv", "b.parquet"]);
+        assert_eq!(seen, ["a.csv", "b.parquet"]);
+    }
+
+    // ---- a hostile or broken SERVER, against the real client, without privileges ----
+
+    use crate::dag_engine::infrastructure::python_exec::config::{RemoteAuthConfig, RemoteConfig};
+    use axum::body::Body;
+    use axum::http::StatusCode;
+    use axum::response::IntoResponse;
+    use axum::routing::{get, post};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// A server that is ready and takes credentials, and answers `/v2/run` as
+    /// `on_run` says (given the number of the request, from 0). Returns the client
+    /// and how many `/v2/run` requests it saw.
+    async fn server_that(
+        on_run: impl Fn(usize) -> axum::response::Response + Clone + Send + Sync + 'static,
+    ) -> (RemoteExecutor, Arc<AtomicUsize>) {
+        let seen = Arc::new(AtomicUsize::new(0));
+        let counter = seen.clone();
+        let app = axum::Router::new()
+            .route("/readyz", get(|| async { StatusCode::OK }))
+            .route("/v1/run", post(|| async { StatusCode::BAD_REQUEST }))
+            .route(
+                "/v2/run",
+                post(move || {
+                    let n = counter.fetch_add(1, Ordering::SeqCst);
+                    let on_run = on_run.clone();
+                    async move { on_run(n) }
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/", listener.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(listener, app).await });
+        let cfg = RemoteConfig {
+            url: url.parse().unwrap(),
+            auth: RemoteAuthConfig::None,
+            max_request_bytes: 32 << 20,
+            max_response_bytes: 1 << 20,
+            max_wire_bytes: None,
+        };
+        (
+            RemoteExecutor::new(cfg, Duration::from_secs(60)).unwrap(),
+            seen,
+        )
+    }
+
+    fn endless(status: StatusCode) -> axum::response::Response {
+        let body = Body::from_stream(futures::stream::unfold((), |_| async {
+            Some((
+                Ok::<_, std::io::Error>(Bytes::from(vec![b'x'; 64 * 1024])),
+                (),
+            ))
+        }));
+        (status, body).into_response()
+    }
+
+    async fn call_against(
+        client: &RemoteExecutor,
+        code: &str,
+    ) -> (Result<MountedResult, MountedError>, std::time::Duration) {
+        let p = prepared(&[("sales", 1)], 4).await;
+        let plan = verify_prepared(&*p.registry, &*p.storage, SOURCE)
+            .await
+            .unwrap();
+        let call = MountedCall {
+            storage: &*p.storage,
+            plan: &plan,
+            tables: &[0],
+            limits: StageLimits::default(),
+            out_mb: 4,
+            sink: None,
+        };
+        let req = PythonRunRequest {
+            code: code.into(),
+            mode: "restricted".into(),
+            timeout: Some(Duration::from_secs(5)),
+            inputs: Default::default(),
+        };
+        let started = std::time::Instant::now();
+        (client.run_with_mounts(req, call).await, started.elapsed())
+    }
+
+    fn is_unavailable(r: &Result<MountedResult, MountedError>) -> bool {
+        matches!(
+            r,
+            Err(MountedError::Refused(RunRefusal::Unavailable(
+                Unavailable::Executor
+            )))
+        )
+    }
+
+    /// A refusal with a body that never ends is read up to its cap and no more:
+    /// the call ends at once, as "unavailable", whichever answer carried it.
+    #[tokio::test]
+    async fn an_endless_refusal_body_is_cut_at_its_cap_on_the_probe_and_on_the_call() {
+        let (client, seen) = server_that(|_| endless(StatusCode::SERVICE_UNAVAILABLE)).await;
+        let (got, took) = call_against(&client, "output = 1").await;
+        assert!(is_unavailable(&got), "{got:?}");
+        assert!(took < Duration::from_secs(10), "{took:?}");
+        assert_eq!(seen.load(Ordering::SeqCst), 1, "only the probe was sent");
+        // The probe passes (204) and the call itself is answered with an endless 503.
+        let (client, _) = server_that(|n| match n {
+            0 => StatusCode::NO_CONTENT.into_response(),
+            _ => endless(StatusCode::SERVICE_UNAVAILABLE),
+        })
+        .await;
+        let (got, took) = call_against(&client, "output = 1").await;
+        assert!(is_unavailable(&got), "{got:?}");
+        assert!(took < Duration::from_secs(10), "{took:?}");
+    }
+
+    /// A redirect is not followed: it is an answer that is not 204.
+    #[tokio::test]
+    async fn a_redirect_is_not_followed() {
+        let (client, seen) = server_that(|_| {
+            (
+                StatusCode::FOUND,
+                [("location", "http://127.0.0.1:1/elsewhere")],
+            )
+                .into_response()
+        })
+        .await;
+        let (got, _) = call_against(&client, "output = 1").await;
+        assert!(is_unavailable(&got), "{got:?}");
+        assert_eq!(seen.load(Ordering::SeqCst), 1);
+    }
+
+    /// A response header frame that claims more than a frame may hold is refused
+    /// without reading it.
+    #[tokio::test]
+    async fn an_oversized_response_header_frame_is_refused() {
+        let (client, _) = server_that(|n| match n {
+            0 => StatusCode::NO_CONTENT.into_response(),
+            _ => {
+                let mut body = ((super::super::wire::HEADER_MAX as u32) + 1)
+                    .to_be_bytes()
+                    .to_vec();
+                body.extend(vec![b' '; 4096]);
+                (StatusCode::OK, body).into_response()
+            }
+        })
+        .await;
+        let (got, took) = call_against(&client, "output = 1").await;
+        assert!(is_unavailable(&got), "{got:?}");
+        assert!(took < Duration::from_secs(10));
+    }
+
+    /// Code too large for a frame is the model's to shorten: a Python-kind error,
+    /// before any request is made, and never "unavailable".
+    #[tokio::test]
+    async fn code_too_large_for_a_frame_is_a_typed_error_before_any_request() {
+        let (client, seen) = server_that(|_| StatusCode::NO_CONTENT.into_response()).await;
+        let (got, _) =
+            call_against(&client, &"#".repeat(super::super::wire::HEADER_MAX + 10)).await;
+        match got {
+            Err(MountedError::Run(PythonRunError::Python(text))) => {
+                assert!(text.contains("too large"), "{text}")
+            }
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(seen.load(Ordering::SeqCst), 0, "nothing was sent");
     }
 }

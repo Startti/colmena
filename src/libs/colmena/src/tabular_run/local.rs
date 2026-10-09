@@ -54,7 +54,7 @@ impl MountedExecutor for SubprocessExecutor {
             .await
             .map_err(MountedError::Refused)?;
             let result = self
-                .run_staged(req, staged_call.get().mounts())
+                .run_staged_confirmed(req, staged_call.get().mounts())
                 .await
                 .map_err(MountedError::Run)?;
             // The child is dead (SIGKILL to its uid before `run_staged` returns)

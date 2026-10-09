@@ -187,6 +187,7 @@ async fn dispatch_bounded(
     // Progress events keep the run loop's idle watchdog from cutting a run that
     // is silent for minutes, and bound the whole call. `tool_id` is the id of the
     // model's tool call, which is the id the client finds the row by.
+    let phase = std::sync::Arc::new(crate::tabular_run::runtime::PhaseCell::default());
     let tick = ProgressTick {
         tool_id: call_id,
         stage: ToolProgressStage::Running,
@@ -203,6 +204,7 @@ async fn dispatch_bounded(
         tables: requested_tables(raw_arguments),
         session_id: target.session_id,
         agent_session_id: target.agent_session_id,
+        phase: phase.clone(),
     });
     let outcome = match executor.with_progress_ticker(tick, run).await {
         Ok(outcome) => outcome,

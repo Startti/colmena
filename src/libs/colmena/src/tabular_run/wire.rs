@@ -24,8 +24,18 @@ use tokio::io::{AsyncWrite, AsyncWriteExt};
 use tokio::time::Instant;
 
 pub const WIRE_V2: u32 = 2;
-/// Largest JSON frame.
-pub const HEADER_MAX: usize = 64 * 1024;
+/// Largest JSON frame (1 MiB): room for the code, the inputs the prelude is given
+/// (a wide table's columns) and a response header with its capped stdout and result.
+pub const HEADER_MAX: usize = 1024 * 1024;
+
+/// Most of a call's stdout the response header carries, and of its result's JSON.
+pub const STDOUT_WIRE_MAX: usize = 64 * 1024;
+pub const OUTPUT_WIRE_MAX: usize = 512 * 1024;
+
+/// Slowest an upload or a download may go once its grace has passed: a peer that
+/// trickles bytes under the idle limit holds a volume for the whole transfer limit.
+pub const MIN_BYTES_PER_SEC: u64 = 256 * 1024;
+pub const RATE_GRACE: Duration = Duration::from_secs(15);
 /// Most files one call may send (the parts of the chosen tables and the manifest).
 pub const MAX_FILES_IN: usize = 20_000;
 /// The first frame must arrive within this.
@@ -106,12 +116,23 @@ pub struct Refusal {
     pub reason: Option<String>,
 }
 
-/// A frame: its length, then `json`.
-pub fn frame(json: &[u8]) -> Bytes {
+/// A frame: its length, then `json`; `Malformed` when `json` is longer than a
+/// frame may be, so a sender learns it BEFORE it sends anything.
+pub fn try_frame(json: &[u8]) -> Result<Bytes, WireError> {
+    let len = u32::try_from(json.len())
+        .ok()
+        .filter(|_| json.len() <= HEADER_MAX)
+        .ok_or(WireError::Malformed)?;
     let mut out = BytesMut::with_capacity(4 + json.len());
-    out.extend_from_slice(&(json.len() as u32).to_be_bytes());
+    out.extend_from_slice(&len.to_be_bytes());
     out.extend_from_slice(json);
-    out.freeze()
+    Ok(out.freeze())
+}
+
+/// [`try_frame`] for a frame built to be small (the tests, literals). Production
+/// paths use [`try_frame`] and handle the error.
+pub fn frame(json: &[u8]) -> Bytes {
+    try_frame(json).expect("a frame within HEADER_MAX")
 }
 
 /// The empty frame that ends a request.
@@ -143,6 +164,10 @@ pub struct Reader<S> {
     buf: Bytes,
     idle: Duration,
     deadline: Instant,
+    /// `(bytes per second, grace)`: past the grace, slower than this is a stall.
+    min_rate: Option<(u64, Duration)>,
+    started: Instant,
+    seen: u64,
 }
 
 impl<S, E> Reader<S>
@@ -155,7 +180,24 @@ where
             buf: Bytes::new(),
             idle,
             deadline: Instant::now() + total,
+            min_rate: None,
+            started: Instant::now(),
+            seen: 0,
         }
+    }
+
+    /// Requires a minimum average rate once `grace` has passed.
+    pub fn with_min_rate(mut self, bytes_per_sec: u64, grace: Duration) -> Self {
+        self.min_rate = Some((bytes_per_sec, grace));
+        self
+    }
+
+    fn too_slow(&self) -> bool {
+        let Some((bps, grace)) = self.min_rate else {
+            return false;
+        };
+        let elapsed = self.started.elapsed();
+        elapsed > grace && (self.seen as f64) < elapsed.as_secs_f64() * bps as f64
     }
 
     /// Changes the idle limit: the first frame of a response waits for the code
@@ -167,6 +209,9 @@ where
     /// Makes `buf` non-empty. `false` at the end of the stream.
     async fn fill(&mut self) -> Result<bool, WireError> {
         while self.buf.is_empty() {
+            if self.too_slow() {
+                return Err(WireError::Stalled);
+            }
             let wait = self
                 .idle
                 .min(self.deadline.saturating_duration_since(Instant::now()));
@@ -182,7 +227,10 @@ where
             match next {
                 None => return Ok(false),
                 Some(Err(_)) => return Err(WireError::Transport),
-                Some(Ok(chunk)) => self.buf = chunk,
+                Some(Ok(chunk)) => {
+                    self.seen += chunk.len() as u64;
+                    self.buf = chunk;
+                }
             }
         }
         Ok(true)
@@ -505,5 +553,43 @@ mod tests {
             serde_json::from_str::<Refusal>(&serde_json::to_string(&r).unwrap()).unwrap(),
             r
         );
+    }
+
+    /// A frame is refused before it is sent when it cannot be received.
+    #[test]
+    fn a_frame_over_the_limit_is_refused_on_the_sending_side() {
+        assert!(try_frame(&vec![b' '; HEADER_MAX]).is_ok());
+        assert_eq!(
+            try_frame(&vec![b' '; HEADER_MAX + 1]).unwrap_err(),
+            WireError::Malformed
+        );
+    }
+
+    /// A peer that sends a chunk now and then, each inside the idle limit, but
+    /// slower than the minimum rate, is cut off after the grace.
+    #[tokio::test]
+    async fn a_trickle_under_the_idle_limit_is_cut_off_by_the_minimum_rate() {
+        let trickle = stream::unfold(0, |n| async move {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            Some((Ok::<_, ()>(Bytes::from_static(b"x")), n + 1))
+        });
+        let mut r = Reader::new(
+            Box::pin(trickle),
+            Duration::from_secs(1),
+            Duration::from_secs(30),
+        )
+        .with_min_rate(1_000_000, Duration::from_millis(100));
+        let mut sink = tokio::io::sink();
+        assert_eq!(
+            r.copy_exact(1_000_000, &mut sink).await,
+            Err(WireError::Stalled)
+        );
+        // A fast peer is never cut off by it.
+        let fast = stream::iter((0..50).map(|_| Ok::<_, ()>(Bytes::from(vec![0u8; 1 << 20]))));
+        let mut r = Reader::new(fast, Duration::from_secs(1), Duration::from_secs(30))
+            .with_min_rate(1_000_000, Duration::from_millis(1));
+        r.copy_exact(50 << 20, &mut tokio::io::sink())
+            .await
+            .unwrap();
     }
 }

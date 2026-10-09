@@ -331,6 +331,62 @@ fn kill_uid(uid: u32) -> Result<(), NotStopped> {
     })
 }
 
+/// Longest [`confirm_uid_gone`] waits for the processes to leave `/proc`.
+const CONFIRM_WAIT: Duration = Duration::from_secs(2);
+
+/// Whether a process other than a zombie runs as `uid`. Reads the host's `/proc`
+/// (the executor runs outside the jail); a `/proc` that cannot be read says "yes":
+/// when it cannot be known, it is not confirmed.
+fn uid_has_processes(uid: u32) -> bool {
+    let Ok(dir) = std::fs::read_dir("/proc") else {
+        return true;
+    };
+    for entry in dir.flatten() {
+        let name = entry.file_name();
+        if !name.to_string_lossy().bytes().all(|b| b.is_ascii_digit()) {
+            continue;
+        }
+        let Ok(status) = std::fs::read_to_string(entry.path().join("status")) else {
+            // Gone between the listing and the read, which is what is hoped for.
+            continue;
+        };
+        let zombie = status
+            .lines()
+            .any(|l| l.starts_with("State:") && l.contains('Z'));
+        let ours = status
+            .lines()
+            .find_map(|l| l.strip_prefix("Uid:"))
+            .is_some_and(|rest| {
+                rest.split_whitespace()
+                    .next()
+                    .and_then(|f| f.parse::<u32>().ok())
+                    == Some(uid)
+            });
+        if ours && !zombie {
+            return true;
+        }
+    }
+    false
+}
+
+/// Blocking. Stops every process of `uid` (again) and waits, up to `wait`, until
+/// none is left. `false` when the stop fails or something still runs.
+fn confirm_uid_gone(stop: fn(u32) -> Result<(), NotStopped>, uid: u32, wait: Duration) -> bool {
+    if stop(uid).is_err() {
+        return false;
+    }
+    let end = Instant::now() + wait;
+    loop {
+        if !uid_has_processes(uid) {
+            return true;
+        }
+        if Instant::now() >= end {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
 /// Reads until the child closes its end (EOF) or the read fails.
 async fn drain(conn: &mut UnixStream) {
     let mut sink = [0u8; 64];
@@ -432,13 +488,28 @@ impl SubprocessExecutor {
         req: PythonRunRequest,
         mounts: CallMounts,
     ) -> Result<PythonRunResult, PythonRunError> {
-        self.run_with(req, Some(mounts)).await
+        self.run_with(req, Some(mounts), false).await
+    }
+
+    /// [`Self::run_staged`] for a caller that is about to read the call's output
+    /// volume as root: a result is returned only once EVERY process of the call's
+    /// uid is confirmed gone (`/proc` lists none, zombies aside), after a second
+    /// kill of the uid. If that cannot be confirmed the call fails with an
+    /// executor error and the result is discarded: nothing may still be writing to
+    /// the volume when it is read.
+    pub async fn run_staged_confirmed(
+        &self,
+        req: PythonRunRequest,
+        mounts: CallMounts,
+    ) -> Result<PythonRunResult, PythonRunError> {
+        self.run_with(req, Some(mounts), true).await
     }
 
     async fn run_with(
         &self,
         req: PythonRunRequest,
         mounts: Option<CallMounts>,
+        confirm: bool,
     ) -> Result<PythonRunResult, PythonRunError> {
         let timeout = req.timeout.unwrap_or(self.max_timeout);
         let bytes = serde_json::to_vec(&WireRequest::new(req, timeout)).map_err(|e| {
@@ -446,7 +517,7 @@ impl SubprocessExecutor {
                 "PythonExecutorError: cannot encode the request: {e}"
             ))
         })?;
-        match self.run_raw_with(timeout, &bytes, mounts).await {
+        match self.run_raw_with(timeout, &bytes, mounts, confirm).await {
             Ok(resp) => serde_json::from_slice::<WireResponse>(&resp)
                 .map_err(|_| PythonRunError::Python(MALFORMED_MESSAGE.to_string()))?
                 .into_result(),
@@ -670,7 +741,7 @@ impl SubprocessExecutor {
     /// refused here: the child could only answer it to a host whose write of
     /// the whole request succeeded.
     pub async fn run_raw(&self, timeout: Duration, request: &[u8]) -> Result<Vec<u8>, RawFailure> {
-        self.run_raw_with(timeout, request, None).await
+        self.run_raw_with(timeout, request, None, false).await
     }
 
     /// [`Self::run_raw`] for a call that carries prepared data: the header
@@ -681,6 +752,7 @@ impl SubprocessExecutor {
         timeout: Duration,
         request: &[u8],
         mounts: Option<CallMounts>,
+        confirm: bool,
     ) -> Result<Vec<u8>, RawFailure> {
         if let (Some(_), Some(reason)) = (&mounts, self.staging_unavailable) {
             return Err(RawFailure::Unavailable(
@@ -729,6 +801,7 @@ impl SubprocessExecutor {
         };
         let header = serde_json::to_vec(&header).expect("header serializes");
         debug_assert!(header.len() <= MAX_HEADER_BYTES);
+        let (slot_stop, slot_uid) = (slot.stop, slot.uid);
         let mut child = CallChild {
             pid,
             pidfd,
@@ -749,6 +822,22 @@ impl SubprocessExecutor {
         };
         if result.is_err() {
             kill(pid, child.pidfd.as_ref());
+        }
+        // A caller that will read the output volume wants every process of the
+        // call's uid GONE first, not signalled: the stop that frees the slot only
+        // logs when it fails.
+        if confirm && result.is_ok() {
+            let (stop, uid) = (slot_stop, slot_uid);
+            let gone =
+                tokio::task::spawn_blocking(move || confirm_uid_gone(stop, uid, CONFIRM_WAIT))
+                    .await
+                    .unwrap_or(false);
+            if !gone {
+                tracing::error!(target: T_PYTHON_EXEC, "could not confirm every process of a call exited");
+                return Err(RawFailure::Unavailable(
+                    "PythonExecutorError: could not confirm that the call's processes ended".into(),
+                ));
+            }
         }
         // The slot is free again once the child has closed its end; a child
         // that has not by `EXIT_GRACE` is left to `reap` when `child` drops.
@@ -784,7 +873,7 @@ impl PythonExecutor for SubprocessExecutor {
     }
 
     async fn run(&self, req: PythonRunRequest) -> Result<PythonRunResult, PythonRunError> {
-        self.run_with(req, None).await
+        self.run_with(req, None, false).await
     }
 
     async fn warm(&self) -> Result<(), String> {
@@ -1440,5 +1529,25 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(300)).await;
         ex.warm().await.unwrap();
         assert_eq!(starts(&dir), 2);
+    }
+
+    /// The confirmation that lets a root reader trust the output volume: a stop that
+    /// fails is "not confirmed", a uid nothing runs as is confirmed at once, and a
+    /// uid something still runs as is not, however long it waits (a zombie aside).
+    #[test]
+    fn a_uid_is_confirmed_gone_only_when_the_stop_works_and_nothing_runs_as_it() {
+        let ok: fn(u32) -> Result<(), NotStopped> = |_| Ok(());
+        let fails: fn(u32) -> Result<(), NotStopped> = |_| Err(NotStopped::default());
+        let nobody = 4_000_000_001u32;
+        let me = unsafe { libc::geteuid() };
+        assert!(!confirm_uid_gone(fails, nobody, Duration::from_millis(50)));
+        assert!(confirm_uid_gone(ok, nobody, Duration::from_millis(50)));
+        let started = Instant::now();
+        assert!(
+            !confirm_uid_gone(ok, me, Duration::from_millis(150)),
+            "this very process runs as {me}"
+        );
+        assert!(started.elapsed() >= Duration::from_millis(150));
+        assert!(uid_has_processes(me) && !uid_has_processes(nobody));
     }
 }
