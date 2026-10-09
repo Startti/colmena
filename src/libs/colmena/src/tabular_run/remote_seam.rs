@@ -27,7 +27,7 @@ use super::wire::{
     IDLE_TIMEOUT, TRANSFER_MAX, WIRE_V2,
 };
 use crate::dag_engine::domain::python_executor::{
-    PythonRunError, PythonRunRequest, PythonRunResult,
+    PythonExecutor, PythonRunError, PythonRunRequest, PythonRunResult,
 };
 use crate::dag_engine::infrastructure::python_exec::remote::{endpoint, RemoteExecutor};
 use crate::tabular_prepare::manifest::MANIFEST_PATH;
@@ -274,6 +274,12 @@ impl MountedExecutor for RemoteExecutor {
         req: PythonRunRequest,
         call: MountedCall<'_>,
     ) -> Result<MountedResult, MountedError> {
+        // Credentials and readiness are checked BEFORE any part is read from
+        // storage: a server that refuses the caller answers while the body
+        // is still unsent, and a refused upload can look like a dropped connection.
+        self.warm()
+            .await
+            .map_err(|text| MountedError::Run(PythonRunError::Internal(text)))?;
         let (client, base, max_timeout) = self.transport();
         let timeout = req.timeout.unwrap_or(max_timeout).min(max_timeout);
         let header = serde_json::to_vec(&CallHeader {
