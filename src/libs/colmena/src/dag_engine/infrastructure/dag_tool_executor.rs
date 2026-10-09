@@ -158,6 +158,8 @@ pub struct DagToolExecutor {
     /// default, and always with `COLMENA_LARGE_TABULAR` off) means no call is
     /// routed to the large path. See `large_route`.
     large_tabular: Option<Arc<crate::tabular_run::runtime::LargeTabularRuntime>>,
+    /// A shorter clock for a large-file call than the tool's own (tests only).
+    large_call_budget: Option<std::time::Duration>,
     /// F-T15: per-call wiring for the `recall_history` synthetic tool.
     /// When both fields are populated, the executor intercepts `recall_history`
     /// tool calls and reads the persisted conversation directly. When either is
@@ -420,6 +422,7 @@ impl DagToolExecutor {
             attachment_storage: None,
             attachment_registry: None,
             large_tabular: None,
+            large_call_budget: None,
             conversation_repository: None,
             conversation_key: None,
             max_tool_result_bytes: DEFAULT_MAX_TOOL_RESULT_STRING_BYTES,

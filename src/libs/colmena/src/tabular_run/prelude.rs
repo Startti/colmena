@@ -164,6 +164,29 @@ pub fn tables_summary(manifest: &Manifest, tables: &[usize]) -> Value {
     )
 }
 
+/// The sheets of a workbook that were not turned into tables, for the model: the
+/// sheet's cleaned name and why, in words. `Null` when none was skipped (always, for a CSV).
+pub fn skipped_summary(manifest: &Manifest) -> Value {
+    if manifest.skipped.is_empty() {
+        return Value::Null;
+    }
+    Value::Array(
+        manifest
+            .skipped
+            .iter()
+            .map(|s| {
+                let why = match s.reason.as_str() {
+                    crate::tabular_prepare::manifest::SKIPPED_HEADER_ROW => {
+                        "it has no header row to name its columns"
+                    }
+                    _ => "it is not a table",
+                };
+                json!({"sheet": s.sheet, "reason": why})
+            })
+            .collect(),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -230,7 +253,9 @@ mod tests {
 
     #[test]
     fn schema_has_names_and_types_and_never_a_size() {
-        let out = run("output = tables.schema('sales')", inputs()).unwrap();
+        // No parts exist here: the date column's decision is given, not read.
+        let seed = "_ct_object_cache[(0, 'day')] = False\n";
+        let out = run(&format!("{seed}output = tables.schema('sales')"), inputs()).unwrap();
         assert_eq!(out["rows"], 1000);
         assert_eq!(out["parts"], 2);
         assert_eq!(
@@ -345,21 +370,43 @@ mod tests {
     /// doubles for the moment Arrow's table and the frame exist together.
     #[test]
     fn the_read_estimate_applies_the_type_multipliers() {
-        let est = |cols: &str| {
+        let est_as = |cols: &str, objects: bool| {
             run(
-                &format!("output = _ct_estimate(tables._tables[0], {cols})"),
+                &format!(
+                    "_ct_object_cache[(0, 'day')] = {}\noutput = _ct_estimate(tables._tables[0], {cols})",
+                    if objects { "True" } else { "False" }
+                ),
                 inputs(),
             )
             .unwrap()
             .as_u64()
             .unwrap()
         };
+        let est = |cols: &str| est_as(cols, false);
         assert_eq!(est("['id']"), 2 * 8000);
+        // A date column that must stay Python objects is 40 bytes a row, not 8.
+        assert_eq!(est_as("['day']", true), 2 * 1000 * 40);
         assert_eq!(est("['paid']"), 2 * 125 * 16);
         assert_eq!(est("['day']"), 2 * 4000 * 2);
         // A string adds the Python object header for every row: 57 * 1000.
         assert_eq!(est("['note']"), 2 * (20_000 + 57 * 1000));
         assert_eq!(est("['id', 'paid']"), 2 * (8000 + 125 * 16));
+    }
+
+    /// Skipped sheets are told with their cleaned name and a reason in words, and a
+    /// workbook with none says nothing.
+    #[test]
+    fn skipped_sheets_are_summarised_for_the_model() {
+        use crate::tabular_prepare::manifest::{SkippedSheet, SKIPPED_HEADER_ROW};
+        let plain = Manifest::new(vec![]);
+        assert_eq!(skipped_summary(&plain), Value::Null);
+        let with = plain.with_skipped(vec![SkippedSheet {
+            sheet: "Title".into(),
+            reason: SKIPPED_HEADER_ROW.into(),
+        }]);
+        let out = skipped_summary(&with);
+        assert_eq!(out[0]["sheet"], "Title");
+        assert!(out[0]["reason"].as_str().unwrap().contains("no header row"));
     }
 
     /// Over the limit nothing is read: the data directory does not exist, so an
@@ -861,6 +908,67 @@ mod reads {
         );
         let head = run("output = len(tables['t'].head(2, columns=['d']))", &inputs);
         assert_eq!(head, 2);
+    }
+
+    /// Two parts, a date column that only the second part has a sentinel in: the
+    /// column is Python objects in BOTH parts (one dtype), the other date column stays
+    /// datetime64, the estimate uses the object size for the first and `schema()` says
+    /// what each column is when read.
+    #[test]
+    fn the_column_type_is_decided_once_for_every_part_and_only_for_the_column_that_needs_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let Some(mut inputs) = staged(dir.path()) else {
+            return;
+        };
+        inputs.insert("_dir2".into(), Value::from(dir.path().to_str().unwrap()));
+        let make = "import datetime, pandas as pd\n\
+            ok = [datetime.date(2024, 1, 1), datetime.date(2024, 1, 2)]\n\
+            pd.DataFrame({'d': ok, 'e': ok, 'a': [1, 2]}).to_parquet(_dir2 + '/t0/part-00000.parquet')\n\
+            pd.DataFrame({'d': [datetime.date(9999, 12, 31), datetime.date(2024, 1, 3)], 'e': ok, 'a': [3, 4]}).to_parquet(_dir2 + '/t0/part-00001.parquet')\n\
+            output = 1";
+        python(make, "none", &inputs).unwrap();
+        let column = |name: &str, kind: &str| serde_json::json!({"name": name, "type": kind, "in_memory_bytes": 16});
+        inputs.insert(
+            "_ct_tables".into(),
+            serde_json::json!([{"name": "t", "index": 0, "rows": 4, "parts": 2, "columns": [
+                column("d", "date"), column("e", "date"), column("a", "int")]}]),
+        );
+        let out = run(
+            "t = tables['t']\n\
+             kinds = [[str(f['d'].dtype), str(f['e'].dtype)] for f in t.parts(columns=['d', 'e'])]\n\
+             s = tables.schema('t')['columns']\n\
+             output = [kinds, [c.get('dtype') for c in s], _ct_estimate(t._t, ['d']), _ct_estimate(t._t, ['e'])]",
+            &inputs,
+        );
+        assert_eq!(
+            out,
+            serde_json::json!([
+                [["object", "datetime64[ns]"], ["object", "datetime64[ns]"]],
+                ["object", "datetime64[ns]", null],
+                // 4 rows x 40 bytes of objects x 2 (peak), against the 16 x 2 x 2 of datetime64.
+                320,
+                64
+            ])
+        );
+    }
+
+    /// Whatever the decision is, an out-of-memory is the call's: nothing here
+    /// swallows it to try another way.
+    #[test]
+    fn an_out_of_memory_while_converting_is_not_swallowed() {
+        let dir = tempfile::tempdir().unwrap();
+        let Some(inputs) = staged(dir.path()) else {
+            return;
+        };
+        let out = run(
+            "pd, pa, pq = _ct_pyarrow()\n\
+             class Boom:\n    column_names = ['a']\n    def to_pandas(self, **kw):\n        raise MemoryError('x')\n\
+             _ct_object_cache[(0, 'a')] = False\n\
+             try:\n    _ct_frame(pd, pa, Boom(), {'index': 0})\n    output = 'swallowed'\n\
+             except MemoryError:\n    output = 'raised'",
+            &inputs,
+        );
+        assert_eq!(out, "raised");
     }
 
     /// `head(n)` returns n rows when they exist even if the first batch is shorter

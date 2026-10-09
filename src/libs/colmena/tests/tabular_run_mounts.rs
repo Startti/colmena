@@ -49,7 +49,13 @@ fn staging_root() -> Option<PathBuf> {
         eprintln!("skipped: set COLMENA_PYEXEC_JAIL_TESTS=1 (Linux, root, CAP_SYS_ADMIN)");
         return None;
     }
-    let path = PathBuf::from("/var/lib/colmena-tabular-run-test");
+    // One root per call: tests run in parallel, and two executors must not share a root.
+    static ROOTS: AtomicU32 = AtomicU32::new(0);
+    let path = PathBuf::from(format!(
+        "/var/lib/colmena-tabular-run-test-{}-{}",
+        std::process::id(),
+        ROOTS.fetch_add(1, Ordering::Relaxed)
+    ));
     let made = std::fs::DirBuilder::new().mode(0o700).create(&path);
     assert!(made.is_ok() || path.is_dir(), "{made:?}");
     Some(path)
@@ -213,6 +219,7 @@ fn leftovers(root: &PathBuf) -> usize {
 }
 
 #[tokio::test]
+#[serial_test::serial(host_mounts)]
 async fn the_code_reads_the_staged_parts_at_data_and_cannot_write_there() {
     let Some(root) = staging_root() else { return };
     let ex = executor(Some(&root));
@@ -254,6 +261,7 @@ output = {'parts': parts, 'sizes': sizes, 'manifest_has_sales': 'sales' in manif
 /// What the real sandbox says about `read_parquet` on a part the trusted side
 /// staged. Needs python3 with pyarrow in the test environment to make the part.
 #[tokio::test]
+#[serial_test::serial(host_mounts)]
 async fn pandas_reads_a_staged_parquet_part_in_restricted_mode() {
     let Some(root) = staging_root() else { return };
     let dir = tempfile::tempdir().unwrap();
@@ -290,6 +298,7 @@ async fn pandas_reads_a_staged_parquet_part_in_restricted_mode() {
 }
 
 #[tokio::test]
+#[serial_test::serial(host_mounts)]
 async fn an_executor_without_a_staging_root_refuses_and_reads_nothing() {
     if staging_root().is_none() {
         return;
@@ -311,6 +320,7 @@ async fn an_executor_without_a_staging_root_refuses_and_reads_nothing() {
 }
 
 #[tokio::test]
+#[serial_test::serial(host_mounts)]
 async fn a_call_over_the_data_limit_is_refused_and_the_volume_is_given_back() {
     let Some(root) = staging_root() else { return };
     let ex = executor(Some(&root));
@@ -338,6 +348,7 @@ async fn a_call_over_the_data_limit_is_refused_and_the_volume_is_given_back() {
 /// The executor's budget of volumes in flight answers a typed refusal, not a
 /// crash: two calls hold the budget, the third is told to retry.
 #[tokio::test]
+#[serial_test::serial(host_mounts)]
 async fn a_call_over_the_executors_volume_budget_is_refused_and_stages_nothing() {
     let Some(root) = staging_root() else { return };
     let ex = executor(Some(&root));
@@ -361,6 +372,7 @@ async fn a_call_over_the_executors_volume_budget_is_refused_and_stages_nothing()
 }
 
 #[tokio::test]
+#[serial_test::serial(host_mounts)]
 async fn the_codes_own_failure_is_reported_as_any_call_reports_it() {
     let Some(root) = staging_root() else { return };
     let ex = executor(Some(&root));
@@ -399,6 +411,7 @@ impl OutputSink for Names {
 /// names for one file and a name outside the charset reach the sink as nothing;
 /// the one good file arrives whole; the call's volume is still given back.
 #[tokio::test]
+#[serial_test::serial(host_mounts)]
 async fn hostile_outputs_never_reach_the_sink_and_the_good_one_does() {
     let Some(root) = staging_root() else { return };
     let ex = executor(Some(&root));
@@ -447,6 +460,7 @@ output = 1
 /// What a server asks before it reads a call's data: an executor without a
 /// staging root says so, one with a root and a healthy template says nothing.
 #[tokio::test]
+#[serial_test::serial(host_mounts)]
 async fn an_executor_says_why_it_cannot_take_a_mounts_call() {
     let Some(root) = staging_root() else { return };
     assert_eq!(
@@ -522,6 +536,7 @@ async fn eventually_released(ex: &SubprocessExecutor, root: &PathBuf) {
 /// The sink is given the outputs while the volume is still held (it is the
 /// outputs' last chance to be read), and the volume is given back after.
 #[tokio::test]
+#[serial_test::serial(host_mounts)]
 async fn the_sink_runs_before_the_volume_is_released() {
     if staging_root().is_none() {
         return;
@@ -541,6 +556,7 @@ async fn the_sink_runs_before_the_volume_is_released() {
 }
 
 #[tokio::test]
+#[serial_test::serial(host_mounts)]
 async fn a_sink_that_fails_still_gives_the_volume_back() {
     if staging_root().is_none() {
         return;
@@ -557,6 +573,7 @@ async fn a_sink_that_fails_still_gives_the_volume_back() {
 }
 
 #[tokio::test]
+#[serial_test::serial(host_mounts)]
 async fn a_sink_that_panics_still_gives_the_volume_back() {
     if staging_root().is_none() {
         return;
@@ -577,6 +594,7 @@ async fn a_sink_that_panics_still_gives_the_volume_back() {
 /// The call's future dropped while the sink waits: the volume is released from
 /// its guard, on the blocking pool, not left mounted.
 #[tokio::test]
+#[serial_test::serial(host_mounts)]
 async fn a_call_cancelled_while_the_sink_waits_gives_the_volume_back() {
     if staging_root().is_none() {
         return;
@@ -598,6 +616,7 @@ async fn a_call_cancelled_while_the_sink_waits_gives_the_volume_back() {
 /// sink is given the file, nothing of the call's uid is left to change it (the
 /// executor confirmed that before returning the result).
 #[tokio::test]
+#[serial_test::serial(host_mounts)]
 async fn nothing_of_the_call_is_still_running_when_its_output_is_read() {
     if staging_root().is_none() {
         return;

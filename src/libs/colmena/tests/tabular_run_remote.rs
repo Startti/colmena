@@ -55,7 +55,13 @@ fn enabled() -> bool {
 }
 
 fn staging_root() -> PathBuf {
-    let path = PathBuf::from("/var/lib/colmena-tabular-remote-test");
+    // One root per call: tests run in parallel, and two executors must not share a root.
+    static ROOTS: AtomicU32 = AtomicU32::new(0);
+    let path = PathBuf::from(format!(
+        "/var/lib/colmena-tabular-remote-test-{}-{}",
+        std::process::id(),
+        ROOTS.fetch_add(1, Ordering::Relaxed)
+    ));
     let made = std::fs::DirBuilder::new().mode(0o700).create(&path);
     assert!(made.is_ok() || path.is_dir(), "{made:?}");
     path
@@ -159,6 +165,7 @@ output = sizes
 "#;
 
 #[tokio::test]
+#[serial_test::serial(host_mounts)]
 async fn a_multi_part_call_runs_and_streams_its_output_back() {
     if !enabled() {
         return;
@@ -195,6 +202,7 @@ async fn a_multi_part_call_runs_and_streams_its_output_back() {
 }
 
 #[tokio::test]
+#[serial_test::serial(host_mounts)]
 async fn the_gate_is_the_v1_gate_a_missing_or_wrong_token_is_401() {
     if !enabled() {
         return;
@@ -234,6 +242,7 @@ async fn the_gate_is_the_v1_gate_a_missing_or_wrong_token_is_401() {
 /// A probe mounts nothing: the budget is unchanged while it is answered, and a
 /// half-full budget still answers it 204.
 #[tokio::test]
+#[serial_test::serial(host_mounts)]
 async fn a_probe_takes_no_volume_and_is_answered_from_the_budget() {
     if !enabled() {
         return;
@@ -267,6 +276,7 @@ async fn a_probe_takes_no_volume_and_is_answered_from_the_budget() {
 /// a canonical part, a duplicate and a file over its cap: each is refused, and
 /// the volume is back every time.
 #[tokio::test]
+#[serial_test::serial(host_mounts)]
 async fn a_malformed_or_oversized_upload_is_refused_and_leaves_nothing() {
     if !enabled() {
         return;
@@ -277,7 +287,10 @@ async fn a_malformed_or_oversized_upload_is_refused_and_leaves_nothing() {
     let mut early = header("output = 1");
     early.extend(entry("manifest.json", 100));
     early.extend_from_slice(b"short");
-    assert_eq!(post_bytes(early).await.unwrap().status(), 400);
+    // An upload cut on the way is a moment (retryable), not a malformed request.
+    let cut = post_bytes(early).await.unwrap();
+    assert_eq!(cut.status(), 503);
+    assert!(cut.text().await.unwrap().contains("upload_interrupted"));
     // Bytes after the terminating frame.
     let mut extra = request("output = 1", &[("manifest.json", b"{}")]);
     extra.extend_from_slice(b"EXTRA");
@@ -338,6 +351,7 @@ async fn a_malformed_or_oversized_upload_is_refused_and_leaves_nothing() {
 /// A stream that stops sending is cut off by the idle limit (30 s) and gives
 /// its volume back. Slow by construction.
 #[tokio::test]
+#[serial_test::serial(host_mounts)]
 async fn an_upload_that_stalls_is_cut_off_and_releases_its_volume() {
     if !enabled() {
         return;
@@ -357,6 +371,7 @@ async fn an_upload_that_stalls_is_cut_off_and_releases_its_volume() {
 /// A client that goes away mid-upload: the handler is dropped, and with it the
 /// volume.
 #[tokio::test]
+#[serial_test::serial(host_mounts)]
 async fn a_client_that_disconnects_mid_upload_releases_the_volume() {
     if !enabled() {
         return;
@@ -386,6 +401,7 @@ async fn a_client_that_disconnects_mid_upload_releases_the_volume() {
 /// Two calls fit the executor's budget of volumes; a third is told to retry,
 /// with `Retry-After`, and once one ends a new call is taken.
 #[tokio::test]
+#[serial_test::serial(host_mounts)]
 async fn calls_within_the_budget_run_and_one_over_it_is_told_to_retry() {
     if !enabled() {
         return;
@@ -427,6 +443,7 @@ async fn calls_within_the_budget_run_and_one_over_it_is_told_to_retry() {
 
 /// Two calls at once, both within the budget, both complete with their own data.
 #[tokio::test]
+#[serial_test::serial(host_mounts)]
 async fn two_concurrent_calls_each_see_only_their_own_data() {
     if !enabled() {
         return;
@@ -458,6 +475,7 @@ async fn two_concurrent_calls_each_see_only_their_own_data() {
 }
 
 #[tokio::test]
+#[serial_test::serial(host_mounts)]
 async fn a_server_without_a_staging_root_has_no_mounts_route() {
     if !enabled() {
         return;
@@ -473,6 +491,7 @@ async fn a_server_without_a_staging_root_has_no_mounts_route() {
 /// A staging root the template cannot use turns the mounts off, and the server
 /// says so BEFORE it reads the call's data: the body below never ends.
 #[tokio::test]
+#[serial_test::serial(host_mounts)]
 async fn a_server_whose_mounts_are_disabled_refuses_before_reading_the_data() {
     if !enabled() {
         return;
@@ -688,6 +707,7 @@ impl OutputSink for Names {
 }
 
 #[tokio::test]
+#[serial_test::serial(host_mounts)]
 async fn the_remote_client_runs_a_multi_part_call_and_hands_the_good_output_to_the_sink() {
     if !enabled() {
         return;
@@ -728,6 +748,7 @@ output = sizes
 }
 
 #[tokio::test]
+#[serial_test::serial(host_mounts)]
 async fn the_remote_client_maps_the_servers_refusals_to_the_existing_ones() {
     if !enabled() {
         return;
@@ -740,8 +761,12 @@ async fn the_remote_client_maps_the_servers_refusals_to_the_existing_ones() {
         .run_with_mounts(py("output = 1"), mounted(&storage, &plan, None))
         .await
         .unwrap_err();
+    // A permanent, typed setup problem; never a retry.
     assert!(
-        matches!(&err, MountedError::Run(PythonRunError::Internal(t)) if t.contains("rejected")),
+        matches!(
+            &err,
+            MountedError::Refused(RunRefusal::Unavailable(Unavailable::Rejected))
+        ),
         "{err:?}"
     );
     // Over the executor's budget of volumes.
@@ -783,6 +808,7 @@ async fn the_remote_client_maps_the_servers_refusals_to_the_existing_ones() {
 /// A storage that declares more than it sends: the client aborts the body, the
 /// server never takes a short file for the real one, and nothing is left.
 #[tokio::test]
+#[serial_test::serial(host_mounts)]
 async fn a_storage_that_lies_about_a_size_fails_the_call_and_leaves_nothing() {
     if !enabled() {
         return;
@@ -810,6 +836,7 @@ async fn a_storage_that_lies_about_a_size_fails_the_call_and_leaves_nothing() {
 /// Dropping the call while the code runs closes the request: the server drops
 /// the call, which kills the child and gives the volume back.
 #[tokio::test]
+#[serial_test::serial(host_mounts)]
 async fn cancelling_a_call_releases_the_servers_volume() {
     if !enabled() {
         return;
@@ -830,6 +857,7 @@ async fn cancelling_a_call_releases_the_servers_volume() {
 /// A server whose mounts are off says so before the data is read: the client
 /// reads nothing from storage beyond the header and reports the refusal.
 #[tokio::test]
+#[serial_test::serial(host_mounts)]
 async fn a_server_with_mounts_off_is_reported_as_disabled() {
     if !enabled() {
         return;
@@ -870,6 +898,7 @@ async fn a_server_with_mounts_off_is_reported_as_disabled() {
 /// A probe is answered before any data is read and runs nothing: 204 when a call
 /// would be taken, the usual refusal when it would not, and no volume is kept.
 #[tokio::test]
+#[serial_test::serial(host_mounts)]
 async fn a_probe_says_whether_a_call_would_be_taken_and_keeps_nothing() {
     if !enabled() {
         return;

@@ -66,7 +66,11 @@ fn refusal_of(status: u16, retry_after: bool, body: Option<Refusal>) -> MountedE
         (413, _) | (_, Some("too_large")) => refused(RunRefusal::OverBudget(Budget::Data {
             limit_bytes: super::verify::DATA_MAX_BYTES,
         })),
-        (401 | 403, _) => MountedError::Run(PythonRunError::Internal(REJECTED.to_string())),
+        // Rejected credentials are a setup problem, never "retry later".
+        (401 | 403, _) => refused(RunRefusal::Unavailable(Unavailable::Rejected)),
+        // The upload was cut on the way (a dropped connection, a body that ended
+        // early): a moment, not a malformed request.
+        (_, Some("upload_interrupted")) => unavailable(),
         (_, Some("executor_not_ready")) => refused(RunRefusal::Unavailable(Unavailable::NotReady)),
         (_, Some("volume_io")) => refused(RunRefusal::Unavailable(Unavailable::VolumeIo)),
         // The server does not accept what was sent (wire version, an output size, a
@@ -216,6 +220,7 @@ async fn receive<S, E>(
     reader: &mut Reader<S>,
     head: &ResponseHeader,
     call: &MountedCall<'_>,
+    spool_permit: Option<tokio::sync::OwnedSemaphorePermit>,
 ) -> Result<Vec<String>, MountedError>
 where
     S: futures::Stream<Item = Result<Bytes, E>> + Unpin,
@@ -224,17 +229,8 @@ where
     if head.files.len() > limits.max_files {
         return Err(unavailable());
     }
-    // Bounded: only so many responses spool at once.
-    let _permit = if head.files.is_empty() {
-        None
-    } else {
-        Some(
-            spool_slots()
-                .acquire_owned()
-                .await
-                .map_err(|_| unavailable())?,
-        )
-    };
+    // The spool's permit was taken before the call was sent (see `admit_spool`): a
+    // response never waits for room after the server ran the code.
     let mut total = 0u64;
     let mut names = std::collections::HashSet::new();
     let mut spooled: Vec<OutFile> = vec![];
@@ -265,6 +261,8 @@ where
         spooled.push(OutFile::spooled(name, format, entry.size, std_file));
     }
     reader.expect_end().await.map_err(|_| unavailable())?;
+    // The spool is complete and sound: its room goes back now, not after the sinks.
+    drop(spool_permit);
     let mut emitted = vec![];
     if let Some(sink) = call.sink {
         for out in spooled {
@@ -330,6 +328,20 @@ pub(crate) fn spool_slots() -> std::sync::Arc<tokio::sync::Semaphore> {
     SPOOL_SLOTS
         .get_or_init(|| std::sync::Arc::new(tokio::sync::Semaphore::new(2)))
         .clone()
+}
+
+/// How long a call waits for room to spool its response before it is refused.
+const SPOOL_ADMIT: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Takes one spool slot, or refuses the call as busy (the budget of calls in flight).
+async fn admit_spool(
+    slots: std::sync::Arc<tokio::sync::Semaphore>,
+    wait: std::time::Duration,
+) -> Result<tokio::sync::OwnedSemaphorePermit, MountedError> {
+    match tokio::time::timeout(wait, slots.acquire_owned()).await {
+        Ok(Ok(permit)) => Ok(permit),
+        _ => Err(refused(RunRefusal::OverBudget(Budget::Volumes))),
+    }
 }
 
 /// The most a small answer body (a refusal) is read: a server that sends more is
@@ -409,12 +421,18 @@ impl RemoteExecutor {
                 &req.inputs,
             ))));
         }
+        // Room to spool the response is taken now, as part of admission: after the
+        // server has run the code, a wait for it could outlast the server's send
+        // timeout and lose a finished run. Refused as busy (retryable) when it
+        // cannot be had quickly.
+        let mut spool_permit = Some(admit_spool(spool_slots(), SPOOL_ADMIT).await?);
         // Credentials and readiness are checked BEFORE any part is read from
         // storage: a server that refuses the caller answers while the body
         // is still unsent, and a refused upload can look like a dropped connection.
-        self.warm()
-            .await
-            .map_err(|text| MountedError::Run(PythonRunError::Internal(text)))?;
+        self.warm().await.map_err(|text| match text == REJECTED {
+            true => refused(RunRefusal::Unavailable(Unavailable::Rejected)),
+            false => MountedError::Run(PythonRunError::Internal(text)),
+        })?;
         let (client, base, max_timeout) = self.transport();
         // A probe: the same header with `probe` set, answered before any data is
         // read. What the server would refuse (no route, no staging root, mounts
@@ -518,7 +536,7 @@ impl RemoteExecutor {
         let too_many_entries = head.too_many_entries;
         match head.status {
             RunStatus::Ok => {
-                let emitted = receive(&mut reader, &head, &call).await?;
+                let emitted = receive(&mut reader, &head, &call, spool_permit.take()).await?;
                 Ok(MountedResult {
                     result: PythonRunResult {
                         output: head.output,
@@ -751,9 +769,6 @@ mod tests {
             refusal(refusal_of(503, false, None)),
             RunRefusal::Unavailable(Unavailable::Executor)
         );
-        assert!(
-            matches!(refusal_of(401, false, None), MountedError::Run(PythonRunError::Internal(t)) if t.contains("rejected"))
-        );
     }
 
     #[test]
@@ -836,7 +851,7 @@ mod tests {
             Duration::from_millis(300),
             Duration::from_secs(5),
         );
-        let got = receive(&mut reader, &head, &call).await;
+        let got = receive(&mut reader, &head, &call, None).await;
         let seen = sink.0.lock().unwrap().clone();
         (got, seen)
     }
@@ -1060,22 +1075,92 @@ mod tests {
         assert_eq!(seen.load(Ordering::SeqCst), 0, "nothing was sent");
     }
 
-    /// Only two responses spool at a time; a third waits for one to end.
+    /// Only two calls hold room to spool at a time; a third is refused as busy,
+    /// quickly, BEFORE its call is sent (not after the server has run it).
     #[tokio::test]
-    async fn the_number_of_responses_spooled_at_once_is_bounded() {
+    async fn a_third_call_is_refused_as_busy_before_it_is_sent() {
+        let slots = std::sync::Arc::new(tokio::sync::Semaphore::new(2));
         let held = (
-            spool_slots().acquire_owned().await.unwrap(),
-            spool_slots().acquire_owned().await.unwrap(),
+            admit_spool(slots.clone(), Duration::from_millis(50))
+                .await
+                .unwrap(),
+            admit_spool(slots.clone(), Duration::from_millis(50))
+                .await
+                .unwrap(),
         );
-        let waiting =
-            tokio::time::timeout(Duration::from_millis(200), hostile(&[("a.csv", 1)], b"x")).await;
-        assert!(
-            waiting.is_err(),
-            "a third spool must wait while two are held"
-        );
+        let started = std::time::Instant::now();
+        let third = admit_spool(slots.clone(), Duration::from_millis(100)).await;
+        assert!(started.elapsed() < Duration::from_secs(1));
+        match third {
+            Err(MountedError::Refused(r)) => {
+                assert_eq!(r, RunRefusal::OverBudget(Budget::Volumes));
+                assert!(r.retryable());
+            }
+            other => panic!("{:?}", other.map(|_| ())),
+        }
         drop(held);
-        let (got, _) = hostile(&[("a.csv", 1)], b"x").await;
-        assert!(got.is_ok());
+        assert!(admit_spool(slots, Duration::from_millis(50)).await.is_ok());
+    }
+
+    /// The room goes back as soon as the response is validated, not after the sinks:
+    /// a slow upload does not hold the next call up.
+    #[tokio::test]
+    async fn the_spool_is_released_before_the_sinks_run() {
+        struct Slow(
+            std::sync::Arc<tokio::sync::Semaphore>,
+            std::sync::Mutex<Vec<usize>>,
+        );
+        #[async_trait]
+        impl super::super::mounted::OutputSink for Slow {
+            async fn accept(&self, _file: OutFile) -> Result<(), RunRefusal> {
+                self.1.lock().unwrap().push(self.0.available_permits());
+                Ok(())
+            }
+        }
+        let p = prepared(&[("sales", 1)], 4).await;
+        let plan = verify_prepared(&*p.registry, &*p.storage, SOURCE)
+            .await
+            .unwrap();
+        let slots = std::sync::Arc::new(tokio::sync::Semaphore::new(1));
+        let sink = Slow(slots.clone(), Default::default());
+        let call = MountedCall {
+            storage: &*p.storage,
+            plan: &plan,
+            tables: &[0],
+            limits: StageLimits::default(),
+            out_mb: 4,
+            sink: Some(&sink),
+        };
+        let head = ResponseHeader {
+            v: WIRE_V2,
+            status: RunStatus::Ok,
+            message: None,
+            output: None,
+            stdout: String::new(),
+            files: vec![super::super::wire::OutEntry {
+                name: "a.csv".into(),
+                size: 1,
+            }],
+            dropped: vec![],
+            too_many_entries: false,
+        };
+        let chunks: Vec<Result<Bytes, ()>> = vec![Ok(Bytes::from_static(b"x"))];
+        let mut reader = Reader::new(
+            futures::stream::iter(chunks),
+            Duration::from_millis(300),
+            Duration::from_secs(5),
+        );
+        let permit = admit_spool(slots.clone(), Duration::from_millis(50))
+            .await
+            .unwrap();
+        receive(&mut reader, &head, &call, Some(permit))
+            .await
+            .unwrap();
+        assert_eq!(
+            *sink.1.lock().unwrap(),
+            [1],
+            "the permit was free while the sink ran"
+        );
     }
 
     /// The advice follows what overflowed: the table list is not the model's code.
@@ -1114,6 +1199,16 @@ mod tests {
             assert_eq!(r, RunRefusal::Unavailable(Unavailable::Misconfigured));
             assert!(!r.retryable());
         }
+        // Rejected credentials are a permanent, clearly worded setup problem.
+        for status in [401, 403] {
+            let r = refusal(refusal_of(status, false, None));
+            assert_eq!(r, RunRefusal::Unavailable(Unavailable::Rejected));
+            assert!(!r.retryable() && r.message().contains("credentials"));
+        }
+        // An upload cut on the way is a moment, not a malformed request.
+        let r = refusal(refusal_of(503, false, body("upload_interrupted")));
+        assert_eq!(r, RunRefusal::Unavailable(Unavailable::Executor));
+        assert!(r.retryable());
         assert!(RunRefusal::Unavailable(Unavailable::NotReady).retryable());
         assert!(!RunRefusal::CopyDamaged.retryable());
         assert_eq!(

@@ -58,6 +58,9 @@ struct LargeResponse {
     /// What the code could read: `[{name, rows, columns: [{name, type}]}]`.
     #[serde(skip_serializing_if = "serde_json::Value::is_null")]
     tables: serde_json::Value,
+    /// Sheets of the workbook that are not tables, and why; absent when none.
+    #[serde(skip_serializing_if = "serde_json::Value::is_null")]
+    skipped_sheets: serde_json::Value,
     /// Set when `result` was cut: what to do instead.
     #[serde(skip_serializing_if = "Option::is_none")]
     result_note: Option<&'static str>,
@@ -153,7 +156,7 @@ pub(super) async fn dispatch(
         raw_arguments,
         target,
         every,
-        CALL_BUDGET,
+        executor.large_call_budget().unwrap_or(CALL_BUDGET),
     )
     .await
 }
@@ -324,6 +327,7 @@ struct Finished {
     stdout: String,
     result: serde_json::Value,
     tables: serde_json::Value,
+    skipped: serde_json::Value,
     emitted: Vec<crate::tabular_run::runtime::EmittedOutput>,
     not_kept: Vec<String>,
     keeping: Keeping,
@@ -354,25 +358,41 @@ async fn dispatch_bounded(
         interval: every,
         call_budget: budget,
     };
-    let run = target.runtime.run(LargeRunRequest {
-        source_key: target.source_key,
-        mime_type: target.mime_type,
-        filename: target.filename,
-        size_bytes: target.size_bytes,
-        code: args.code.clone(),
-        tables: requested_tables(raw_arguments),
-        session_id: target.session_id,
-        agent_session_id: target.agent_session_id,
-        phase: phase.clone(),
-    });
     // Keeping the returned files is part of the call, so it runs under the call's
     // clock; cut off, the ledger dropped inside undoes what it did.
     let work = async {
-        let out = run.await?;
+        // A conversation already at its limit is known before the code runs: the call
+        // still runs, its files are not stored (nothing is uploaded to be deleted) and
+        // the answer says so. A usage that cannot be read here is left to `keep_outputs`.
+        let keep_files = match tokio::time::timeout(
+            REGISTRY_STEP,
+            executor.generated_usage(super::ATTACHMENT_RUN_PYTHON_TOOL_NAME),
+        )
+        .await
+        {
+            Ok(Some((files, bytes))) => files < SESSION_MAX_FILES && bytes < SESSION_MAX_BYTES,
+            _ => true,
+        };
+        let out = target
+            .runtime
+            .run(LargeRunRequest {
+                source_key: target.source_key,
+                mime_type: target.mime_type,
+                filename: target.filename,
+                size_bytes: target.size_bytes,
+                code: args.code.clone(),
+                tables: requested_tables(raw_arguments),
+                session_id: target.session_id,
+                agent_session_id: target.agent_session_id,
+                phase: phase.clone(),
+                keep_files,
+            })
+            .await?;
         let crate::tabular_run::runtime::LargeRunOutput {
             stdout,
             result,
             tables,
+            skipped,
             emitted,
             not_kept,
             guard,
@@ -383,6 +403,7 @@ async fn dispatch_bounded(
             stdout,
             result,
             tables,
+            skipped,
             emitted,
             not_kept,
             keeping,
@@ -437,6 +458,7 @@ async fn dispatch_bounded(
                     result_note,
                     duration_ms,
                     tables: out.tables,
+                    skipped_sheets: out.skipped,
                     emitted,
                     not_kept,
                     error: None,
@@ -454,6 +476,7 @@ async fn dispatch_bounded(
                 result_note: None,
                 duration_ms,
                 tables: serde_json::Value::Null,
+                skipped_sheets: serde_json::Value::Null,
                 emitted: vec![],
                 not_kept: vec![],
                 error: Some(truncate(&text, OUTPUT_BYTE_CAP)),
@@ -940,7 +963,8 @@ mod tests {
     async fn a_conversation_at_its_file_quota_still_gets_its_result_but_keeps_no_file() {
         use crate::tabular_run::refusal::SESSION_MAX_FILES;
         let p = prepared(&[("sales", 1)], 4).await;
-        // Nothing to keep: the call runs and answers exactly as it would otherwise.
+        // The conversation is at its limit: the call runs and returns its result, and
+        // the answer says up front that no file of this call is kept.
         let exec = Recorder::ok(json!(1));
         let ex = with_registry(
             generated_rows(SESSION_MAX_FILES, 10),
@@ -948,12 +972,15 @@ mod tests {
         );
         let out = body(&ex, r#"{"attachment_id":"doc-1","code":"pass"}"#).await;
         assert_eq!(out["result"], 1, "{out}");
+        assert!(out.get("code").is_none(), "{out}");
         assert!(
-            out.get("code").is_none() && out.get("not_kept").is_none(),
+            out["not_kept"]
+                .to_string()
+                .contains("return results in the answer"),
             "{out}"
         );
         assert_eq!(exec.calls(), 1);
-        // Files it would add are refused (and deleted), with a sentence the model can act on.
+        // Files the code returns are not even stored: nothing is uploaded to be deleted.
         let exec = Recorder::ok_with_files(json!(2), &[("out.csv", b"12345")]);
         let ex = with_registry(
             generated_rows(SESSION_MAX_FILES, 10),
@@ -962,14 +989,46 @@ mod tests {
         let out = body(&ex, r#"{"attachment_id":"doc-1","code":"pass"}"#).await;
         assert_eq!(out["result"], 2);
         assert!(out.get("emitted").is_none(), "{out}");
+        assert!(p.storage.stored.lock().unwrap().is_empty());
+        assert!(p.storage.deleted.lock().unwrap().is_empty());
+    }
+
+    /// A call that only CROSSES the limit is told it would exceed it, with the
+    /// numbers; one already at the limit is told the limit is reached.
+    #[tokio::test]
+    async fn the_quota_message_says_would_exceed_when_only_this_call_crosses_it() {
+        use crate::tabular_run::refusal::SESSION_MAX_FILES;
+        let p = prepared(&[("sales", 1)], 4).await;
+        let exec = Recorder::ok_with_files(json!(1), &[("a.csv", b"1"), ("b.csv", b"2")]);
+        let ex = with_registry(
+            generated_rows(SESSION_MAX_FILES - 1, 10),
+            Arc::new(runtime(&p, exec, true)),
+        );
+        let out = body(&ex, r#"{"attachment_id":"doc-1","code":"pass"}"#).await;
+        assert!(out.get("emitted").is_none(), "{out}");
         let why = out["not_kept"].to_string();
         assert!(
-            why.contains("none of the 1 returned file(s) was kept")
-                && why.contains("return results in the answer"),
+            why.contains("would exceed") && why.contains("files kept so far"),
             "{why}"
         );
-        settle().await;
-        assert_eq!(*p.storage.deleted.lock().unwrap(), ["generated/out.csv"]);
+        assert!(!why.contains("already holds"), "{why}");
+    }
+
+    /// The quota counts the files THIS tool returned (its origin tag) and nothing else:
+    /// the small path registers no generated attachment, and other tools' files carry
+    /// their own tags.
+    #[tokio::test]
+    async fn the_quota_counts_only_the_files_this_tool_returned() {
+        use crate::tabular_run::refusal::SESSION_MAX_FILES;
+        let p = prepared(&[("sales", 1)], 4).await;
+        let mut rows = generated_rows(SESSION_MAX_FILES, 10);
+        for r in &mut rows {
+            r.origin = Some(origin::generated_by("data_run_python"));
+        }
+        let exec = Recorder::ok_with_files(json!(1), &[("out.csv", b"1")]);
+        let ex = with_registry(rows, Arc::new(runtime(&p, exec, true)));
+        let out = body(&ex, r#"{"attachment_id":"doc-1","code":"pass"}"#).await;
+        assert_eq!(out["emitted"].as_array().map(|a| a.len()), Some(1), "{out}");
     }
 
     /// The call that would cross the quota keeps none of its files, says so, and
@@ -1243,6 +1302,302 @@ mod tests {
         deleted.sort();
         assert_eq!(deleted, ["generated/a.csv", "generated/b.csv"]);
         assert!(book.rows.lock().unwrap().is_empty());
+    }
+
+    /// How the registry misbehaves in an interleaving test.
+    #[derive(Clone, Copy, PartialEq)]
+    enum Fault {
+        /// The nth upsert commits, then reports an error.
+        UpsertCommitsThenErrs(usize),
+        /// The nth upsert commits, then never answers.
+        UpsertCommitsThenHangs(usize),
+        /// Every row delete commits, then reports an error.
+        DeleteCommitsThenErrs,
+        /// The first row delete never answers (the next ones work).
+        FirstDeleteHangs,
+        /// Every row delete never answers, and the row stays.
+        DeleteHangs,
+    }
+
+    /// The book's registry, with one fault.
+    struct Faulty {
+        inner: Arc<dyn crate::llm::domain::AttachmentRegistry>,
+        fault: Fault,
+        upserts: std::sync::atomic::AtomicUsize,
+        deletes: std::sync::atomic::AtomicUsize,
+    }
+
+    impl Faulty {
+        fn over(book: &Book, p: &Prepared, fault: Fault) -> Arc<Self> {
+            Arc::new(Self {
+                inner: Arc::new(book.registry(p.storage.deleted_handle())),
+                fault,
+                upserts: Default::default(),
+                deletes: Default::default(),
+            })
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl crate::llm::domain::AttachmentRegistry for Faulty {
+        async fn upsert(
+            &self,
+            input: crate::llm::domain::attachments::UpsertAttachmentInput,
+        ) -> Result<(), AttachmentError> {
+            let n = self
+                .upserts
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                + 1;
+            self.inner.upsert(input).await?;
+            match self.fault {
+                Fault::UpsertCommitsThenErrs(k) if k == n => {
+                    Err(AttachmentError::RepositoryFailed("timed out".into()))
+                }
+                Fault::UpsertCommitsThenHangs(k) if k == n => std::future::pending().await,
+                _ => Ok(()),
+            }
+        }
+        async fn upsert_checked(
+            &self,
+            input: crate::llm::domain::attachments::UpsertAttachmentInput,
+        ) -> Result<crate::llm::domain::attachments::UpsertOutcome, AttachmentError> {
+            self.inner.upsert_checked(input).await
+        }
+        async fn lookup(
+            &self,
+            a: &str,
+            d: &str,
+            p: ProviderKind,
+        ) -> Result<Option<ConversationAttachment>, AttachmentError> {
+            self.inner.lookup(a, d, p).await
+        }
+        async fn refresh_provider_file_id(
+            &self,
+            a: &str,
+            d: &str,
+            p: ProviderKind,
+            f: &str,
+        ) -> Result<(), AttachmentError> {
+            self.inner.refresh_provider_file_id(a, d, p, f).await
+        }
+        async fn update_description(
+            &self,
+            a: &str,
+            d: &str,
+            p: ProviderKind,
+            t: &str,
+        ) -> Result<(), AttachmentError> {
+            self.inner.update_description(a, d, p, t).await
+        }
+        async fn list_for_session(
+            &self,
+            a: &str,
+        ) -> Result<Vec<ConversationAttachment>, AttachmentError> {
+            self.inner.list_for_session(a).await
+        }
+        async fn lookup_by_document_id(
+            &self,
+            a: &str,
+            d: &str,
+        ) -> Result<Option<ConversationAttachment>, AttachmentError> {
+            self.inner.lookup_by_document_id(a, d).await
+        }
+        async fn touch_last_used(&self, a: &str, d: &str) -> Result<(), AttachmentError> {
+            self.inner.touch_last_used(a, d).await
+        }
+        async fn find_stale_attachments(
+            &self,
+            q: crate::llm::domain::attachments::StaleAttachmentQuery,
+        ) -> Result<Vec<ConversationAttachment>, AttachmentError> {
+            self.inner.find_stale_attachments(q).await
+        }
+        async fn delete_attachment(&self, a: &str, d: &str) -> Result<(), AttachmentError> {
+            self.inner.delete_attachment(a, d).await
+        }
+        async fn delete_attachment_for_provider(
+            &self,
+            a: &str,
+            d: &str,
+            p: ProviderKind,
+        ) -> Result<(), AttachmentError> {
+            let n = self
+                .deletes
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            match self.fault {
+                Fault::DeleteHangs => std::future::pending().await,
+                Fault::FirstDeleteHangs if n == 0 => std::future::pending().await,
+                Fault::DeleteCommitsThenErrs => {
+                    self.inner.delete_attachment_for_provider(a, d, p).await?;
+                    Err(AttachmentError::RepositoryFailed("timed out".into()))
+                }
+                _ => self.inner.delete_attachment_for_provider(a, d, p).await,
+            }
+        }
+    }
+
+    fn with_faulty(faulty: Arc<Faulty>, p: &Prepared, exec: Arc<Recorder>) -> DagToolExecutor {
+        executor(true, Some(Arc::new(runtime(p, exec, true))))
+            .with_attachment_registry(faulty)
+            .with_agent_session_id(Some("agent_1".into()))
+    }
+
+    const CALL: &str = r#"{"attachment_id":"doc-1","code":"pass"}"#;
+
+    async fn two_files() -> (Prepared, Arc<Recorder>) {
+        (
+            prepared(&[("sales", 1)], 4).await,
+            Recorder::ok_with_files(json!(1), &[("a.csv", b"1"), ("b.csv", b"2")]),
+        )
+    }
+
+    fn nothing_left(book: &Book, p: &Prepared) {
+        let mut deleted = p.storage.deleted.lock().unwrap().clone();
+        deleted.sort();
+        assert_eq!(deleted, ["generated/a.csv", "generated/b.csv"]);
+        assert!(
+            book.rows.lock().unwrap().is_empty(),
+            "a row points at a deleted object"
+        );
+    }
+
+    /// An upsert that COMMITTED but reported an error leaves no row pointing at a
+    /// deleted object: the row was marked "may exist" before it was asked for.
+    #[tokio::test]
+    async fn an_upsert_that_committed_and_then_failed_is_undone() {
+        let (p, exec) = two_files().await;
+        let book = Book::default();
+        let faulty = Faulty::over(&book, &p, Fault::UpsertCommitsThenErrs(2));
+        let out = body(&with_faulty(faulty, &p, exec), CALL).await;
+        assert!(out.get("emitted").is_none(), "{out}");
+        assert!(
+            out["not_kept"].to_string().contains("none was kept"),
+            "{out}"
+        );
+        settle().await;
+        nothing_left(&book, &p);
+    }
+
+    /// An upsert that committed and then never answered is cut by its own timeout
+    /// and undone the same way.
+    #[tokio::test]
+    async fn an_upsert_that_committed_and_then_hung_is_undone() {
+        let (p, exec) = two_files().await;
+        let book = Book::default();
+        let faulty = Faulty::over(&book, &p, Fault::UpsertCommitsThenHangs(2));
+        let out = body(&with_faulty(faulty, &p, exec), CALL).await;
+        assert!(out.get("emitted").is_none(), "{out}");
+        settle().await;
+        nothing_left(&book, &p);
+    }
+
+    /// A row delete whose outcome is unknown (it committed, then errored) is re-read:
+    /// the row is gone, so the objects go and nothing is reported kept.
+    #[tokio::test]
+    async fn an_unknown_row_delete_is_reread_before_it_is_called_kept() {
+        let (p, exec) = two_files().await;
+        let book = Book::default();
+        let faulty = Faulty::over(&book, &p, Fault::UpsertCommitsThenErrs(2));
+        let faulty = Arc::new(Faulty {
+            fault: Fault::DeleteCommitsThenErrs,
+            ..Arc::try_unwrap(faulty).ok().unwrap()
+        });
+        // The second upsert must still fail: do it through the book's own switch.
+        *book.fail_upsert_on.lock().unwrap() = Some(2);
+        let out = body(&with_faulty(faulty, &p, exec), CALL).await;
+        assert!(
+            out.get("emitted").is_none(),
+            "nothing is reported kept: {out}"
+        );
+        settle().await;
+        nothing_left(&book, &p);
+    }
+
+    /// A cleanup cut off midway (the rollback's future dropped while a row delete
+    /// hangs) is finished by the ledger's Drop: nothing is left.
+    #[tokio::test]
+    async fn a_rollback_cut_off_midway_is_finished_by_the_ledger() {
+        use crate::tabular_run::outputs::StoreSink;
+        let p = prepared(&[("sales", 1)], 4).await;
+        let book = Book::default();
+        let faulty = Faulty::over(&book, &p, Fault::FirstDeleteHangs);
+        let sink = StoreSink::new(p.storage.clone(), None, None);
+        let dir = tempfile::tempdir().unwrap();
+        for (n, b) in [("a.csv", b"1"), ("b.csv", b"2")] {
+            std::fs::write(dir.path().join(n), b).unwrap();
+        }
+        let found =
+            crate::tabular_run::collect::collect_out(dir.path(), Default::default()).unwrap();
+        for f in found.files {
+            crate::tabular_run::mounted::OutputSink::accept(&sink, f)
+                .await
+                .unwrap();
+        }
+        let (_, guard) = sink.take_guarded();
+        let mut ledger = guard.into_ledger(Some((faulty, "agent_1".into())));
+        for k in ["generated/a.csv", "generated/b.csv"] {
+            book.rows.lock().unwrap().push(ConversationAttachment {
+                document_id: k.into(),
+                ..row(false)
+            });
+            ledger.row_may_exist(k);
+        }
+        // Dropped while the first delete hangs.
+        let cut =
+            tokio::time::timeout(std::time::Duration::from_millis(100), ledger.rollback()).await;
+        assert!(cut.is_err(), "the rollback was still waiting");
+        tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
+        nothing_left(&book, &p);
+    }
+
+    /// The conversation's lock is free while a failed registration's rows are being
+    /// taken back: a hanging delete does not hold other calls up.
+    #[tokio::test]
+    async fn the_lock_is_not_held_across_the_rollback() {
+        let (p, exec) = two_files().await;
+        let book = Book::default();
+        *book.fail_upsert_on.lock().unwrap() = Some(2);
+        let faulty = Faulty::over(&book, &p, Fault::DeleteHangs);
+        let watched = faulty.clone();
+        // Its own conversation: the lock is per conversation and other tests share "agent_1".
+        let ex =
+            with_faulty(faulty, &p, exec).with_agent_session_id(Some("agent_lock_probe".into()));
+        let probe = async move {
+            // The rollback is running once a row delete has begun (it then hangs).
+            while watched.deletes.load(std::sync::atomic::Ordering::SeqCst) == 0 {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+            super::session_lock("agent_lock_probe").try_lock().is_ok()
+        };
+        let (_, free) = tokio::join!(body(&ex, CALL), probe);
+        assert!(free, "the lock was held while rows were being removed");
+    }
+
+    /// Keeping the files is inside the call's clock: a registry that never answers is
+    /// cut by the clock too, and the ledger inside undoes what it made.
+    #[tokio::test]
+    async fn keeping_the_files_runs_under_the_calls_clock() {
+        let (p, exec) = two_files().await;
+        let book = Book::default();
+        let faulty = Faulty::over(&book, &p, Fault::UpsertCommitsThenHangs(1));
+        let ex = with_faulty(faulty, &p, exec);
+        let target = ex.large_target("doc-1").expect("routed");
+        let result = super::dispatch_bounded(
+            &ex,
+            "c1",
+            &args(),
+            "{}",
+            target,
+            std::time::Duration::from_secs(1),
+            std::time::Duration::from_millis(120),
+        )
+        .await;
+        assert!(
+            result.output.contains("did not finish"),
+            "{}",
+            result.output
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
+        nothing_left(&book, &p);
     }
 
     /// A usage that cannot be read is not zero: the files are not kept.

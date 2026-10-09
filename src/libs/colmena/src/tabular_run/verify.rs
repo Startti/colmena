@@ -508,6 +508,48 @@ mod tests {
         assert_eq!(err, RunRefusal::Invalid(Invalid::Manifest));
     }
 
+    /// A workbook's manifest carries `conversion` and `skipped`: the reader accepts it,
+    /// and the tables and parts it checks are the same as without them.
+    #[tokio::test]
+    async fn a_manifest_with_a_conversion_report_and_skipped_sheets_is_read() {
+        use crate::tabular_prepare::manifest::{
+            ConversionReport, SkippedSheet, SKIPPED_HEADER_ROW,
+        };
+        let p = prepared(&[("sales", 1)], 10).await;
+        let report = ConversionReport {
+            table: "sales".into(),
+            encoding: "utf-8".into(),
+            replacements: 0,
+            utf8_valid_multibyte: 0,
+            utf8_invalid: 0,
+            blank_rows: 0,
+            blank_dropped: 0,
+            padded_rows: 0,
+            restarts: 0,
+            all_strings: false,
+            demoted_count: 0,
+            demoted: vec![],
+        };
+        let manifest = p
+            .manifest
+            .clone()
+            .with_conversion(vec![report])
+            .with_skipped(vec![SkippedSheet {
+                sheet: "Title".into(),
+                reason: SKIPPED_HEADER_ROW.into(),
+            }]);
+        p.storage.put(
+            &format!("{ROOT}/manifest.json"),
+            manifest.to_json().unwrap().into_bytes(),
+        );
+        let plan = verify_prepared(&*p.registry, &*p.storage, SOURCE)
+            .await
+            .unwrap();
+        assert_eq!(plan.manifest().skipped.len(), 1);
+        assert_eq!(plan.manifest().conversion.len(), 1);
+        assert_eq!(plan.tables().len(), 1);
+    }
+
     #[tokio::test]
     async fn a_part_the_row_does_not_track_is_invalid() {
         let p = prepared_with(

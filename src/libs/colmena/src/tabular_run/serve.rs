@@ -72,7 +72,9 @@ fn wire_failure(e: super::wire::WireError) -> Response {
     use super::wire::WireError::*;
     match e {
         Stalled | Deadline => bad(StatusCode::REQUEST_TIMEOUT, "timeout"),
-        Early | Malformed | Transport => bad(StatusCode::BAD_REQUEST, "bad_request"),
+        // The upload was cut on the way: retryable, and not the caller's mistake.
+        Early | Transport => bad(StatusCode::SERVICE_UNAVAILABLE, "upload_interrupted"),
+        Malformed => bad(StatusCode::BAD_REQUEST, "bad_request"),
     }
 }
 
