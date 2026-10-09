@@ -154,6 +154,10 @@ pub struct DagToolExecutor {
     /// AttachmentStreamResolver uses. `None` → snapshot-only (legacy).
     attachment_registry:
         Option<std::sync::Arc<dyn crate::llm::domain::attachments::AttachmentRegistry>>,
+    /// Runs the model's code over a prepared large tabular file. `None` (the
+    /// default, and always with `COLMENA_LARGE_TABULAR` off) means no call is
+    /// routed to the large path. See `large_route`.
+    large_tabular: Option<Arc<crate::tabular_run::runtime::LargeTabularRuntime>>,
     /// F-T15: per-call wiring for the `recall_history` synthetic tool.
     /// When both fields are populated, the executor intercepts `recall_history`
     /// tool calls and reads the persisted conversation directly. When either is
@@ -415,6 +419,7 @@ impl DagToolExecutor {
             attachment_catalog: None,
             attachment_storage: None,
             attachment_registry: None,
+            large_tabular: None,
             conversation_repository: None,
             conversation_key: None,
             max_tool_result_bytes: DEFAULT_MAX_TOOL_RESULT_STRING_BYTES,
@@ -8916,6 +8921,9 @@ mod tool_progress_emitter_tests {
         );
     }
 }
+
+mod large_route;
+pub(crate) use large_route::LargeTarget;
 
 #[cfg(test)]
 mod large_object_guard;

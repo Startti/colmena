@@ -1559,3 +1559,19 @@ The answer is `LargeRunOutput {stdout, result, tables}` or a `LargeRunError`: `R
 (the executor is never asked in that case), `Python(text)` for the code's own failure, `Timeout`, or `Internal(text)` for an
 executor failure. A child that ended without a result and a `MemoryError` both read as one fixed sentence telling the model
 to select fewer columns or iterate parts (the limit is memory or CPU; the sentence says "probably").
+
+### Routing a call to the large path (`large_route.rs`, `attachment_run_python/large.rs`)
+
+`DagToolExecutor::with_large_tabular(runtime)` wires the runtime; `attachment_run_python` asks `large_target(attachment_id)`
+before it reads anything. A call is routed only when a runtime is wired AND the attachment's row in the start-of-turn
+catalog snapshot is a reference to an object the host owns (`origin = host_storage_ref`, which is how a large
+`storage_key`-only entry is registered). Anything else takes the path it always took: with no runtime `large_target` returns
+at its first line and looks at nothing, and the decision reads only the snapshot, so a small file's call gains no registry
+lookup and no storage call even with the runtime wired. A host-owned file with no runtime keeps the refusal
+`fetch_attachment_bytes` has always given.
+
+The routed call answers `{stdout, result, duration_ms, tables, error?}` where the small path answers
+`row_count` and `columns`; `tables` is `[{name, rows, columns: [{name, type}]}]` and no size, path or key. A refusal is the
+typed error object `{error, code, source}` and nothing else. The tool's optional `tables` argument (names to make readable;
+default all) is parsed but left out of the schema every call sees (`#[schemars(skip)]`), so the schema the model sees today
+is unchanged; a switch that is on shows it with the tool text (a later slice).

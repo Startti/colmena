@@ -1,0 +1,54 @@
+//! Where a tool call over a large file is routed (dark behind
+//! `COLMENA_LARGE_TABULAR`).
+//!
+//! A call goes to the large path only when a runtime is wired (the switch is on
+//! and the host gave the engine what it needs) AND the file's catalog row is a
+//! reference to an object the HOST owns, which is what a large `storage_key`-only
+//! entry is registered as. Everything else, small files included, takes the path
+//! it always took: with no runtime nothing here looks at anything, and the
+//! decision reads only the start-of-turn catalog snapshot, so it adds no lookup
+//! and no storage call to a small file's call.
+
+use super::DagToolExecutor;
+use crate::tabular_run::runtime::LargeTabularRuntime;
+use std::sync::Arc;
+
+/// A large file the model wants to run code over, as the catalog row says.
+pub(crate) struct LargeTarget {
+    pub runtime: Arc<LargeTabularRuntime>,
+    /// The host's key: from the session's own row, never from the model.
+    pub source_key: String,
+    pub mime_type: String,
+    pub filename: String,
+    pub size_bytes: u64,
+}
+
+impl DagToolExecutor {
+    /// Builder: wire the runtime that runs code over prepared large files.
+    pub fn with_large_tabular(mut self, runtime: Arc<LargeTabularRuntime>) -> Self {
+        self.large_tabular = Some(runtime);
+        self
+    }
+
+    /// The large path for `document_id`, or `None` when the call keeps its
+    /// usual path: no runtime is wired, the row is not in the catalog snapshot,
+    /// or it is not a host-owned reference.
+    pub(crate) fn large_target(&self, document_id: &str) -> Option<LargeTarget> {
+        let runtime = self.large_tabular.clone()?;
+        let row = self
+            .attachment_catalog
+            .as_ref()?
+            .iter()
+            .find(|a| a.document_id == document_id)?;
+        if !row.is_host_storage_ref() {
+            return None;
+        }
+        Some(LargeTarget {
+            runtime,
+            source_key: row.storage_key.clone()?,
+            mime_type: row.mime_type.clone(),
+            filename: row.filename.clone(),
+            size_bytes: row.size_bytes.unwrap_or(0),
+        })
+    }
+}
