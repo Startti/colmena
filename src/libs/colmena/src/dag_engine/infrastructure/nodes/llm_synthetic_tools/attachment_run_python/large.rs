@@ -158,6 +158,177 @@ pub(super) async fn dispatch(
     .await
 }
 
+/// What happened to the files a call returned.
+enum Keeping {
+    /// These keys are kept (all of them, or, when a row could not be taken back,
+    /// the ones that stayed).
+    Kept(Vec<String>),
+    /// None was kept; the sentence says why, in words the model can act on.
+    NotKept(String),
+}
+
+/// One lock per conversation: two calls of the same conversation count and register
+/// their files one after the other, so the quota is exact within a process. (Across
+/// processes it is not: each instance can add at most one call's files, 8, past it.)
+fn session_lock(session: &str) -> std::sync::Arc<tokio::sync::Mutex<()>> {
+    static LOCKS: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<String, std::sync::Arc<tokio::sync::Mutex<()>>>>,
+    > = std::sync::OnceLock::new();
+    let mut locks = LOCKS
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    if locks.len() > 4096 {
+        locks.retain(|_, l| std::sync::Arc::strong_count(l) > 1);
+    }
+    locks.entry(session.to_string()).or_default().clone()
+}
+
+/// Longest wait for the conversation's lock, and for each registry call made under it.
+const LOCK_WAIT: std::time::Duration = if cfg!(test) {
+    std::time::Duration::from_millis(500)
+} else {
+    std::time::Duration::from_secs(15)
+};
+const REGISTRY_STEP: std::time::Duration = if cfg!(test) {
+    std::time::Duration::from_millis(300)
+} else {
+    std::time::Duration::from_secs(10)
+};
+
+/// Why registering the returned files stopped.
+enum Stopped {
+    /// Nothing wrong with the registry, but the files cannot be kept.
+    Refused(String),
+    /// A registration failed or its outcome is unknown.
+    RegistrationFailed,
+}
+
+/// Checks the conversation's quota and registers every returned file, or none. The
+/// conversation's lock is held only for the usage read and the registrations, each
+/// bounded; the cleanup of a failure runs after it is released. A usage that cannot
+/// be read fails closed. Each row is marked "may exist" in the ledger BEFORE it is
+/// asked of the registry, so an upsert that committed but failed is still undone.
+async fn keep_outputs(
+    executor: &crate::dag_engine::infrastructure::dag_tool_executor::DagToolExecutor,
+    files: &[crate::tabular_run::runtime::EmittedOutput],
+    mut ledger: crate::tabular_run::outputs::OutputLedger,
+) -> Keeping {
+    if files.is_empty() {
+        ledger.commit();
+        return Keeping::Kept(vec![]);
+    }
+    let Some(session) = executor.session_for_outputs() else {
+        let _ = ledger.rollback().await;
+        return Keeping::NotKept(
+            "the returned files could not be saved to this conversation (no session to save them in), so none was kept".into(),
+        );
+    };
+    let stopped = {
+        let lock = session_lock(&session);
+        let held = tokio::time::timeout(LOCK_WAIT, lock.lock()).await;
+        let stopped = match held {
+            Err(_) => Some(Stopped::Refused(
+                "the conversation was busy saving other returned files, so none was kept; try again".into(),
+            )),
+            Ok(_held) => register_all(executor, files, &mut ledger).await.err(),
+        };
+        stopped
+    };
+    match stopped {
+        None => {
+            ledger.commit();
+            Keeping::Kept(files.iter().map(|f| f.storage_key.clone()).collect())
+        }
+        Some(Stopped::Refused(why)) => {
+            let _ = ledger.rollback().await;
+            Keeping::NotKept(why)
+        }
+        Some(Stopped::RegistrationFailed) => {
+            // Rows first, objects second; a pair whose row is not confirmed gone stays
+            // whole and is reported as kept, because it may be.
+            let stuck = ledger.rollback().await;
+            match stuck.is_empty() {
+                true => Keeping::NotKept(
+                    "the returned files could not be saved to this conversation, so none was kept"
+                        .into(),
+                ),
+                false => Keeping::Kept(stuck),
+            }
+        }
+    }
+}
+
+/// The part of [`keep_outputs`] that runs under the conversation's lock.
+async fn register_all(
+    executor: &crate::dag_engine::infrastructure::dag_tool_executor::DagToolExecutor,
+    files: &[crate::tabular_run::runtime::EmittedOutput],
+    ledger: &mut crate::tabular_run::outputs::OutputLedger,
+) -> Result<(), Stopped> {
+    let usage = tokio::time::timeout(
+        REGISTRY_STEP,
+        executor.generated_usage(super::ATTACHMENT_RUN_PYTHON_TOOL_NAME),
+    )
+    .await;
+    let Ok(Some((used_files, used_bytes))) = usage else {
+        return Err(Stopped::Refused(
+            "this conversation's limit on returned files could not be checked, so none of the returned files was kept; try again".into(),
+        ));
+    };
+    let new_bytes: u64 = files.iter().map(|f| f.size_bytes).sum();
+    if used_files + files.len() > SESSION_MAX_FILES || used_bytes + new_bytes > SESSION_MAX_BYTES {
+        return Err(Stopped::Refused(quota_text(
+            files.len(),
+            used_files,
+            used_bytes,
+        )));
+    }
+    for f in files {
+        ledger.row_may_exist(&f.storage_key);
+        let made = tokio::time::timeout(
+            REGISTRY_STEP,
+            executor.register_stored_attachment(
+                &f.storage_key,
+                &f.mime_type,
+                &f.name,
+                f.size_bytes,
+                super::ATTACHMENT_RUN_PYTHON_TOOL_NAME,
+            ),
+        )
+        .await;
+        if !matches!(made, Ok(Ok(()))) {
+            return Err(Stopped::RegistrationFailed);
+        }
+    }
+    Ok(())
+}
+
+/// What to tell the model when the files do not fit: whether the conversation was
+/// already at its limit or this call's files would take it past it.
+fn quota_text(returned: usize, used_files: usize, used_bytes: u64) -> String {
+    let at_limit = used_files >= SESSION_MAX_FILES || used_bytes >= SESSION_MAX_BYTES;
+    match at_limit {
+        true => format!(
+            "none of the {returned} returned file(s) was kept: {}",
+            RunRefusal::SessionQuota.message()
+        ),
+        false => format!(
+            "none of the {returned} returned file(s) was kept: keeping them would exceed this conversation's limit of {SESSION_MAX_FILES} files or {} MiB of returned files ({used_files} files kept so far). Return fewer or smaller files, or return results in the answer instead",
+            SESSION_MAX_BYTES / (1024 * 1024)
+        ),
+    }
+}
+
+/// Everything a finished call has to say, with the files already kept or not.
+struct Finished {
+    stdout: String,
+    result: serde_json::Value,
+    tables: serde_json::Value,
+    emitted: Vec<crate::tabular_run::runtime::EmittedOutput>,
+    not_kept: Vec<String>,
+    keeping: Keeping,
+}
+
 /// [`dispatch`] with the ticker's interval and the call's budget given, so a test
 /// can run it in seconds.
 async fn dispatch_bounded(
@@ -171,18 +342,6 @@ async fn dispatch_bounded(
 ) -> ToolResult {
     use crate::dag_engine::domain::observer::ToolProgressStage;
     use crate::dag_engine::infrastructure::dag_tool_executor::ProgressTick;
-    // The conversation's quota is checked before anything runs.
-    let usage = executor
-        .generated_usage(super::ATTACHMENT_RUN_PYTHON_TOOL_NAME)
-        .await;
-    if let Some((files, bytes)) = usage {
-        if files >= SESSION_MAX_FILES || bytes >= SESSION_MAX_BYTES {
-            return ToolResult::success(
-                call_id.to_string(),
-                RunRefusal::SessionQuota.to_tool_error().to_string(),
-            );
-        }
-    }
     let started = std::time::Instant::now();
     // Progress events keep the run loop's idle watchdog from cutting a run that
     // is silent for minutes, and bound the whole call. `tool_id` is the id of the
@@ -206,7 +365,30 @@ async fn dispatch_bounded(
         agent_session_id: target.agent_session_id,
         phase: phase.clone(),
     });
-    let outcome = match executor.with_progress_ticker(tick, run).await {
+    // Keeping the returned files is part of the call, so it runs under the call's
+    // clock; cut off, the ledger dropped inside undoes what it did.
+    let work = async {
+        let out = run.await?;
+        let crate::tabular_run::runtime::LargeRunOutput {
+            stdout,
+            result,
+            tables,
+            emitted,
+            not_kept,
+            guard,
+        } = out;
+        let ledger = guard.into_ledger(executor.registry_handle());
+        let keeping = keep_outputs(executor, &emitted, ledger).await;
+        Ok(Finished {
+            stdout,
+            result,
+            tables,
+            emitted,
+            not_kept,
+            keeping,
+        })
+    };
+    let outcome = match executor.with_progress_ticker(tick, work).await {
         Ok(outcome) => outcome,
         // The call's future was dropped: the request is closed, the child killed
         // and the volume given back by their own drop guards.
@@ -228,52 +410,13 @@ async fn dispatch_bounded(
     let duration_ms = started.elapsed().as_millis() as u64;
     match outcome {
         Ok(out) => {
+            use Keeping::*;
             let (result, result_note) = cap_result(out.result);
             let mut not_kept = out.not_kept;
             let mut emitted = vec![];
-            let (used_files, used_bytes) = usage.unwrap_or((0, 0));
-            let new_bytes: u64 = out.emitted.iter().map(|f| f.size_bytes).sum();
-            let over_quota = used_files + out.emitted.len() > SESSION_MAX_FILES
-                || used_bytes + new_bytes > SESSION_MAX_BYTES;
-            if over_quota {
-                // All or nothing: the guard deletes what was stored.
-                not_kept.push(format!(
-                    "none of the {} returned file(s) was kept: {}",
-                    out.emitted.len(),
-                    RunRefusal::SessionQuota.message()
-                ));
-            } else {
-                // Each returned file becomes an attachment of the session, through
-                // the path every generated file takes (engine-owned, not a host
-                // reference). Nothing is reported as kept unless it is stored AND
-                // registered; one failure takes back the others.
-                let mut registered: Vec<&str> = vec![];
-                let mut failed = false;
-                for f in &out.emitted {
-                    let done = executor
-                        .register_stored_attachment(
-                            &f.storage_key,
-                            &f.mime_type,
-                            &f.name,
-                            f.size_bytes,
-                            super::ATTACHMENT_RUN_PYTHON_TOOL_NAME,
-                        )
-                        .await;
-                    if done.is_err() {
-                        failed = true;
-                        break;
-                    }
-                    registered.push(&f.storage_key);
-                }
-                if failed {
-                    for key in registered {
-                        executor.unregister_stored_attachment(key).await;
-                    }
-                    not_kept.push(
-                        "the returned files could not be saved to this conversation, so none was kept".to_string(),
-                    );
-                } else {
-                    for f in out.emitted {
+            match out.keeping {
+                Kept(kept) => {
+                    for f in out.emitted.into_iter().filter(|f| kept.contains(&f.storage_key)) {
                         emitted.push(EmittedFile {
                             name: f.name,
                             mime_type: f.mime_type,
@@ -283,8 +426,8 @@ async fn dispatch_bounded(
                             dtypes_reported_by_code: f.dtypes,
                         });
                     }
-                    out.guard.commit();
                 }
+                NotKept(why) => not_kept.push(why),
             }
             answer(
                 call_id,
@@ -794,26 +937,39 @@ mod tests {
     /// A conversation that already holds the most this tool may return gets a
     /// typed refusal before anything runs.
     #[tokio::test]
-    async fn a_conversation_at_its_file_quota_is_refused_before_anything_runs() {
+    async fn a_conversation_at_its_file_quota_still_gets_its_result_but_keeps_no_file() {
         use crate::tabular_run::refusal::SESSION_MAX_FILES;
         let p = prepared(&[("sales", 1)], 4).await;
+        // Nothing to keep: the call runs and answers exactly as it would otherwise.
         let exec = Recorder::ok(json!(1));
         let ex = with_registry(
             generated_rows(SESSION_MAX_FILES, 10),
             Arc::new(runtime(&p, exec.clone(), true)),
         );
         let out = body(&ex, r#"{"attachment_id":"doc-1","code":"pass"}"#).await;
-        assert_eq!(out["code"], "large_tabular_quota");
-        assert_eq!(out["retryable"], false);
-        assert_eq!(exec.calls(), 0);
-        // One under the quota still runs.
-        let exec = Recorder::ok(json!(1));
+        assert_eq!(out["result"], 1, "{out}");
+        assert!(
+            out.get("code").is_none() && out.get("not_kept").is_none(),
+            "{out}"
+        );
+        assert_eq!(exec.calls(), 1);
+        // Files it would add are refused (and deleted), with a sentence the model can act on.
+        let exec = Recorder::ok_with_files(json!(2), &[("out.csv", b"12345")]);
         let ex = with_registry(
-            generated_rows(SESSION_MAX_FILES - 1, 10),
-            Arc::new(runtime(&p, exec.clone(), true)),
+            generated_rows(SESSION_MAX_FILES, 10),
+            Arc::new(runtime(&p, exec, true)),
         );
         let out = body(&ex, r#"{"attachment_id":"doc-1","code":"pass"}"#).await;
-        assert_eq!(out["result"], 1);
+        assert_eq!(out["result"], 2);
+        assert!(out.get("emitted").is_none(), "{out}");
+        let why = out["not_kept"].to_string();
+        assert!(
+            why.contains("none of the 1 returned file(s) was kept")
+                && why.contains("return results in the answer"),
+            "{why}"
+        );
+        settle().await;
+        assert_eq!(*p.storage.deleted.lock().unwrap(), ["generated/out.csv"]);
     }
 
     /// The call that would cross the quota keeps none of its files, says so, and
@@ -909,5 +1065,233 @@ mod tests {
             let out = body(&ex, r#"{"attachment_id":"doc-1","code":"pass"}"#).await;
             assert_eq!(out["retryable"], retryable, "{out}");
         }
+    }
+
+    // ---- the ledger: rows first, objects second, never an object whose row stays ----
+
+    use crate::llm::domain::attachments::attachment_registry::MockAttachmentRegistry;
+    use crate::llm::domain::attachments::AttachmentError;
+
+    /// A registry that remembers upserts and deletes and can be told to fail either.
+    #[derive(Clone, Default)]
+    struct Book {
+        rows: Arc<std::sync::Mutex<Vec<ConversationAttachment>>>,
+        /// "row-removed:<key>" and "object-deleted-after-row:<bool>" in order.
+        log: Arc<std::sync::Mutex<Vec<String>>>,
+        fail_upsert_on: Arc<std::sync::Mutex<Option<usize>>>,
+        fail_delete: Arc<std::sync::atomic::AtomicBool>,
+        upserts: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl Book {
+        fn registry(
+            &self,
+            deleted_objects: Arc<std::sync::Mutex<Vec<String>>>,
+        ) -> MockAttachmentRegistry {
+            let mut reg = MockAttachmentRegistry::new();
+            let b = self.clone();
+            reg.expect_list_for_session().returning(move |_| {
+                let rows = b.rows.lock().unwrap().clone();
+                Ok(rows)
+            });
+            let b = self.clone();
+            reg.expect_upsert().returning(move |input| {
+                let n = b.upserts.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+                if *b.fail_upsert_on.lock().unwrap() == Some(n) {
+                    return Err(AttachmentError::RepositoryFailed("down".into()));
+                }
+                b.rows.lock().unwrap().push(ConversationAttachment {
+                    document_id: input.document_id,
+                    origin: input.origin,
+                    size_bytes: input.size_bytes,
+                    provider: ProviderKind::Generated,
+                    ..row(false)
+                });
+                Ok(())
+            });
+            let b = self.clone();
+            reg.expect_lookup().returning(move |_, key, _| {
+                Ok(b.rows
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .find(|r| r.document_id == key)
+                    .cloned())
+            });
+            let b = self.clone();
+            reg.expect_delete_attachment_for_provider()
+                .returning(move |_, key, _| {
+                    if b.fail_delete.load(std::sync::atomic::Ordering::SeqCst) {
+                        return Err(AttachmentError::RepositoryFailed("down".into()));
+                    }
+                    // The object must still be there when its row goes: rows first.
+                    let object_already_gone =
+                        deleted_objects.lock().unwrap().iter().any(|k| k == key);
+                    b.log.lock().unwrap().push(format!(
+                        "row-removed:{key}:object-gone={object_already_gone}"
+                    ));
+                    b.rows.lock().unwrap().retain(|r| r.document_id != key);
+                    Ok(())
+                });
+            reg
+        }
+    }
+
+    fn with_book(book: &Book, p: &Prepared, exec: Arc<Recorder>) -> DagToolExecutor {
+        executor(true, Some(Arc::new(runtime(p, exec, true))))
+            .with_attachment_registry(Arc::new(book.registry(p.storage.deleted_handle())))
+            .with_agent_session_id(Some("agent_1".into()))
+    }
+
+    /// The second registration fails: the first row is taken back FIRST, then both
+    /// objects are deleted, and the answer keeps nothing.
+    #[tokio::test]
+    async fn a_failing_second_registration_removes_rows_first_then_objects() {
+        let p = prepared(&[("sales", 1)], 4).await;
+        let book = Book::default();
+        *book.fail_upsert_on.lock().unwrap() = Some(2);
+        let exec = Recorder::ok_with_files(json!(1), &[("a.csv", b"1"), ("b.csv", b"2")]);
+        let out = body(
+            &with_book(&book, &p, exec),
+            r#"{"attachment_id":"doc-1","code":"pass"}"#,
+        )
+        .await;
+        assert!(out.get("emitted").is_none(), "{out}");
+        assert!(
+            out["not_kept"].to_string().contains("none was kept"),
+            "{out}"
+        );
+        settle().await;
+        // b's upsert failed, but it may have committed: its row is removed too (a no-op
+        // here), before either object.
+        assert_eq!(
+            *book.log.lock().unwrap(),
+            [
+                "row-removed:generated/b.csv:object-gone=false",
+                "row-removed:generated/a.csv:object-gone=false"
+            ]
+        );
+        let mut deleted = p.storage.deleted.lock().unwrap().clone();
+        deleted.sort();
+        assert_eq!(deleted, ["generated/a.csv", "generated/b.csv"]);
+        assert!(book.rows.lock().unwrap().is_empty());
+    }
+
+    /// A row that cannot be taken back keeps its object: the pair stays whole and the
+    /// answer reports it as kept, because it is.
+    #[tokio::test]
+    async fn a_row_that_cannot_be_removed_keeps_its_object_and_is_reported_kept() {
+        let p = prepared(&[("sales", 1)], 4).await;
+        let book = Book::default();
+        *book.fail_upsert_on.lock().unwrap() = Some(2);
+        book.fail_delete
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let exec = Recorder::ok_with_files(json!(1), &[("a.csv", b"1"), ("b.csv", b"2")]);
+        let out = body(
+            &with_book(&book, &p, exec),
+            r#"{"attachment_id":"doc-1","code":"pass"}"#,
+        )
+        .await;
+        settle().await;
+        // a.csv: registered, row would not go -> row and object both stay, reported kept.
+        assert_eq!(out["emitted"].as_array().unwrap().len(), 1, "{out}");
+        assert_eq!(out["emitted"][0]["document_id"], "generated/a.csv");
+        assert_eq!(
+            *p.storage.deleted.lock().unwrap(),
+            ["generated/b.csv"],
+            "only the unregistered object goes"
+        );
+        assert_eq!(book.rows.lock().unwrap().len(), 1);
+    }
+
+    /// The tool future is dropped while the files are being registered: the ledger's
+    /// Drop removes the row already made and then both objects, the same order.
+    #[tokio::test]
+    async fn dropping_the_ledger_between_registrations_undoes_rows_then_objects() {
+        use crate::tabular_run::outputs::{OutputLedger, StoreSink};
+        let p = prepared(&[("sales", 1)], 4).await;
+        let book = Book::default();
+        let deleted = p.storage.deleted_handle();
+        let reg: Arc<dyn crate::llm::domain::AttachmentRegistry> = Arc::new(book.registry(deleted));
+        // Two objects stored through the sink, then a ledger that has registered the first.
+        let sink = StoreSink::new(p.storage.clone(), None, None);
+        let dir = tempfile::tempdir().unwrap();
+        for (n, b) in [("a.csv", b"1"), ("b.csv", b"2")] {
+            std::fs::write(dir.path().join(n), b).unwrap();
+        }
+        let found =
+            crate::tabular_run::collect::collect_out(dir.path(), Default::default()).unwrap();
+        for f in found.files {
+            crate::tabular_run::mounted::OutputSink::accept(&sink, f)
+                .await
+                .unwrap();
+        }
+        let (_, guard) = sink.take_guarded();
+        let mut ledger: OutputLedger = guard.into_ledger(Some((reg, "agent_1".into())));
+        book.rows.lock().unwrap().push(ConversationAttachment {
+            document_id: "generated/a.csv".into(),
+            ..row(false)
+        });
+        ledger.row_may_exist("generated/a.csv");
+        drop(ledger);
+        settle().await;
+        assert_eq!(
+            *book.log.lock().unwrap(),
+            ["row-removed:generated/a.csv:object-gone=false"]
+        );
+        let mut deleted = p.storage.deleted.lock().unwrap().clone();
+        deleted.sort();
+        assert_eq!(deleted, ["generated/a.csv", "generated/b.csv"]);
+        assert!(book.rows.lock().unwrap().is_empty());
+    }
+
+    /// A usage that cannot be read is not zero: the files are not kept.
+    #[tokio::test]
+    async fn an_unreadable_usage_keeps_no_file_and_still_returns_the_result() {
+        let p = prepared(&[("sales", 1)], 4).await;
+        let mut reg = MockAttachmentRegistry::new();
+        reg.expect_list_for_session()
+            .returning(|_| Err(AttachmentError::RepositoryFailed("down".into())));
+        reg.expect_upsert().returning(|_| Ok(()));
+        reg.expect_delete_attachment_for_provider()
+            .returning(|_, _, _| Ok(()));
+        let exec = Recorder::ok_with_files(json!(9), &[("out.csv", b"12345")]);
+        let ex = executor(true, Some(Arc::new(runtime(&p, exec, true))))
+            .with_attachment_registry(Arc::new(reg))
+            .with_agent_session_id(Some("agent_1".into()));
+        let out = body(&ex, r#"{"attachment_id":"doc-1","code":"pass"}"#).await;
+        assert_eq!(out["result"], 9);
+        assert!(out.get("emitted").is_none(), "{out}");
+        assert!(
+            out["not_kept"].to_string().contains("could not be checked"),
+            "{out}"
+        );
+        settle().await;
+        assert_eq!(*p.storage.deleted.lock().unwrap(), ["generated/out.csv"]);
+    }
+
+    /// Two calls of one conversation with room for ONE more file: exactly one keeps
+    /// its file (the quota is counted and registered under the conversation's lock).
+    #[tokio::test]
+    async fn two_concurrent_calls_cannot_both_pass_the_quota() {
+        use crate::tabular_run::refusal::SESSION_MAX_FILES;
+        let p = prepared(&[("sales", 1)], 4).await;
+        let book = Book::default();
+        *book.rows.lock().unwrap() = generated_rows(SESSION_MAX_FILES - 1, 10);
+        let mk = |tag: &str| {
+            let exec = Recorder::ok_with_files(json!(1), &[(tag, b"x")]);
+            with_book(&book, &p, exec)
+        };
+        let (a, b) = (mk("a.csv"), mk("b.csv"));
+        let (ra, rb) = tokio::join!(
+            body(&a, r#"{"attachment_id":"doc-1","code":"pass"}"#),
+            body(&b, r#"{"attachment_id":"doc-1","code":"pass"}"#),
+        );
+        let kept = [&ra, &rb]
+            .iter()
+            .filter(|o| o.get("emitted").is_some())
+            .count();
+        assert_eq!(kept, 1, "{ra} / {rb}");
+        assert_eq!(book.rows.lock().unwrap().len(), SESSION_MAX_FILES);
     }
 }

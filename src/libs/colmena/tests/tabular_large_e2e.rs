@@ -17,7 +17,9 @@ use colmena::dag_engine::infrastructure::dag_tool_executor::DagToolExecutor;
 use colmena::dag_engine::infrastructure::nodes::llm_synthetic_tools::attachment_run_python::dispatch_attachment_run_python_via_executor;
 use colmena::dag_engine::infrastructure::python_exec::config::SubprocessConfig;
 use colmena::dag_engine::infrastructure::python_exec::subprocess::SubprocessExecutor;
-use colmena::llm::domain::attachments::{origin, AttachmentSource};
+use colmena::llm::domain::attachments::{
+    origin, AttachmentError, AttachmentSource, UpsertAttachmentInput,
+};
 use colmena::llm::domain::{
     AttachmentRegistry, ConversationAttachment, FunctionCall, ProviderKind, ToolCall,
 };
@@ -63,6 +65,7 @@ impl NodeRegistryPort for NoNodes {
 struct Storage {
     objects: Mutex<HashMap<String, Vec<u8>>>,
     stored: Mutex<Vec<(String, Vec<u8>)>>,
+    deleted: Mutex<Vec<String>>,
 }
 
 #[async_trait]
@@ -83,7 +86,8 @@ impl OutputStorageRepository for Storage {
             filename: "object".into(),
         })
     }
-    async fn delete(&self, _k: &str) -> Result<(), StorageError> {
+    async fn delete(&self, k: &str) -> Result<(), StorageError> {
+        self.deleted.lock().unwrap().push(k.to_string());
         Ok(())
     }
     fn derived_root(&self, _s: &str) -> Option<String> {
@@ -114,6 +118,11 @@ impl OutputStorageRepository for Storage {
 
 fn gate() -> bool {
     if std::env::var("COLMENA_PYEXEC_JAIL_TESTS").as_deref() != Ok("1") {
+        // The line the Linux job greps for; with the expect variable the test FAILS
+        // instead (an environment that must run the jail suites cannot skip them).
+        if std::env::var("COLMENA_PYEXEC_EXPECT_JAIL_TESTS").as_deref() == Ok("1") {
+            panic!("COLMENA_PYEXEC_JAIL_TESTS=1 is required (COLMENA_PYEXEC_EXPECT_JAIL_TESTS=1)");
+        }
         eprintln!("skipped: set COLMENA_PYEXEC_JAIL_TESTS=1 (Linux, root, CAP_SYS_ADMIN)");
         return false;
     }
@@ -140,8 +149,116 @@ fn part(dir: &std::path::Path, name: &str, lo: i32, hi: i32) -> Option<Vec<u8>> 
     std::fs::read(path).ok()
 }
 
+#[derive(Clone, Copy, PartialEq)]
+enum Kind {
+    /// Everything, one file returned.
+    Whole,
+    /// The conversation is at its file quota.
+    Quota,
+    /// Two files; the second registration fails.
+    Rollback,
+    /// The code runs past its budget.
+    Timeout,
+}
+
+/// The registry, but the second `upsert` fails: a failure between two registrations.
+struct FailsSecondUpsert {
+    inner: Arc<SqliteAttachmentRegistry>,
+    upserts: std::sync::atomic::AtomicUsize,
+}
+
+#[async_trait]
+impl AttachmentRegistry for FailsSecondUpsert {
+    async fn upsert(&self, input: UpsertAttachmentInput) -> Result<(), AttachmentError> {
+        if self
+            .upserts
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            == 1
+        {
+            return Err(AttachmentError::RepositoryFailed("down".into()));
+        }
+        self.inner.upsert(input).await
+    }
+    async fn upsert_checked(
+        &self,
+        input: UpsertAttachmentInput,
+    ) -> Result<colmena::llm::domain::attachments::UpsertOutcome, AttachmentError> {
+        self.inner.upsert_checked(input).await
+    }
+    async fn lookup(
+        &self,
+        a: &str,
+        d: &str,
+        p: ProviderKind,
+    ) -> Result<Option<ConversationAttachment>, AttachmentError> {
+        self.inner.lookup(a, d, p).await
+    }
+    async fn refresh_provider_file_id(
+        &self,
+        a: &str,
+        d: &str,
+        p: ProviderKind,
+        f: &str,
+    ) -> Result<(), AttachmentError> {
+        self.inner.refresh_provider_file_id(a, d, p, f).await
+    }
+    async fn update_description(
+        &self,
+        a: &str,
+        d: &str,
+        p: ProviderKind,
+        t: &str,
+    ) -> Result<(), AttachmentError> {
+        self.inner.update_description(a, d, p, t).await
+    }
+    async fn list_for_session(
+        &self,
+        a: &str,
+    ) -> Result<Vec<ConversationAttachment>, AttachmentError> {
+        self.inner.list_for_session(a).await
+    }
+    async fn lookup_by_document_id(
+        &self,
+        a: &str,
+        d: &str,
+    ) -> Result<Option<ConversationAttachment>, AttachmentError> {
+        self.inner.lookup_by_document_id(a, d).await
+    }
+    async fn touch_last_used(&self, a: &str, d: &str) -> Result<(), AttachmentError> {
+        self.inner.touch_last_used(a, d).await
+    }
+    async fn find_stale_attachments(
+        &self,
+        q: colmena::llm::domain::attachments::StaleAttachmentQuery,
+    ) -> Result<Vec<ConversationAttachment>, AttachmentError> {
+        self.inner.find_stale_attachments(q).await
+    }
+    async fn delete_attachment(&self, a: &str, d: &str) -> Result<(), AttachmentError> {
+        self.inner.delete_attachment(a, d).await
+    }
+}
+
 #[tokio::test]
 async fn the_whole_path_runs_with_nothing_canned() {
+    scenario(Kind::Whole).await;
+}
+
+#[tokio::test]
+async fn at_the_quota_the_result_is_returned_and_no_file_is_kept() {
+    scenario(Kind::Quota).await;
+}
+
+#[tokio::test]
+async fn a_failed_second_registration_rolls_both_files_back() {
+    scenario(Kind::Rollback).await;
+}
+
+#[tokio::test]
+async fn code_past_its_budget_is_cut_off_and_the_volume_is_given_back() {
+    scenario(Kind::Timeout).await;
+}
+
+async fn scenario(kind: Kind) {
     if !gate() {
         return;
     }
@@ -239,12 +356,18 @@ async fn the_whole_path_runs_with_nothing_canned() {
         large_tabular: true,
         ..PrepareConfig::default()
     };
-    let runtime = LargeTabularRuntime::new(
+    let mut runtime = LargeTabularRuntime::new(
         TabularPrepare::new(config, registry.clone()),
         registry,
         storage.clone(),
         exec.clone(),
     );
+    if kind == Kind::Timeout {
+        runtime = runtime.with_config(colmena::tabular_run::runtime::RuntimeConfig {
+            heavy_timeout: Duration::from_secs(2),
+            ..Default::default()
+        });
+    }
 
     // The tool, with a catalog row that is a host reference and a real attachment registry.
     let att_path = work.path().join("att.db");
@@ -272,14 +395,53 @@ async fn the_whole_path_runs_with_nothing_canned() {
         origin: Some(origin::HOST_STORAGE_REF.into()),
         last_used_at: None,
     };
+    if kind == Kind::Quota {
+        // The conversation already holds the most files this tool may return.
+        for i in 0..colmena::tabular_run::refusal::SESSION_MAX_FILES {
+            attachments
+                .upsert(UpsertAttachmentInput {
+                    agent_session_id: "agent_1".into(),
+                    document_id: format!("generated/old-{i}.csv"),
+                    provider: ProviderKind::Generated,
+                    provider_file_id: format!("generated/old-{i}.csv"),
+                    mime_type: "text/csv".into(),
+                    filename: "old.csv".into(),
+                    size_bytes: Some(10),
+                    label: None,
+                    description: None,
+                    source: AttachmentSource::Path("x".into()),
+                    storage_key: Some(format!("generated/old-{i}.csv")),
+                    origin: Some(origin::generated_by("attachment_run_python")),
+                })
+                .await
+                .unwrap();
+        }
+    }
+    let registry_for_tool: Arc<dyn AttachmentRegistry> = match kind {
+        Kind::Rollback => Arc::new(FailsSecondUpsert {
+            inner: attachments.clone(),
+            upserts: Default::default(),
+        }),
+        _ => attachments.clone(),
+    };
     let executor = DagToolExecutor::new(Arc::new(NoNodes), Default::default())
         .with_attachments(vec![row])
         .with_attachment_storage(storage.clone())
-        .with_attachment_registry(attachments.clone())
+        .with_attachment_registry(registry_for_tool)
         .with_agent_session_id(Some("agent_1".into()))
         .with_large_tabular(Arc::new(runtime));
-    let code = "emit_table(tables['sales'].head(3, columns=['a']), 'top')\n\
-                result = int(tables['sales'].read(columns=['a'])['a'].sum())";
+    let code = match kind {
+        Kind::Rollback => {
+            "emit_table(tables['sales'].head(2, columns=['a']), 'one')\n\
+             emit_table(tables['sales'].head(3, columns=['a']), 'two')\nresult = 1"
+        }
+        Kind::Timeout => "while True:\n    pass",
+        Kind::Quota => "emit_table(tables['sales'].head(3, columns=['a']), 'top')\nresult = 7",
+        Kind::Whole => {
+            "emit_table(tables['sales'].head(3, columns=['a']), 'top')\n\
+             result = int(tables['sales'].read(columns=['a'])['a'].sum())"
+        }
+    };
     let call = ToolCall {
         id: "call-1".into(),
         call_type: "function".into(),
@@ -296,24 +458,68 @@ async fn the_whole_path_runs_with_nothing_canned() {
         .unwrap();
     let answer: Value = serde_json::from_str(&result.output).unwrap();
 
-    assert_eq!(answer["result"], 55, "{answer}");
-    assert_eq!(answer["tables"][0]["name"], "sales");
-    assert_eq!(answer["emitted"][0]["name"], "top.csv", "{answer}");
-    assert_eq!(answer["emitted"][0]["rows_reported_by_code"], 3);
-    assert_eq!(
-        *storage.stored.lock().unwrap(),
-        [("top.csv".to_string(), b"a\n1\n2\n3\n".to_vec())]
-    );
-    let registered = attachments
-        .lookup_by_document_id("agent_1", "generated/top.csv")
-        .await
-        .unwrap()
-        .expect("the returned file is an attachment of the session");
-    assert!(!registered.is_host_storage_ref());
-    assert!(
-        !answer.to_string().contains(SOURCE),
-        "no key in the answer: {answer}"
-    );
+    match kind {
+        Kind::Quota => {
+            assert_eq!(answer["result"], 7, "{answer}");
+            assert!(answer.get("emitted").is_none(), "{answer}");
+            assert!(
+                answer["not_kept"]
+                    .to_string()
+                    .contains("return results in the answer"),
+                "{answer}"
+            );
+            assert!(storage_is_empty_after(&storage).await);
+        }
+        Kind::Rollback => {
+            assert_eq!(answer["result"], 1, "{answer}");
+            assert!(answer.get("emitted").is_none(), "{answer}");
+            assert!(
+                answer["not_kept"].to_string().contains("none was kept"),
+                "{answer}"
+            );
+            // Both files were stored; both rows are gone and no object is reported kept.
+            let rows = attachments.list_for_session("agent_1").await.unwrap();
+            assert!(
+                rows.iter()
+                    .all(|r| r.document_id.starts_with("generated/old")),
+                "{rows:?}"
+            );
+            assert_eq!(storage.deleted.lock().unwrap().len(), 2);
+        }
+        Kind::Timeout => {
+            assert_eq!(answer["retryable"], false, "{answer}");
+            assert!(
+                answer["error"].as_str().unwrap().contains("timeout"),
+                "{answer}"
+            );
+        }
+        Kind::Whole => {
+            assert_eq!(answer["result"], 55, "{answer}");
+            assert_eq!(answer["tables"][0]["name"], "sales");
+            assert_eq!(answer["emitted"][0]["name"], "top.csv", "{answer}");
+            assert_eq!(answer["emitted"][0]["rows_reported_by_code"], 3);
+            // The stored name is the file's own behind an id unique to the call.
+            let stored = storage.stored.lock().unwrap().clone();
+            assert_eq!(stored.len(), 1);
+            assert!(stored[0].0.ends_with("-top.csv") && stored[0].0.len() == "top.csv".len() + 13);
+            assert_eq!(stored[0].1, b"a\n1\n2\n3\n");
+            let id = answer["emitted"][0]["document_id"]
+                .as_str()
+                .unwrap()
+                .to_string();
+            assert_eq!(id, format!("generated/{}", stored[0].0));
+            let registered = attachments
+                .lookup_by_document_id("agent_1", &id)
+                .await
+                .unwrap()
+                .expect("the returned file is an attachment of the session");
+            assert!(!registered.is_host_storage_ref());
+            assert!(
+                !answer.to_string().contains(SOURCE),
+                "no key in the answer: {answer}"
+            );
+        }
+    }
     // The volume was given back and nothing is left on the staging root.
     for _ in 0..50 {
         if exec.staged_in_flight() == (0, 0) && std::fs::read_dir(&staging).unwrap().count() == 0 {
@@ -322,4 +528,17 @@ async fn the_whole_path_runs_with_nothing_canned() {
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
     panic!("the volume was not given back");
+}
+
+/// Nothing stored survives: every returned file was deleted (the fake keeps a list).
+async fn storage_is_empty_after(storage: &Storage) -> bool {
+    for _ in 0..30 {
+        let stored = storage.stored.lock().unwrap().len();
+        let deleted = storage.deleted.lock().unwrap().len();
+        if stored == deleted {
+            return true;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    false
 }
