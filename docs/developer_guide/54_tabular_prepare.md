@@ -1471,3 +1471,13 @@ the recorded reason code (final once the attempts reach `MAX_ATTEMPTS`). A `read
 and the canonical relative path (`t<n>/part-NNNNN.parquet`, built only by `manifest::part_path`). `select(names)` chooses
 tables by name (ignoring case, each once, in manifest order); a name that is not a table is `NoSuchTable`.
 `DATA_MAX_BYTES` (1 GiB, `D_max`) is the most prepared bytes one call may stage; an estimate until the instance is measured.
+
+`verify_prepared(registry, storage, source_key)` is the whole check, in order. The registry row is read (`get`) and judged
+first; a registry that cannot be read is `Unavailable(Registry)` and its error text is dropped. Only then is the storage
+asked: it must answer `derived_root(source_key)` (else `Invalid(NoRoot)`), and the row's manifest key must be exactly
+`<root>/manifest.json` and be among the row's tracked blobs; a manifest key anywhere else is not the copy this source's
+storage placed there. `prepared_bytes` (what the row recorded for the live parts and manifest) above `DATA_MAX_BYTES` is
+`OverBudget(Data)`, decided from the row before any object is opened. The manifest is read under `MANIFEST_MAX_BYTES`
+(128 KiB) however the storage declares its size: the declared size is checked first and the stream is cut off at the cap,
+so an object that lies about its size is never buffered. A manifest that does not parse is `Invalid(Manifest)` and the
+parse error is not shown. A verification opens only the manifest; no part is read.
