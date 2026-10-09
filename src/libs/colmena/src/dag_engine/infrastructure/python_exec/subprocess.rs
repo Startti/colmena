@@ -613,6 +613,20 @@ impl SubprocessExecutor {
         }
     }
 
+    /// Why this executor cannot take a call with run mounts, if it cannot: no
+    /// staging root, or the reason its template turned the mounts off. Starts
+    /// the template when it is not running, so a server can refuse a mounts
+    /// call before it reads the call's data.
+    pub async fn mounts_unavailable(&self) -> Option<String> {
+        if self.cfg.staging_root.is_none() {
+            return Some("no_staging_root".to_string());
+        }
+        if self.warm().await.is_err() {
+            return Some("template_not_ready".to_string());
+        }
+        self.mounts_disabled().await
+    }
+
     /// Why the running template cannot offer run mounts, if it cannot.
     async fn mounts_disabled(&self) -> Option<String> {
         match &*self.state.lock().await {

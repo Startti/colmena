@@ -435,3 +435,15 @@ output = 1
     assert_eq!(ex.staged_in_flight(), (0, 0));
     assert_eq!(leftovers(&root), 0);
 }
+
+/// What a server asks before it reads a call's data: an executor without a
+/// staging root says so, one with a root and a healthy template says nothing.
+#[tokio::test]
+async fn an_executor_says_why_it_cannot_take_a_mounts_call() {
+    let Some(root) = staging_root() else { return };
+    assert_eq!(
+        executor(None).mounts_unavailable().await.as_deref(),
+        Some("no_staging_root")
+    );
+    assert_eq!(executor(Some(&root)).mounts_unavailable().await, None);
+}

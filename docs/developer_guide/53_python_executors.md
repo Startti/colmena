@@ -314,6 +314,11 @@ with the refusing implementation above, the in-process one with `None`; a miscon
 keeps reporting the misconfiguration. It reads the dispatcher the process already built: no executor, template or setting is
 added, and with `COLMENA_LARGE_TABULAR` off nothing calls it.
 
+Two small accessors exist for the remote transport (see below), neither of which changes isolation: `SubprocessExecutor::mounts_unavailable()`
+answers why the executor cannot take a call with run mounts (`no_staging_root`, `template_not_ready`, or the reason the template turned
+the mounts off), so a server can refuse before it reads a call's data; `RemoteExecutor::transport()` and the now crate-visible
+`authorized` and `endpoint` give the mounts transport the same HTTP client, base URL and credentials `/v1/run` uses.
+
 The proofs are in `tests/tabular_run_mounts.rs` (Linux, root and `CAP_SYS_ADMIN`, enabled with
 `COLMENA_PYEXEC_JAIL_TESTS=1` like the other jail suites; each test prints a skip line otherwise): the code lists and reads
 the staged parts at `/data` and cannot write there; pandas reads a staged Parquet part in `restricted` mode with pyarrow
