@@ -572,7 +572,10 @@ async fn files_returned_through_data_run_python_carry_its_name() {
         .unwrap()
         .expect("registered");
     assert!(!row.is_host_storage_ref());
-    assert_eq!(row.origin.as_deref(), Some("generated_by:data_run_python"));
+    assert_eq!(
+        row.origin.as_deref(),
+        Some("generated_by:data_run_python_large")
+    );
 }
 
 // ---- a tool the node excluded never reaches the sandbox, even called by name ----

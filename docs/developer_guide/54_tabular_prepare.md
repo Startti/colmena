@@ -2069,25 +2069,47 @@ through it. **When it is available** (all four, decided per turn and per node):
 3. the turn carries a host-owned file (a catalog row that is a storage reference) that is large;
 4. the call names that file in `bindings`.
 
-With 1-3 the tool is shown with the large-file text and a `tables` argument; with any of 1-3
-missing it is exactly the tool it always was (no text, no argument, nothing routed). With 1-3
-and a call whose bindings name no large file, the call also runs exactly as before.
+With 1-3 the tool is shown with the large-file text and a `tables` argument (also when the
+tool was already in the list); with any of 1-3 missing it is exactly the tool it always
+was (same description, schema and refusals). With 1-3 and a call whose bindings name no large
+file, the call also runs exactly as before. The executor is wired with the set of tools the
+node offers, so a call that names a tool outside it (`attachment_run_python` on a node that
+excludes it) never reaches the large path.
 
 A call whose bindings name a large file runs over its prepared tables the way
 `attachment_run_python` does (`tables`, `emit_table`, typed refusals, progress, the
 per-conversation quota and the output ledger are the same code). What differs:
 
 - the file is passed as ONE binding, `bindings: [{"var": "big", "attachment_id": "<id>"}]`;
-  `var` is not used. Mixing it with other bindings, or passing `code_ref`, is refused
-  with `large_tabular_file` and `retryable: false`; nothing runs.
-- the code may leave its answer in `output` (the `data_run_python` habit) or `result`;
-  `result` wins when both are set. The answer is the large path's own (`result`, `tables`,
-  `emitted`, `not_kept`, `stdout`), not the small path's `output`.
-- `output_tables`, `output_sheets` and `output_attachments` are not available; files go back
-  with `emit_table`. The returned files are attachments tagged `generated_by:data_run_python`
-  and count against that tool's per-conversation quota (together with any file its small
-  `output_attachments` sink registered).
+  `var` is not used. Whatever else the call asks for that a large file cannot do is refused
+  BEFORE anything runs, with `large_tabular_file` and `retryable: false`: other bindings; any
+  other field in the binding (`data`, `query`, `spreadsheet_id`, `sheet`, `range`, `sheet_name`,
+  `delimiter`, `header_row`); `write_to_spreadsheet` and `on_existing_sheet`; `code_ref`; and a
+  missing `code` (the sentence says `code` is required).
+- the answer is `output` (that tool's documented answer); `result` is used only when `output`
+  was not set, because models use `result` for intermediate DataFrames there. The answer is the
+  large path's own (`result`, `tables`, `emitted`, `not_kept`, `stdout`), not the small path's.
+- `var` may be omitted (it is not used). A field filled in with nothing (`""`, `[]`, `{}`,
+  `false`, `null`, `header_row: 0`) asks for nothing and does not turn the call into a refusal.
+- `output_tables`, `output_sheets` and `output_attachments` are not written. Whether the code
+  set them is only known after the run, so the answer says so: `not_kept` carries
+  "`output_sheets` was set, but nothing was written ..." once per sink (at most three
+  sentences, whatever the sandbox sends). Files go back with `emit_table`.
+- once the large route has decided a call is its own it always answers: a refusal before the run,
+  the run's answer, or a typed internal error. It never falls through to the small path, so
+  the code cannot run twice.
 - a refusal that sends the model to a tool names `data_run_python` when the node has it.
+
+### The quota
+
+The per-conversation limit on returned files (40 files, 512 MiB) is ONE budget shared by
+both tools. It counts the files the large path returned through either tool: those tagged
+`generated_by:attachment_run_python` (the large path of that tool, as since v0.30.0) and
+`generated_by:data_run_python_large`. The files the small path of `data_run_python`
+registered through its `output_attachments` sink (tagged `generated_by:data_run_python`) are
+deliberately NOT counted and do not count against anyone: that sink has no quota and takes no
+lock, and its behaviour is unchanged for existing graphs. So a node with both tools gets one
+budget, not two, and the small sink can neither eat the large allowance nor race its usage read.
 
 `attachment_run_python` keeps working for old graphs on the same terms; it is not the tool
 that is named when the node has both.
