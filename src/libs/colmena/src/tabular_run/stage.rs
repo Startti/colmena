@@ -1,0 +1,354 @@
+//! Put the prepared tables where the call will read them: a directory the
+//! trusted side owns (the call's `data` directory, bound read-only at `/data`).
+//!
+//! Streamed, never buffered: each part is copied chunk by chunk from storage to
+//! a file, so the memory held is one chunk whatever the part's size. Bounded:
+//! every part and the whole call have a byte limit, enforced on the declared
+//! size before a part is opened AND on the bytes that actually arrive, because
+//! a storage may declare one size and send another. Nothing is written outside
+//! the directory it was given: paths are built from the canonical part path
+//! only, every file is created new (an existing name, a link included, is
+//! refused, never followed), and a refused or failed staging removes what it
+//! wrote.
+
+use super::refusal::{Budget, Invalid, RunRefusal, Unavailable};
+use super::verify::{PreparedTables, DATA_MAX_BYTES};
+use crate::storage::domain::OutputStorageRepository;
+use crate::tabular_prepare::manifest::{part_path, MANIFEST_PATH};
+use crate::tabular_prepare::writer::PART_MAX_BYTES;
+use futures::StreamExt;
+use std::path::{Path, PathBuf};
+use tokio::io::AsyncWriteExt;
+
+/// Most bytes of one part file: twice the size the converter rolls at, which it
+/// overshoots by at most one slice.
+pub const PART_FILE_MAX_BYTES: u64 = 2 * PART_MAX_BYTES as u64;
+
+/// What one staging may write.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StageLimits {
+    pub total_bytes: u64,
+    pub part_bytes: u64,
+}
+
+impl Default for StageLimits {
+    fn default() -> Self {
+        Self {
+            total_bytes: DATA_MAX_BYTES,
+            part_bytes: PART_FILE_MAX_BYTES,
+        }
+    }
+}
+
+/// What a staging wrote.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Staged {
+    /// Table indexes (as in the manifest) whose parts were staged.
+    pub tables: Vec<usize>,
+    /// Part files written, the manifest not counted.
+    pub parts: usize,
+    /// Bytes written, the manifest included.
+    pub bytes: u64,
+}
+
+/// An I/O failure of the directory the call will read is the executor's, not
+/// the model's: it gets the generic refusal and no text from the error.
+fn local(_: std::io::Error) -> RunRefusal {
+    RunRefusal::Unavailable(Unavailable::Executor)
+}
+
+async fn make_dir(path: &Path) -> Result<(), RunRefusal> {
+    use std::os::unix::fs::PermissionsExt;
+    // Not `create_dir_all`: an existing entry (a link, say) is refused.
+    tokio::fs::DirBuilder::new()
+        .create(path)
+        .await
+        .map_err(local)?;
+    // The umask must not decide who can read what the jail binds.
+    tokio::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))
+        .await
+        .map_err(local)
+}
+
+async fn create_file(path: &Path) -> Result<tokio::fs::File, RunRefusal> {
+    use std::os::unix::fs::PermissionsExt;
+    let file = tokio::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .await
+        .map_err(local)?;
+    file.set_permissions(std::fs::Permissions::from_mode(0o644))
+        .await
+        .map_err(local)?;
+    Ok(file)
+}
+
+/// Copies one part from storage into `dest`, returning the bytes written.
+/// `already` is what the call has staged so far.
+async fn copy_part(
+    storage: &dyn OutputStorageRepository,
+    key: &str,
+    dest: &Path,
+    already: u64,
+    limits: StageLimits,
+    created: &mut Vec<PathBuf>,
+) -> Result<u64, RunRefusal> {
+    let mut stream = storage
+        .read_stream(key)
+        .await
+        .map_err(|_| RunRefusal::Storage)?;
+    let declared = stream.size_bytes;
+    let part_over = RunRefusal::OverBudget(Budget::Part {
+        limit_bytes: limits.part_bytes,
+    });
+    let total_over = RunRefusal::OverBudget(Budget::Data {
+        limit_bytes: limits.total_bytes,
+    });
+    // Decided from the declared size, before the file exists.
+    if declared > limits.part_bytes {
+        return Err(part_over);
+    }
+    if already.saturating_add(declared) > limits.total_bytes {
+        return Err(total_over);
+    }
+    let mut file = create_file(dest).await?;
+    created.push(dest.to_path_buf());
+    let mut written = 0u64;
+    while let Some(chunk) = stream.stream.next().await {
+        let chunk = chunk.map_err(|_| RunRefusal::Storage)?;
+        written = written.saturating_add(chunk.len() as u64);
+        // And again on what arrives: the declared size may be a lie.
+        if written > limits.part_bytes {
+            return Err(part_over);
+        }
+        if already.saturating_add(written) > limits.total_bytes {
+            return Err(total_over);
+        }
+        file.write_all(&chunk).await.map_err(local)?;
+    }
+    file.flush().await.map_err(local)?;
+    if written != declared {
+        return Err(RunRefusal::Invalid(Invalid::Parts));
+    }
+    Ok(written)
+}
+
+/// Stages the manifest and the parts of `tables` (indexes into the plan's
+/// manifest) into `data_dir`, which must exist and be empty. On any refusal
+/// what was written is removed.
+pub async fn stage_tables(
+    storage: &dyn OutputStorageRepository,
+    plan: &PreparedTables,
+    tables: &[usize],
+    data_dir: &Path,
+    limits: StageLimits,
+) -> Result<Staged, RunRefusal> {
+    let mut created: Vec<PathBuf> = vec![];
+    let done = stage_into(storage, plan, tables, data_dir, limits, &mut created).await;
+    if done.is_err() {
+        // Files first, then the directories that held them, newest first.
+        for path in created.iter().rev() {
+            let _ = tokio::fs::remove_file(path).await;
+            let _ = tokio::fs::remove_dir(path).await;
+        }
+    }
+    done
+}
+
+async fn stage_into(
+    storage: &dyn OutputStorageRepository,
+    plan: &PreparedTables,
+    tables: &[usize],
+    data_dir: &Path,
+    limits: StageLimits,
+    created: &mut Vec<PathBuf>,
+) -> Result<Staged, RunRefusal> {
+    // The manifest staged is the verified one, serialised again: no byte of the
+    // stored file reaches the call unparsed.
+    let manifest = plan
+        .manifest()
+        .to_json()
+        .map_err(|_| RunRefusal::Invalid(Invalid::Manifest))?;
+    let mut bytes = manifest.len() as u64;
+    if bytes > limits.total_bytes {
+        return Err(RunRefusal::OverBudget(Budget::Data {
+            limit_bytes: limits.total_bytes,
+        }));
+    }
+    let manifest_path = data_dir.join(MANIFEST_PATH);
+    let mut manifest_file = create_file(&manifest_path).await?;
+    created.push(manifest_path);
+    manifest_file
+        .write_all(manifest.as_bytes())
+        .await
+        .map_err(local)?;
+
+    let mut parts = 0usize;
+    for &t in tables {
+        let table = plan
+            .tables()
+            .get(t)
+            .ok_or(RunRefusal::Invalid(Invalid::Manifest))?;
+        let dir = data_dir.join(format!("t{t}"));
+        make_dir(&dir).await?;
+        created.push(dir);
+        for p in 0..table.parts as usize {
+            let rel = part_path(t, p).map_err(|_| RunRefusal::Invalid(Invalid::Manifest))?;
+            let dest = data_dir.join(&rel);
+            let key = plan.part_key(t, p)?;
+            bytes += copy_part(storage, &key, &dest, bytes, limits, created).await?;
+            parts += 1;
+        }
+    }
+    Ok(Staged {
+        tables: tables.to_vec(),
+        parts,
+        bytes,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::testkit::*;
+    use super::super::verify::verify_prepared;
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    async fn plan_of(p: &Prepared) -> PreparedTables {
+        verify_prepared(&*p.registry, &*p.storage, SOURCE)
+            .await
+            .unwrap()
+    }
+
+    fn entries(dir: &Path) -> Vec<String> {
+        let mut out = vec![];
+        let mut stack = vec![dir.to_path_buf()];
+        while let Some(d) = stack.pop() {
+            for e in std::fs::read_dir(&d).unwrap() {
+                let e = e.unwrap();
+                let rel = e.path().strip_prefix(dir).unwrap().display().to_string();
+                if e.file_type().unwrap().is_dir() {
+                    stack.push(e.path());
+                }
+                out.push(rel);
+            }
+        }
+        out.sort();
+        out
+    }
+
+    #[tokio::test]
+    async fn the_manifest_and_every_part_land_at_their_canonical_paths() {
+        let p = prepared(&[("sales", 2), ("stores", 1)], 10).await;
+        let plan = plan_of(&p).await;
+        let dir = tempfile::tempdir().unwrap();
+        let staged = stage_tables(&*p.storage, &plan, &[0, 1], dir.path(), Default::default())
+            .await
+            .unwrap();
+        assert_eq!(staged.parts, 3);
+        assert_eq!(staged.tables, vec![0, 1]);
+        assert_eq!(
+            entries(dir.path()),
+            [
+                "manifest.json",
+                "t0",
+                "t0/part-00000.parquet",
+                "t0/part-00001.parquet",
+                "t1",
+                "t1/part-00000.parquet"
+            ]
+        );
+        assert_eq!(
+            std::fs::read(dir.path().join("t0/part-00001.parquet")).unwrap(),
+            vec![b'a'; 10]
+        );
+        assert_eq!(
+            std::fs::read(dir.path().join("t1/part-00000.parquet")).unwrap(),
+            vec![b'b'; 10]
+        );
+        let manifest = std::fs::read(dir.path().join("manifest.json")).unwrap();
+        let again = crate::tabular_prepare::manifest::Manifest::from_json(&manifest).unwrap();
+        assert_eq!(again, p.manifest);
+        assert_eq!(staged.bytes, 30 + manifest.len() as u64);
+    }
+
+    /// The jail binds `data` read-only for a user that is not the owner: what is
+    /// staged must be readable by it whatever the umask of the host process.
+    #[tokio::test]
+    async fn staged_files_and_directories_are_world_readable_whatever_the_umask() {
+        let p = prepared(&[("sales", 1)], 4).await;
+        let plan = plan_of(&p).await;
+        let dir = tempfile::tempdir().unwrap();
+        let old = unsafe { libc::umask(0o077) };
+        let staged = stage_tables(&*p.storage, &plan, &[0], dir.path(), Default::default()).await;
+        unsafe { libc::umask(old) };
+        staged.unwrap();
+        let mode = |rel: &str| {
+            std::fs::metadata(dir.path().join(rel))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777
+        };
+        assert_eq!(mode("t0"), 0o755);
+        assert_eq!(mode("t0/part-00000.parquet"), 0o644);
+        assert_eq!(mode("manifest.json"), 0o644);
+    }
+
+    #[tokio::test]
+    async fn only_the_selected_tables_are_staged() {
+        let p = prepared(&[("sales", 1), ("stores", 1)], 4).await;
+        let plan = plan_of(&p).await;
+        let dir = tempfile::tempdir().unwrap();
+        let chosen = plan.select(&["stores".to_string()]).unwrap();
+        stage_tables(&*p.storage, &plan, &chosen, dir.path(), Default::default())
+            .await
+            .unwrap();
+        assert_eq!(
+            entries(dir.path()),
+            ["manifest.json", "t1", "t1/part-00000.parquet"]
+        );
+        // Only that part was read from storage (the manifest at verification).
+        let reads = p.storage.reads.lock().unwrap().clone();
+        assert!(reads.iter().all(|k| !k.contains("/t0/")), "{reads:?}");
+    }
+
+    /// The total is checked on what the parts DECLARE before a part is opened,
+    /// and a refusal leaves nothing behind.
+    #[tokio::test]
+    async fn a_call_over_the_total_is_refused_and_leaves_nothing() {
+        let p = prepared(&[("sales", 3)], 100).await;
+        let plan = plan_of(&p).await;
+        let dir = tempfile::tempdir().unwrap();
+        let manifest_len = p.manifest.to_json().unwrap().len() as u64;
+        let limits = StageLimits {
+            total_bytes: manifest_len + 250,
+            part_bytes: 100,
+        };
+        let err = stage_tables(&*p.storage, &plan, &[0], dir.path(), limits)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            err,
+            RunRefusal::OverBudget(Budget::Data {
+                limit_bytes: limits.total_bytes
+            })
+        );
+        assert!(entries(dir.path()).is_empty(), "{:?}", entries(dir.path()));
+        // Exactly at the limit is accepted.
+        let at = StageLimits {
+            total_bytes: manifest_len + 300,
+            part_bytes: 100,
+        };
+        stage_tables(&*p.storage, &plan, &[0], dir.path(), at)
+            .await
+            .unwrap();
+    }
+
+    #[test]
+    fn the_part_limit_is_twice_what_the_converter_rolls_at() {
+        assert_eq!(PART_FILE_MAX_BYTES, 128 * 1024 * 1024);
+        assert_eq!(StageLimits::default().total_bytes, DATA_MAX_BYTES);
+    }
+}
