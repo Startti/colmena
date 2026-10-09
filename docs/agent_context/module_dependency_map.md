@@ -25,7 +25,7 @@
 | 20 | `documents::domain::ids` | `src/libs/colmena/src/documents/domain/ids.rs` |
 | 17 | `crdt_documents` | `src/libs/colmena/src/crdt_documents/mod.rs` |
 | 17 | `llm::infrastructure` | `src/libs/colmena/src/llm/infrastructure/mod.rs` |
-| 15 | `dag_engine::domain::python_executor` | `src/libs/colmena/src/dag_engine/domain/python_executor.rs` |
+| 16 | `dag_engine::domain::python_executor` | `src/libs/colmena/src/dag_engine/domain/python_executor.rs` |
 | 15 | `tabular_prepare::manifest` | `src/libs/colmena/src/tabular_prepare/manifest.rs` |
 | 14 | `dag_engine::domain::error` | `src/libs/colmena/src/dag_engine/domain/error.rs` |
 | 14 | `dag_engine::domain::tool_configuration` | `src/libs/colmena/src/dag_engine/domain/tool_configuration.rs` |
@@ -315,7 +315,7 @@
 
 #### `src/libs/colmena/src/dag_engine/domain/python_executor.rs`
 - Module: `dag_engine::domain::python_executor`
-- **Used by (15)**: `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm_synthetic_tools/attachment_run_python.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm_synthetic_tools/crdt_doc_run_python.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm_synthetic_tools/data_run_python.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm_synthetic_tools/gsheets_run_python.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/python_node.rs`, `src/libs/colmena/src/dag_engine/infrastructure/python_exec/config.rs`, `src/libs/colmena/src/dag_engine/infrastructure/python_exec/inprocess.rs`, `src/libs/colmena/src/dag_engine/infrastructure/python_exec/mod.rs`, `src/libs/colmena/src/dag_engine/infrastructure/python_exec/protocol.rs`, `src/libs/colmena/src/dag_engine/infrastructure/python_exec/remote.rs`, `src/libs/colmena/src/dag_engine/infrastructure/python_exec/subprocess.rs`, `src/libs/colmena/src/tabular_run/local.rs`, `src/libs/colmena/src/tabular_run/mounted.rs`, `src/libs/colmena/src/tabular_run/remote_seam.rs`, `src/libs/colmena/src/tabular_run/runtime.rs`
+- **Used by (16)**: `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm_synthetic_tools/attachment_run_python.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm_synthetic_tools/crdt_doc_run_python.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm_synthetic_tools/data_run_python.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm_synthetic_tools/gsheets_run_python.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/python_node.rs`, `src/libs/colmena/src/dag_engine/infrastructure/python_exec/config.rs`, `src/libs/colmena/src/dag_engine/infrastructure/python_exec/inprocess.rs`, `src/libs/colmena/src/dag_engine/infrastructure/python_exec/mod.rs`, `src/libs/colmena/src/dag_engine/infrastructure/python_exec/protocol.rs`, `src/libs/colmena/src/dag_engine/infrastructure/python_exec/remote.rs`, `src/libs/colmena/src/dag_engine/infrastructure/python_exec/subprocess.rs`, `src/libs/colmena/src/tabular_run/local.rs`, `src/libs/colmena/src/tabular_run/mounted.rs`, `src/libs/colmena/src/tabular_run/remote_seam.rs`, `src/libs/colmena/src/tabular_run/runtime.rs`, `src/libs/colmena/src/tabular_run/testkit.rs`
 - Depends on (0): — (no intra-crate imports)
 
 #### `src/libs/colmena/src/dag_engine/domain/router_rules.rs`
@@ -2196,7 +2196,7 @@
 
 #### `src/libs/colmena/src/tabular_prepare/mod.rs`
 - Module: `tabular_prepare`
-- **Used by (2)**: `src/libs/colmena/src/tabular_prepare/registry_contract.rs`, `src/libs/colmena/src/tabular_run/runtime.rs`
+- **Used by (3)**: `src/libs/colmena/src/tabular_prepare/registry_contract.rs`, `src/libs/colmena/src/tabular_run/runtime.rs`, `src/libs/colmena/src/tabular_run/testkit.rs`
 - Depends on (2): `tabular_prepare::ports`, `tabular_prepare::registry`
 
 #### `src/libs/colmena/src/tabular_prepare/part_sink.rs`
@@ -2206,7 +2206,7 @@
 
 #### `src/libs/colmena/src/tabular_prepare/ports.rs`
 - Module: `tabular_prepare::ports`
-- **Used by (6)**: `src/libs/colmena/src/dag_engine/engine.rs`, `src/libs/colmena/src/tabular_prepare/driver.rs`, `src/libs/colmena/src/tabular_prepare/driver_xlsx_tests.rs`, `src/libs/colmena/src/tabular_prepare/mod.rs`, `src/libs/colmena/src/tabular_prepare/registry_contract.rs`, `src/libs/colmena/src/tabular_run/runtime.rs`
+- **Used by (7)**: `src/libs/colmena/src/dag_engine/engine.rs`, `src/libs/colmena/src/tabular_prepare/driver.rs`, `src/libs/colmena/src/tabular_prepare/driver_xlsx_tests.rs`, `src/libs/colmena/src/tabular_prepare/mod.rs`, `src/libs/colmena/src/tabular_prepare/registry_contract.rs`, `src/libs/colmena/src/tabular_run/runtime.rs`, `src/libs/colmena/src/tabular_run/testkit.rs`
 - Depends on (1): `dag_engine::engine`
 
 #### `src/libs/colmena/src/tabular_prepare/postgres_registry.rs`
@@ -2354,7 +2354,7 @@
 #### `src/libs/colmena/src/tabular_run/testkit.rs`
 - Module: `tabular_run::testkit`
 - **Used by (0)**: — (leaf / entrypoint / not imported intra-crate)
-- Depends on (4): `storage::domain`, `tabular_prepare::manifest`, `tabular_prepare::registry`, `tabular_prepare::sqlite_registry`
+- Depends on (7): `dag_engine::domain::python_executor`, `storage::domain`, `tabular_prepare`, `tabular_prepare::manifest`, `tabular_prepare::ports`, `tabular_prepare::registry`, `tabular_prepare::sqlite_registry`
 
 #### `src/libs/colmena/src/tabular_run/verify.rs`
 - Module: `tabular_run::verify`

@@ -198,62 +198,11 @@ impl LargeTabularRuntime {
 
 #[cfg(test)]
 mod tests {
-    use super::super::mounted::MountedResult;
     use super::super::refusal::Budget;
-    use super::super::stage::Staged;
     use super::super::testkit::*;
     use super::*;
-    use crate::dag_engine::domain::python_executor::PythonRunResult;
     use crate::tabular_prepare::ports::PrepareConfig;
-    use async_trait::async_trait;
     use serde_json::json;
-    use std::sync::Mutex;
-
-    /// A mounted executor that records what it was given and answers as told.
-    struct Recorder {
-        seen: Mutex<Vec<(PythonRunRequest, Vec<usize>, u64)>>,
-        answer: Mutex<Option<Result<MountedResult, MountedError>>>,
-    }
-
-    impl Recorder {
-        fn answering(answer: Result<MountedResult, MountedError>) -> Arc<Self> {
-            Arc::new(Self {
-                seen: Mutex::new(vec![]),
-                answer: Mutex::new(Some(answer)),
-            })
-        }
-        fn ok(output: Value) -> Arc<Self> {
-            Self::answering(Ok(MountedResult {
-                result: PythonRunResult {
-                    output: Some(output),
-                    stdout: "hi\n".into(),
-                },
-                staged: Staged {
-                    tables: vec![],
-                    parts: 0,
-                    bytes: 0,
-                },
-            }))
-        }
-        fn calls(&self) -> usize {
-            self.seen.lock().unwrap().len()
-        }
-    }
-
-    #[async_trait]
-    impl MountedExecutor for Recorder {
-        async fn run_with_mounts(
-            &self,
-            req: PythonRunRequest,
-            call: MountedCall<'_>,
-        ) -> Result<MountedResult, MountedError> {
-            self.seen
-                .lock()
-                .unwrap()
-                .push((req, call.tables.to_vec(), call.out_mb));
-            self.answer.lock().unwrap().take().expect("answered once")
-        }
-    }
 
     fn request(code: &str, tables: &[&str]) -> LargeRunRequest {
         LargeRunRequest {
@@ -264,23 +213,6 @@ mod tests {
             code: code.into(),
             tables: tables.iter().map(|s| s.to_string()).collect(),
         }
-    }
-
-    fn runtime(p: &Prepared, exec: Arc<Recorder>, on: bool) -> LargeTabularRuntime {
-        let config = PrepareConfig {
-            large_tabular: on,
-            ..PrepareConfig::default()
-        };
-        LargeTabularRuntime::new(
-            TabularPrepare::new(config, p.registry.clone()),
-            p.registry.clone(),
-            p.storage.clone(),
-            exec,
-        )
-        .with_config(RuntimeConfig {
-            prepare_wait: Duration::from_millis(50),
-            ..RuntimeConfig::default()
-        })
     }
 
     #[tokio::test]
