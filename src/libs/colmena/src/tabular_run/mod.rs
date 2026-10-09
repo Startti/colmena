@@ -26,6 +26,8 @@
 //!
 //! - [`outputs`]: stream the kept outputs to storage, one chunk at a time.
 //!
+//! - [`wire`]: the `/v2/run` framing, shared by client and server, on any HTTP version.
+//!
 //! See docs/developer_guide/53_python_executors.md and
 //! docs/developer_guide/54_tabular_prepare.md.
 
@@ -45,3 +47,4 @@ pub mod stage;
 #[cfg(test)]
 pub(crate) mod testkit;
 pub mod verify;
+pub mod wire;
