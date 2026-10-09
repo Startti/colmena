@@ -57,16 +57,21 @@ pub fn router(state: AppState) -> Router {
     // slot idles between calls, and the bodies held in memory stay bounded.
     let in_flight = Arc::new(Semaphore::new(2 * state.exec.config().slots));
     let gate = from_fn_with_state((state.clone(), in_flight), guard);
-    let run = post(run_call).route_layer(gate);
+    let run = post(run_call).route_layer(gate.clone());
     let readyz = |State(st): State<AppState>| async move {
         match st.ready.load(SeqCst) && st.exec.has_usable_slot() {
             true => StatusCode::OK,
             false => StatusCode::SERVICE_UNAVAILABLE,
         }
     };
-    Router::new()
-        .route("/v1/run", run)
-        .route("/healthz", get(|| async { StatusCode::OK }))
+    let mut app = Router::new().route("/v1/run", run);
+    // A call with run mounts (dark): only a server with a staging root, which is
+    // read only with COLMENA_LARGE_TABULAR on, has the route, behind the same gate.
+    if state.exec.config().staging_root.is_some() {
+        let mounts = post(crate::tabular_run::serve::run_mounts).route_layer(gate);
+        app = app.route("/v2/run", mounts);
+    }
+    app.route("/healthz", get(|| async { StatusCode::OK }))
         .route("/readyz", get(readyz))
         .layer(DefaultBodyLimit::max(limit))
         .with_state(state)

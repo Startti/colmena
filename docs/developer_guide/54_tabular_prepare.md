@@ -1668,3 +1668,28 @@ receiver checks each file's bytes against its declaration and the running total 
 chunk and reads the next only after the previous is consumed, so the transport's backpressure holds the sender; every wait has
 an idle limit (30 s without a chunk) and the whole transfer a deadline (240 s); the header must arrive within 10 s. Errors carry
 no peer text.
+
+### The server side (`serve.rs`)
+
+`POST /v2/run` exists only on a `serve` that has a staging root (which is read only with `COLMENA_LARGE_TABULAR` on), behind the
+SAME gate as `/v1/run`: the bearer token compared by digest, readiness, and the in-flight bound (no new scheme). In order:
+
+1. The executor is asked `mounts_unavailable()` BEFORE a byte of the body is read: no staging root is 501, a template that
+   turned the mounts off is 503 `mounts_disabled` with its reason (letters, digits, `_`).
+2. The header frame must arrive within 10 s and be valid (version 2, mode `none` or `restricted`, output size 1 to 1,024 MiB).
+3. The volume is taken with `SubprocessExecutor::stage_call` (the budgeted path): over the budget is 503 `busy` with
+   `Retry-After`.
+4. Each file is written into the call's data directory as it arrives, at most one chunk in memory. Only `manifest.json` and
+   canonical `t<n>/part-NNNNN.parquet` paths are created, each once, with `create_new`; a file over its cap (128 MiB, the
+   manifest 128 KiB) or past the call total (1 GiB) is 413 `too_large` BEFORE its bytes are read; bytes that differ from the
+   declaration, bytes after the end, a stall (30 s idle) or a transfer over 240 s are 400/408.
+5. The code runs with mounts (`run_staged`); the code's own failure, a timeout and an executor failure are statuses of a 200
+   response (the executor's text is replaced by a fixed one), a mounts-disabled refusal discovered at run time is 503.
+6. `/out` is read through `collect_out` and the kept files are streamed from their open descriptors by a task that owns the
+   volume, over a channel of two chunks (backpressure), with the same idle and total limits. The volume is released when the
+   last byte is sent, when the client is gone, or when a limit passes. A client that disconnects mid-upload drops the handler,
+   which drops the volume (off the async worker).
+
+Logs carry the request id, the outcome, counts and durations: never code, inputs, outputs, paths or headers.
+The proofs are in `tests/tabular_run_remote.rs` (Linux, root, `COLMENA_PYEXEC_JAIL_TESTS=1`, one test at a time; the stall
+test takes the 30 s idle limit).

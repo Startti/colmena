@@ -53,11 +53,11 @@ pub struct Staged {
 
 /// An I/O failure of the directory the call will read is the executor's, not
 /// the model's: it gets the generic refusal and no text from the error.
-fn local(_: std::io::Error) -> RunRefusal {
+pub(super) fn local(_: std::io::Error) -> RunRefusal {
     RunRefusal::Unavailable(Unavailable::Executor)
 }
 
-async fn make_dir(path: &Path) -> Result<(), RunRefusal> {
+pub(super) async fn make_dir(path: &Path) -> Result<(), RunRefusal> {
     use std::os::unix::fs::PermissionsExt;
     // Not `create_dir_all`: an existing entry (a link, say) is refused.
     tokio::fs::DirBuilder::new()
@@ -70,7 +70,7 @@ async fn make_dir(path: &Path) -> Result<(), RunRefusal> {
         .map_err(local)
 }
 
-async fn create_file(path: &Path) -> Result<tokio::fs::File, RunRefusal> {
+pub(super) async fn create_file(path: &Path) -> Result<tokio::fs::File, RunRefusal> {
     use std::os::unix::fs::PermissionsExt;
     let file = tokio::fs::OpenOptions::new()
         .write(true)

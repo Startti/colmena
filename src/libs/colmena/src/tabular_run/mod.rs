@@ -42,6 +42,8 @@ pub mod prelude;
 pub mod refusal;
 pub mod remote_seam;
 pub mod runtime;
+#[cfg(target_os = "linux")]
+pub mod serve;
 #[cfg(unix)]
 pub mod stage;
 #[cfg(test)]
