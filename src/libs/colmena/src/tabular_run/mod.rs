@@ -21,9 +21,14 @@
 //!
 //! - [`runtime`]: one call start to finish (ensure prepared, verify, run, report).
 //!
+//! - [`collect`]: read back what the code wrote to `/out`, treating all of it as
+//!   hostile (Unix).
+//!
 //! See docs/developer_guide/53_python_executors.md and
 //! docs/developer_guide/54_tabular_prepare.md.
 
+#[cfg(unix)]
+pub mod collect;
 #[cfg(target_os = "linux")]
 pub mod local;
 pub mod mounted;

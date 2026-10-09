@@ -1603,3 +1603,33 @@ with the switch on AND a registry AND an executor with run mounts. Each missing 
 analysable: nothing is half wired, one warning is logged at start (whether a registry was given; never a key), the tool keeps
 its usual description, and a call over a host-owned file keeps the refusal it has always had. `PrepareConfig::default()` has no
 registry, so a host that does not opt in changes nothing.
+
+### Reading back `/out` (`collect.rs`)
+
+Everything in the output volume was written by untrusted code, which also chose every name. `collect_out(out_dir, limits)` is
+the one place the trusted side reads it, and it follows the six requirements the run-mounts review note lists:
+
+1. *Read before the unmount, after the child is dead.* The caller (`local`) reads while the call's `StagedCall` is alive; the
+   executor has sent SIGKILL to every process of the call's uid before `run_staged` returns. Whether each of them has finished
+   its last system call is not awaited (the executor offers no such confirmation); the reader does not depend on it: it holds
+   file descriptors, so a name swapped afterwards changes nothing, and what it keeps is a checked size, not a promise about
+   the content.
+2. *One directory descriptor, `openat` with `O_NOFOLLOW | O_NONBLOCK | O_NOCTTY | O_CLOEXEC`, never a path.* The directory
+   itself is opened with `O_DIRECTORY | O_NOFOLLOW`; names come from `fdopendir` on a copy of that descriptor and each entry is
+   opened relative to it. A link fails the open (`ELOOP`), a pipe opens without blocking and is dropped after the next step.
+3. *`fstat` every entry.* Only a regular file with ONE link is kept. A link, pipe, socket, device or directory is
+   `NotARegularFile` (a directory is never entered: there is no recursion); a file with two names is `HardLinked` under every name.
+4. *Caps.* At most `OUT_MAX_ENTRIES` (64) directory entries are looked at: a volume with more keeps NOTHING (the walk stops at
+   65). At most `OUT_MAX_FILES` (8) files are kept, each at most `OUT_FILE_MAX_BYTES` (64 MiB) and all together at most
+   `OUT_TOTAL_MAX_BYTES` (128 MiB), by LOGICAL size (`st_size`): a sparse file allocates nothing and still returns that many
+   bytes, so the allocated size is never used. These two sizes are estimates until the instance is measured (spike item 5).
+5. *Names are bytes.* A kept name is 1 to 64 bytes of ASCII letters, digits, `.`, `_`, `-`, not starting with `.` or `-`,
+   ending in `.csv` or `.parquet` (lower case: the extension is the type limit). A name that fails is `BadName` and is NEVER
+   echoed; a name that passed may be shown with the reason it was not kept (`TooLarge`, `OverFileCount`, `OverTotal`...).
+6. *The budget is reserved before the volume exists:* `SubprocessExecutor::stage_call` (see
+   [53_python_executors.md](./53_python_executors.md)).
+
+Nothing is executed and nothing is read here: the result holds open, checked descriptors (`OutFile`) which the caller streams
+within the call's lifetime. The tests make every hostile case on a real directory (links to files, directories and nothing,
+pipes, directories, hard links, a 2 GiB sparse file, names outside the charset including bytes that are not UTF-8, counts and
+sizes at and past each limit, a name swapped after the check) and on the real jail in `tests/tabular_run_mounts.rs`.
