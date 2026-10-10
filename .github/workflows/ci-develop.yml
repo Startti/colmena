@@ -47,3 +47,9 @@ jobs:
 
       - name: Crate version calculator
         run: bash scripts/crate_version.test.sh
+
+      # Lo que publica publish-crate.yml tiene que compilar SOLO, fuera del repo:
+      # un include_str! hacia docs/ u otro archivo fuera del crate no viaja en
+      # el paquete y rompe el build de ADP (pasó con 0.31.2-beta.1).
+      - name: Package crate (verified)
+        run: cargo package -p colmena_dag_engine --allow-dirty

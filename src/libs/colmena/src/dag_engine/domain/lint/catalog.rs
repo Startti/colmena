@@ -33,7 +33,13 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::OnceLock;
 
 /// The raw `docs/node_configurations.json` bytes, embedded at compile time.
-const CATALOG_JSON: &str = include_str!("../../../../../../../docs/node_configurations.json");
+// Vive DENTRO del crate (catalog/), no en docs/: el crate se publica solo
+// (GitHub Packages) y un include_str! que sale del crate no viaja en el
+// paquete. docs/node_configurations.json es un symlink a este archivo.
+const CATALOG_JSON: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/catalog/node_configurations.json"
+));
 
 /// Whether a documented field has to be set.
 ///
