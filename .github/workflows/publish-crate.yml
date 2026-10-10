@@ -131,9 +131,11 @@ jobs:
             "out/colmena_dag_engine-$VERSION.crate"
 
       # Le avisa a ADP, que abre (o actualiza) la PR que sube el pin en su
-      # develop: .github/workflows/colmena-bump.yml de Startti/adp. Secreto
-      # ADP_DISPATCH_TOKEN: token con contents:write sobre Startti/adp (lo pide
-      # el endpoint de dispatches). Sin el secreto, no avisa y el bump es a mano.
+      # develop: corre .github/workflows/colmena-bump.yml de Startti/adp con un
+      # workflow_dispatch sobre develop (repository_dispatch solo corre
+      # workflows de la rama por defecto, y ese vive en develop). Secreto
+      # ADP_DISPATCH_TOKEN: token con Actions: write sobre Startti/adp. Sin el
+      # secreto, no avisa y el bump es a mano.
       - name: Notify ADP
         if: steps.version.outputs.version != ''
         env:
@@ -145,10 +147,8 @@ jobs:
             echo "::warning::sin ADP_DISPATCH_TOKEN: ADP no se entera de $VERSION; bump a mano (colmena-bump.yml)"
             exit 0
           fi
-          gh api repos/Startti/adp/dispatches \
-            -f event_type=colmena-published \
-            -F "client_payload[version]=$VERSION" \
-            -F "client_payload[channel]=$CHANNEL"
+          gh workflow run colmena-bump.yml --repo Startti/adp --ref develop \
+            -f "version=$VERSION" -f "channel=$CHANNEL"
 
       - name: Summary
         if: steps.version.outputs.version != ''
