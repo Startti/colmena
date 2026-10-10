@@ -174,6 +174,7 @@ Testing environment before production release.
 - ✅ **Require branches to be up to date before merging**
 - **Required checks**:
   - `Test` ✅ (from ci-develop.yml)
+  - `Python executors (Linux, isolated)` ✅ (from ci-develop.yml; the sandbox jail suites)
   - `Validate Commit Messages` ✅
 
 > **Why**: Ensures develop code is tested before staging deployment.
@@ -235,6 +236,7 @@ Main development branch where features are integrated.
 - ✅ **Require branches to be up to date before merging**
 - **Required checks**:
   - `Test` ✅ (from ci-develop.yml)
+  - `Python executors (Linux, isolated)` ✅ (from ci-develop.yml; the sandbox jail suites)
   - `Validate Commit Messages` ✅
 
 > **Why**: All code must pass tests and follow commit conventions.

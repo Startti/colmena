@@ -39,6 +39,22 @@ La fuente de verdad son los tags `colmena_dag_engine-v*`. El `version` de
 
 Pruebas del cálculo: `bash scripts/crate_version.test.sh`. Las corre el CI.
 
+## Qué prueba el CI antes de publicar
+
+`ci-develop.yml` tiene dos jobs, ambos con el mismo disparador:
+
+- `Test`: fmt, clippy, `cargo test` y las guardas de docs. Solo Rust.
+- `Python executors (Linux, isolated)`: las suites de aislamiento del sandbox de
+  Python (uid por llamada, montajes, datos de solo lectura, sin red) corriendo
+  el binario Rust `python_executor` en un contenedor Debian privilegiado. No
+  compila ni publica los bindings de Python/Node (eso se quitó a propósito): usa
+  un intérprete `python3` con pandas y pyarrow solo para ejecutar el sandbox.
+  Es la única prueba de que el jail funciona en Linux x86_64.
+
+`publish-crate.yml` corre sus propias pruebas y **no** espera a este segundo
+job: un crate con el jail roto puede publicarse si el job aislado falla en
+paralelo. Mira que esté verde antes de promover una versión a ADP.
+
 ## Cómo lo consume ADP
 
 GitHub Packages no tiene registro de Cargo, así que ADP no hace `cargo` contra
