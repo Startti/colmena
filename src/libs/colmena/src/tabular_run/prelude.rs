@@ -472,6 +472,41 @@ mod tests {
         assert_eq!(wrap_large_code("x"), wrap_large_code_for("x", false));
     }
 
+    /// Every helper the large-file text tells the model to use exists in the prelude, with
+    /// that name (the text is `text/tools/large_files.yaml`). The names a mistake line warns
+    /// against are NOT checked: they are the ones that do not exist.
+    #[test]
+    fn every_helper_the_large_file_text_names_exists_in_the_prelude() {
+        let defined = |name: &str| PRELUDE.contains(&format!("def {name}("));
+        let on_table = regex::Regex::new(r"\bt\.([a-z_]+)").unwrap();
+        let on_tables = regex::Regex::new(r"\btables\.([a-z_]+)").unwrap();
+        for tool in ["data_run_python", "attachment_run_python"] {
+            let text = crate::text::large_file_section(tool);
+            let helpers = text.split("Not this, this:").next().unwrap();
+            let mut seen = 0;
+            for re in [&on_table, &on_tables] {
+                for cap in re.captures_iter(helpers) {
+                    seen += 1;
+                    assert!(
+                        defined(&cap[1]),
+                        "{tool}: `{}` is not in the prelude",
+                        &cap[0]
+                    );
+                }
+            }
+            assert!(seen >= 8, "{tool}: the text names its helpers");
+            assert!(defined("emit_table") && helpers.contains("emit_table("));
+            // The two mistakes the text warns about are really errors.
+            for wrong in ["schema", "shape"] {
+                let table = PRELUDE.split("class _Tables").next().unwrap();
+                assert!(
+                    !table.contains(&format!("def {wrong}(")),
+                    "`t.{wrong}` is meant to be an error"
+                );
+            }
+        }
+    }
+
     /// The wrapper reports the write sinks the code set, and only for the
     /// `data_run_python` flavour; `unwrap_answer` accepts only the three sink names.
     #[test]
@@ -1132,6 +1167,61 @@ mod reads {
         assert_eq!(u.unwritten, vec!["output_tables", "output_sheets"]);
         let u = run("output = 2");
         assert_eq!((u.result, u.unwritten.len()), (json!(2), 0));
+    }
+
+    /// The examples in the large-file text, run verbatim against the real prelude over real
+    /// Parquet, for both tools: the model is shown code that works.
+    #[test]
+    fn the_examples_in_the_large_file_text_run_and_agree() {
+        let dir = tempfile::tempdir().unwrap();
+        let Some(mut inputs) = staged(dir.path()) else {
+            return;
+        };
+        if python("import scipy", "none", &Map::new()).is_err() {
+            skip_or_fail("scipy is needed by the wrapper's imports");
+            return;
+        }
+        inputs.insert("_dir2".into(), Value::from(dir.path().to_str().unwrap()));
+        let make = "import pandas as pd\npd.DataFrame({'region': ['east', 'west', 'east', 'west'], 'amount': [1, 2, 3, 4]}).to_parquet(_dir2 + '/t0/part-00000.parquet')\noutput = 1";
+        python(make, "none", &inputs).unwrap();
+        inputs.insert(
+            "_ct_tables".into(),
+            serde_json::json!([{"name": "sales", "index": 0, "rows": 4, "parts": 1, "columns": [
+                {"name": "region", "type": "string", "in_memory_bytes": 40},
+                {"name": "amount", "type": "int", "in_memory_bytes": 32}]}]),
+        );
+        for (tool, accept_output) in [("data_run_python", true), ("attachment_run_python", false)] {
+            let text = crate::text::large_file_section(tool);
+            let blocks: Vec<&str> = text
+                .split("```python\n")
+                .skip(1)
+                .map(|b| b.split("```").next().unwrap())
+                .collect();
+            assert_eq!(
+                blocks.len(),
+                2,
+                "{tool}: a read example and a parts example"
+            );
+            for (i, block) in blocks.iter().enumerate() {
+                // The second example continues from the first one's `t`.
+                let code = if i == 1 {
+                    format!("t = tables[\"sales\"]\n{block}")
+                } else {
+                    block.to_string()
+                };
+                let out = python(
+                    &wrap_large_code_for(&code, accept_output),
+                    "restricted",
+                    &inputs,
+                )
+                .unwrap_or_else(|e| panic!("{tool} example {i}: {e}"));
+                assert_eq!(
+                    out,
+                    serde_json::json!({"east": 4, "west": 6}),
+                    "{tool} example {i}"
+                );
+            }
+        }
     }
 
     /// `head(n)` returns n rows when they exist even if the first batch is shorter

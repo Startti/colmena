@@ -404,3 +404,7 @@ Known pre-existing limitation: `DagToolExecutor::execute` does not check that th
 offered; the agent loop does (`agent_service::dispatch_call`), the resume path
 (`execute_with_resume_answer`) does not, and neither Python tool can suspend. A new caller of
 the executor must check offering itself.
+
+The text of the large-file mode of `attachment_run_python` / `data_run_python` (shown first in the tool's description on a
+turn that has a large file) lives in `text/tools/large_files.yaml`; see "The text the model reads about a large file" in
+`54_tabular_prepare.md`.
