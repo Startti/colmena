@@ -76,11 +76,13 @@ jobs:
           # Solo la primera línea `version =` es la del [package].
           sed -i "0,/^version = \".*\"/s//version = \"$VERSION\"/" "$CRATE_DIR/Cargo.toml"
           grep -m1 '^version' "$CRATE_DIR/Cargo.toml"
-          cargo package -p colmena_dag_engine --no-verify --allow-dirty
+          # Con verificación: compila el crate desempacado, así un include_str!
+          # que sale del crate (no viaja en el paquete) falla acá y no en ADP.
+          cargo package -p colmena_dag_engine --allow-dirty
           mkdir -p out
           cp "target/package/colmena_dag_engine-$VERSION.crate" out/
-          # ADP genera allowlists desde este schema, que vive fuera del crate.
-          cp docs/node_configurations.json out/
+          # ADP genera allowlists desde este schema (también va dentro del crate).
+          cp "$CRATE_DIR/catalog/node_configurations.json" out/
 
       - uses: oras-project/setup-oras@v1
         if: steps.version.outputs.version != ''
