@@ -566,3 +566,28 @@ el stream crudo de un adaptador son acumuladas: la última es el total de la lla
 antes de `cancelled`; sin uso reportado, sin resumen), `a_call_cut_mid_stream_reports_its_last_usage_once`,
 `a_stream_dropped_mid_way_is_billed_once_with_its_last_usage` y uno por adaptador. Mutaciones: sin reporte al
 descartar, o reportando también al terminar: fallan. **Estado.** done.
+
+## 35. Gemini: un `MALFORMED_FUNCTION_CALL` vacío se reenvía
+
+**Qué cambia.** Medido en dev el 2026-10-09, en el banco de artefactos de ADP con gemini-2.5-flash: 6 de 100 turnos
+terminaron con `finish_reason: MALFORMED_FUNCTION_CALL`, 0 tokens de salida y sin llamadas, casi siempre cuando el
+modelo tenía que llamar a una tool con un argumento largo (un HTML entero, un contrato). El nodo terminaba con
+`[Empty response - finish_reason: MALFORMED_FUNCTION_CALL]`. Es un fallo pasajero de Gemini: el mismo pedido suele
+salir bien al segundo intento. Ahora `call` y `stream` del adapter de Gemini reenvían ese pedido cuando la respuesta
+no trae nada (sin texto, sin llamada y con 0 tokens de salida), con la misma `RetryPolicy` que los estados
+transitorios de §207 (`COLMENA_LLM_TRANSIENT_RETRIES`: 2 por defecto, 0 lo apaga, 5 como máximo; backoff
+exponencial con jitter, base 1 s, tope 8 s), contados aparte: cada reenvío vuelve a pasar por
+`send_with_transient_retry`. Un `warn` en `colmena::llm` por reenvío. Si se agotan, el marcador queda como antes.
+En `stream` no se duplica nada hacia el cliente: se reenvía solo si no salió texto, ni una llamada, ni un pensamiento
+(con `thinking_budget`; un `stream` que ya mostró un pensamiento no se reenvía, ver BACKLOG). El chunk final vacío
+que trae el `MALFORMED_FUNCTION_CALL` se retiene hasta el fin del stream y se descarta si hay reenvío, así el
+cliente no ve ese `finish_reason` antes de la respuesta buena. `Usage` sigue saliendo a medida que llega: lo que
+cobraron los intentos descartados (el prompt entero) se suma al `Usage` del siguiente, en `call` y en `stream`, así
+que la última parte `Usage` sigue siendo el total cobrado (§34). Guías:
+[14_llm_deep_dive.md](developer_guide/14_llm_deep_dive.md),
+[18_troubleshooting.md](developer_guide/18_troubleshooting.md).
+**Tests.** En `gemini_adapter`: un `MALFORMED_FUNCTION_CALL` vacío y después texto, o una llamada, gana la segunda
+respuesta con 2 pedidos, en `call` y en `stream` (sin ese `finish_reason` en ningún chunk y con el prompt de los dos
+intentos en el uso); repetido hasta agotar `immediate(2)`, 3 pedidos y el marcador en los dos caminos, y con
+`immediate(0)` un solo pedido; después de texto o de un pensamiento ya emitidos en `stream`, o con texto o tokens de
+salida en `call`, un solo pedido. **ADP.** Subir el pin; nada más. **Estado.** done.

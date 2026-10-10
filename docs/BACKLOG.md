@@ -164,6 +164,20 @@ de input **negativos**. Detalle y acción concreta en
 
 ---
 
+## Gemini: reenvío de un `MALFORMED_FUNCTION_CALL` vacío (2026-10-09)
+
+Hecho: CHANGELOG_2026-10 §35. `call` y `stream` de Gemini reenvían un
+`MALFORMED_FUNCTION_CALL` sin texto, sin llamada y con 0 tokens de salida (6 de
+100 turnos en el banco de artefactos de ADP con `gemini-2.5-flash`). Lo que quedó
+afuera:
+
+| Pendiente | Detalle | Trigger |
+|---|---|---|
+| **`stream` con pensamientos visibles** | Con `thinking_budget` (Gemini manda los pensamientos), un `stream` que ya emitió un pensamiento no se reenvía: el cliente lo vería dos veces. Retenerlos hasta la primera respuesta lo arreglaría a costa de mostrar el pensamiento recién cuando empieza la respuesta. | Si se mide `[Empty response - finish_reason: MALFORMED_FUNCTION_CALL]` en turnos con `thinking_budget` |
+| **Otros proveedores** | Solo Gemini tiene este `finish_reason`. Si OpenAI o Anthropic devuelven un equivalente (una llamada cortada sin argumentos), no se reenvía. | Si aparece en un banco con otro proveedor |
+
+---
+
 ## 🔍 Code audit exhaustivo — 60 hallazgos (2026-07-27)
 
 **Origen:** auditoría por-símbolo de los 353 archivos fuente del crate (`src/libs/colmena/src/`), 12 lotes vía Workflow multi-agente (Haiku describe → Sonnet sintetiza → Opus juzga dead-code). Catálogo por-archivo en `docs/agent_context/audit/*.md`; **detalle completo de cada hallazgo (con nota TDD del test-rojo primero) en [`docs/agent_context/audit/FINDINGS_LEDGER.md`](agent_context/audit/FINDINGS_LEDGER.md)**. Esta entrada es el índice histórico; el ledger es la fuente de verdad.
