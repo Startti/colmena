@@ -1,0 +1,75 @@
+# What the model reads about a LARGE file (over 50 MiB, prepared into tables), for the
+# two tools that can analyse one. `template` is shared; each tool fills the few places
+# where it differs. Rendered by `text::large_file_section`, and placed FIRST in the tool's
+# description on a turn that has such a file. Every helper named here is checked against
+# `tabular_run/prelude.py` by a test, and the examples are run against it.
+template: |
+  ## LARGE FILE IN THIS TURN — READ THIS FIRST
+
+  {{opening}}
+
+  Call: {{call}} Optional `tables` lists the tables to make readable (default: all). In your code `tables` holds the file's tables (a CSV is one table, each sheet of a workbook is one). {{answer}}
+
+  Example (first look with `print(tables.names)`, then use your own table and column names):
+  ```python
+  t = tables["sales"]
+  print(t.columns, t.rows)               # exact column names, case-sensitive
+  df = t.read(columns=["region", "amount"])
+  {{var}} = df.groupby("region")["amount"].sum().to_dict()
+  ```
+  `read` or `parts`: `t.read(columns=[...])` loads ALL rows of just those columns as one DataFrame; it works while their estimated size in memory (counting a temporary second copy) is under 1.5 GiB, and otherwise refuses, naming the estimate. When it would refuse, or to go through every row, use `parts` (DataFrames of up to 500,000 rows each) and combine the per-part results:
+  ```python
+  totals = {}
+  for part in t.parts(columns=["region", "amount"]):
+      for key, value in part.groupby("region")["amount"].sum().items():
+          totals[key] = totals.get(key, 0) + value
+  {{var}} = totals
+  ```
+  Helpers (nothing else exists on a table):
+  - `tables.names` is a list (not a function); `tables.schema(name)` is `{name, rows, parts, columns: [{name, type}]}`; `tables[name]` is a handle, not a DataFrame.
+  - `t.columns` list, `t.dtypes` `{column: type}`, `t.rows`, `t.n_parts`.
+  - `t.head(n=5, columns=None)`: DataFrame of the first n rows (n up to 1000).
+  - `t.read(columns=[...], filters=[("col", ">=", value)])`: one DataFrame; `columns` is required. `t.parts(columns=[...], filters=...)`: iterator of DataFrames.
+  - `emit_table(df_or_parts, "name", "csv")` or `"parquet"` returns a file with the answer (8 files, 64 MiB each, 128 MiB in all).
+
+  Not this, this:
+  - `t.schema`, `t.shape`, `t["col"]`, `len(t)` -> `t.columns`, `t.rows`, `t.read(columns=["col"])`.
+  - `tables.names()` -> `tables.names`; `tables["name"]["col"]` -> `tables["name"].read(columns=["col"])`.
+  - A table or column name you guessed -> take table names from `tables.names` and column names from `t.columns` (exact: `Region` is not `region`).
+  - `df`: not loaded for the large file; use `tables`.
+
+  {{unavailable}}
+
+  Report numbers only from the answer the call returns: compute what you need in one pass (one groupby, not several partial passes) and never re-derive a figure from memory. A run may take up to 5 minutes.
+
+data_run_python:
+  var: output
+  opening: >-
+    This turn has a LARGE file. For that file this mode REPLACES the "one DataFrame per binding"
+    mode described below; the rest of this description still applies to small sources.
+  call: >-
+    `bindings: [{"attachment_id": "<id>"}]` (exactly one binding, only that file; `var` is not
+    needed) and `code`.
+  answer: >-
+    Set `output` (it is your answer; `result` is used only if `output` is not set): the call returns
+    it as `result`, with `tables`, `stdout` and the files you emitted.
+  unavailable: >-
+    Not available over a large file: other bindings, `code_ref`, `write_to_spreadsheet`, charts,
+    and `output_tables` / `output_sheets` / `output_attachments` (if set, the answer says nothing
+    was written). To write results to a spreadsheet or SQL: compute a SMALL summary into `output`
+    here, then pass it as an inline `data` binding of a second call that has the write sinks (or
+    to the sheets / SQL tools, where this deployment offers them).
+
+attachment_run_python:
+  var: result
+  opening: >-
+    This turn has a LARGE file. For that file this mode REPLACES the pre-loaded DataFrame `df`
+    described below; the rest of this description still applies to small files.
+  call: >-
+    `attachment_id` (the large file) and `code`.
+  answer: >-
+    Set `result`: the call returns it, with `tables`, `stdout` and the files you emitted.
+  unavailable: >-
+    Not available over a large file: `delimiter`, `sheet_name`, `header_row` (the file was prepared
+    into tables) and charts. To write results anywhere, compute a SMALL summary into `result`
+    here and use it in a second call or in the sheets / SQL tools.

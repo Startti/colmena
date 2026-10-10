@@ -14,24 +14,26 @@ use crate::tabular_run::refusal::{RunRefusal, SESSION_MAX_BYTES, SESSION_MAX_FIL
 use crate::tabular_run::runtime::{LargeRunError, LargeRunRequest};
 use serde::Serialize;
 
-/// What the tool description says about large files, appended to the usual
-/// description only while a runtime that can serve them is wired.
-pub(super) const LARGE_FILES_TEXT: &str = "\n\nLarge files (over 50 MiB): `df` is NOT loaded. Use `tables`:\n\
-- `tables.names`, `tables.schema(name)`: tables, columns, types, row counts.\n\
-- `t = tables[name]` is a handle, not a DataFrame.\n\
-- `t.read(columns=[...], filters=[...])`: load only the columns you need.\n\
-- `for part in t.parts(columns=[...]):` up to 500,000 rows per part; aggregate\n  each part and combine. Use this for anything that touches every row.\n\
-- `t.head()` to look at a few rows.\n\
-A whole table cannot be loaded at once. Runs may take up to 5 minutes.\n\
-To return a file, call `emit_table(df_or_parts, \"name\", \"csv\" | \"parquet\")` (up to 8 files; parquet takes one DataFrame).\n\
-No charts or images: return aggregated numbers and build charts from them.\n\
-The optional `tables` argument names the tables to make readable (default: all).";
-
-/// The tool as the model sees it when large files are served: the usual
-/// definition, the text above, and the `tables` argument.
+/// The tool as the model sees it when large files are served: the large-file section
+/// FIRST (the mode that replaces `df` for that file), then the usual definition, and the
+/// `tables` argument. The section's text lives in `text/tools/large_files.yaml`.
 pub(super) fn tool_definition() -> crate::llm::domain::tools::ToolDefinition {
-    let mut def = super::build_attachment_run_python_tool_definition();
-    def.description.push_str(LARGE_FILES_TEXT);
+    with_large_file_section(
+        super::build_attachment_run_python_tool_definition(),
+        LargeTool::AttachmentRunPython,
+    )
+}
+
+/// `usual` with the large-file section of `tool` first and the `tables` argument added.
+fn with_large_file_section(
+    mut def: crate::llm::domain::tools::ToolDefinition,
+    tool: LargeTool,
+) -> crate::llm::domain::tools::ToolDefinition {
+    def.description = format!(
+        "{}\n\n---\n\n{}",
+        crate::text::large_file_section(tool.name()),
+        def.description
+    );
     if let Some(properties) = def
         .input_schema_override
         .as_mut()
@@ -49,23 +51,6 @@ pub(super) fn tool_definition() -> crate::llm::domain::tools::ToolDefinition {
     }
     def
 }
-
-/// What `data_run_python` says about large files: the same helpers as
-/// [`LARGE_FILES_TEXT`], reached through its own argument shape.
-pub(crate) const DATA_RUN_LARGE_FILES_TEXT: &str = "\n\nLarge files (over 50 MiB): pass ONE binding that names the file, \
-`bindings: [{\"var\": \"big\", \"attachment_id\": \"<id>\"}]` (`var` is not used and the file cannot be combined with other bindings). \
-The records variable is NOT loaded. Use `tables`:\n\
-- `tables.names`, `tables.schema(name)`: tables, columns, types, row counts.\n\
-- `t = tables[name]` is a handle, not a DataFrame.\n\
-- `t.read(columns=[...], filters=[...])`: load only the columns you need.\n\
-- `for part in t.parts(columns=[...]):` up to 500,000 rows per part; aggregate\n  each part and combine. Use this for anything that touches every row.\n\
-- `t.head()` to look at a few rows.\n\
-A whole table cannot be loaded at once. Runs may take up to 5 minutes.\n\
-Set `output`: it is your answer, and the call returns it as `result` (`result` is used only when `output` is not set), with `tables`, `stdout` and the files you returned.\n\
-To return a file, call `emit_table(df_or_parts, \"name\", \"csv\" | \"parquet\")` (up to 8 files; parquet takes one DataFrame).\n\
-`code_ref`, `output_tables`, `output_sheets` and `output_attachments` are not available over a large file.\n\
-No charts or images: return aggregated numbers and build charts from them.\n\
-The optional `tables` argument names the tables to make readable (default: all).";
 
 /// The origin tag of the files the large path of `data_run_python` returns. It is its own
 /// tag, not `data_run_python`'s: that one is also written by the small path's
@@ -95,30 +80,13 @@ pub(super) struct CallClock {
     pub budget: std::time::Duration,
 }
 
-/// `data_run_python` as the model sees it when a large file is served: the usual
-/// definition (its sources and gating unchanged), the text above and the `tables`
-/// argument.
+/// `data_run_python` as the model sees it when a large file is served: the large-file
+/// section first, then the usual definition (its sources and gating unchanged), and the
+/// `tables` argument.
 pub(crate) fn data_run_python_definition(
     usual: crate::llm::domain::tools::ToolDefinition,
 ) -> crate::llm::domain::tools::ToolDefinition {
-    let mut def = usual;
-    def.description.push_str(DATA_RUN_LARGE_FILES_TEXT);
-    if let Some(properties) = def
-        .input_schema_override
-        .as_mut()
-        .and_then(|schema| schema.get_mut("properties"))
-        .and_then(|p| p.as_object_mut())
-    {
-        properties.insert(
-            "tables".to_string(),
-            serde_json::json!({
-                "type": "array",
-                "items": {"type": "string"},
-                "description": "Large files only: the tables to make readable (default: all)."
-            }),
-        );
-    }
-    def
+    with_large_file_section(usual, LargeTool::DataRunPython)
 }
 
 /// The typed refusal of a `data_run_python` call the large route cannot serve: a sentence
@@ -976,8 +944,13 @@ mod tests {
         assert_eq!(large.summary, usual.summary);
         assert_eq!(
             large.description,
-            format!("{}{}", usual.description, super::LARGE_FILES_TEXT)
+            format!(
+                "{}\n\n---\n\n{}",
+                crate::text::large_file_section("attachment_run_python"),
+                usual.description
+            )
         );
+        assert!(large.description.starts_with("## LARGE FILE IN THIS TURN"));
         let schema = |d: &crate::llm::domain::tools::ToolDefinition| {
             d.input_schema_override.clone().unwrap()
         };
@@ -985,8 +958,10 @@ mod tests {
         assert!(b["properties"]["tables"]["items"]["type"] == "string");
         a["properties"]["tables"] = b["properties"]["tables"].clone();
         assert_eq!(a, b, "nothing else in the schema changed");
-        assert!(super::LARGE_FILES_TEXT.contains("`df` is NOT loaded"));
-        assert!(super::LARGE_FILES_TEXT.contains("up to 5 minutes"));
+        assert!(large
+            .description
+            .contains("REPLACES the pre-loaded DataFrame `df`"));
+        assert!(large.description.contains("up to 5 minutes"));
     }
 
     /// Collects the tool-progress events a call emitted.

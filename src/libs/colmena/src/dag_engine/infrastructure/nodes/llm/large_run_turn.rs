@@ -88,7 +88,7 @@ async fn a_call_over_a_prepared_file_runs_over_its_tables_through_the_node() {
         "the original is never read"
     );
     let offered = model.tools_offered().join("\n");
-    assert!(offered.contains("Large files (over 50 MiB)"), "{offered}");
+    assert!(offered.contains("LARGE FILE IN THIS TURN"), "{offered}");
     assert!(
         offered.contains("\"tables\"") || offered.contains("tables"),
         "{offered}"
@@ -109,7 +109,7 @@ async fn with_the_switch_off_the_refusal_is_the_one_it_always_was() {
     assert!(!model
         .tools_offered()
         .join("\n")
-        .contains("Large files (over 50 MiB)"));
+        .contains("LARGE FILE IN THIS TURN"));
 }
 
 /// The switch on but nothing wired (the host gave the engine no registry or no
@@ -124,7 +124,7 @@ async fn with_no_runtime_wired_nothing_is_routed_and_the_tool_is_unchanged() {
     assert!(!model
         .tools_offered()
         .join("\n")
-        .contains("Large files (over 50 MiB)"));
+        .contains("LARGE FILE IN THIS TURN"));
 }
 
 /// The runtime's own switch (`EngineConfig.prepare`) off: a typed refusal.
@@ -226,7 +226,7 @@ async fn the_tool_is_unchanged_on_a_turn_with_only_a_small_file() {
         .unwrap();
     let offered = model.tools_offered().join("\n");
     assert!(offered.contains("attachment_run_python"), "{offered}");
-    assert!(!offered.contains("Large files (over 50 MiB)"), "{offered}");
+    assert!(!offered.contains("LARGE FILE IN THIS TURN"), "{offered}");
     assert!(!offered.contains("\"tables\":{"), "{offered}");
 }
 
@@ -441,8 +441,8 @@ async fn data_run_python_over_a_prepared_file_runs_over_its_tables() {
     assert_eq!(storage.reads() + storage.stores(), 0);
     let offered = model.tools_offered().join("\n");
     assert!(offered.contains("data_run_python"), "{offered}");
-    assert!(offered.contains("Large files (over 50 MiB)"), "{offered}");
-    assert!(offered.contains("pass ONE binding"), "{offered}");
+    assert!(offered.contains("LARGE FILE IN THIS TURN"), "{offered}");
+    assert!(offered.contains("exactly one binding"), "{offered}");
 }
 
 /// A large file is analysed on its own; a mix is refused with a sentence, nothing runs.
@@ -488,6 +488,12 @@ async fn code_ref_over_a_large_file_is_refused() {
 /// text are unchanged since). The checks below compare the node against THIS, not against
 /// whatever the builder produces today.
 const GOLDEN_DRP: &str = include_str!("golden_data_run_python_v0_30_0.json");
+
+/// The description `data_run_python` has with no large file in play (the golden).
+fn base_description() -> String {
+    let golden: Value = serde_json::from_str(GOLDEN_DRP).unwrap();
+    golden["description"].as_str().unwrap().to_string()
+}
 
 fn same_as_the_golden(offered: &crate::llm::domain::ToolDefinition) {
     let golden: Value = serde_json::from_str(GOLDEN_DRP).unwrap();
@@ -654,4 +660,81 @@ async fn the_tool_that_is_not_excluded_still_runs_on_that_node() {
     .await;
     assert_eq!(runs, 1, "{seen}");
     assert!(seen.contains("\"ran\":true"), "{seen}");
+}
+
+/// With lazy tool loading the large-file definition is hidden until the model describes
+/// the tool, and it then arrives whole, large-file section first: the same text as without
+/// lazy loading. (`describe_tool` itself only answers from the node's `tool_configurations`,
+/// which for this synthetic tool carry no schema; the definition is what the model reads.)
+#[tokio::test]
+#[serial_test::serial]
+async fn with_lazy_loading_the_discovered_definition_opens_with_the_large_file_section() {
+    use super::node_harness::run_turn_with_config;
+    let db = tempfile::NamedTempFile::new().unwrap();
+    let url = format!("sqlite://{}", db.path().display());
+    let reg = registry_with_storage(Some(Arc::new(CountingStorage::default())));
+    reg.set_large_tabular(true);
+    run_turn(&reg, &url, vec![entry()], &RecordingModel::new(2))
+        .await
+        .unwrap();
+    let p = prepared(&[("sales", 1)], 4).await;
+    reg.set_large_tabular_runtime(Arc::new(runtime(&p, Recorder::ok(Value::Null), true)));
+    std::mem::forget(p);
+    let model = RecordingModel::scripted(vec![
+        ScriptedResponse::ToolCall {
+            id: "d1".into(),
+            tool_name: "describe_tool".into(),
+            arguments: json!({"name": "data_run_python"}),
+        },
+        ScriptedResponse::Text("ok".into()),
+    ]);
+    run_turn_with_config(
+        &reg,
+        &url,
+        vec![],
+        drp_tools(),
+        json!({"lazy_tool_loading": true}),
+        &model,
+    )
+    .await
+    .unwrap();
+    let def = model
+        .tool_definition("data_run_python")
+        .expect("discovered");
+    assert_eq!(
+        def.description,
+        format!(
+            "{}\n\n---\n\n{}",
+            crate::text::large_file_section("data_run_python"),
+            base_description()
+        )
+    );
+}
+
+/// On a large-file turn the node shows the section FIRST and the v0.31.0 description,
+/// byte for byte, after it; for both tools.
+#[tokio::test]
+#[serial_test::serial]
+async fn the_large_section_comes_first_and_the_rest_is_the_usual_text() {
+    let script = drp_call(json!([{"var": "big", "attachment_id": "doc-big"}]));
+    let (model, _) = drp_turn(true, Recorder::ok(json!(1)), script).await;
+    let def = model.tool_definition("data_run_python").expect("offered");
+    assert_eq!(
+        def.description,
+        format!(
+            "{}\n\n---\n\n{}",
+            crate::text::large_file_section("data_run_python"),
+            base_description()
+        )
+    );
+    assert!(def.description.starts_with("## LARGE FILE IN THIS TURN"));
+    // The summary and the rest of the schema are the usual ones.
+    let golden: Value = serde_json::from_str(GOLDEN_DRP).unwrap();
+    assert_eq!(def.summary.as_deref(), golden["summary"].as_str());
+    let mut schema = def.input_schema_override.clone().unwrap();
+    schema["properties"]
+        .as_object_mut()
+        .unwrap()
+        .remove("tables");
+    assert_eq!(schema, golden["input_schema_override"]);
 }

@@ -977,10 +977,14 @@ mod tests {
         assert_eq!(
             large.description,
             format!(
-                "{}{}",
-                usual.description,
-                super::super::attachment_run_python::large::DATA_RUN_LARGE_FILES_TEXT
+                "{}\n\n---\n\n{}",
+                crate::text::large_file_section("data_run_python"),
+                usual.description
             )
+        );
+        assert!(
+            large.description.starts_with("## LARGE FILE IN THIS TURN"),
+            "the large-file section comes first"
         );
         let (mut a, b) = (
             usual.input_schema_override.clone().unwrap(),
@@ -989,7 +993,7 @@ mod tests {
         assert_eq!(b["properties"]["tables"]["items"]["type"], "string");
         a["properties"]["tables"] = b["properties"]["tables"].clone();
         assert_eq!(a, b, "nothing else in the schema changed");
-        assert!(!usual.description.contains("Large files"));
+        assert!(!usual.description.contains("LARGE FILE"));
     }
 
     #[tokio::test]

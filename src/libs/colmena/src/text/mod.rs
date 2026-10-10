@@ -25,6 +25,59 @@ const GDOCS_YAML: &str = include_str!("../../text/tools/gdocs.yaml");
 const SQL_YAML: &str = include_str!("../../text/tools/sql.yaml");
 const DATA_RUN_PYTHON_YAML: &str = include_str!("../../text/tools/data_run_python.yaml");
 
+const LARGE_FILES_YAML: &str = include_str!("../../text/tools/large_files.yaml");
+
+/// What differs between the tools in the large-file section.
+#[derive(Debug, Deserialize)]
+struct LargeFilesTool {
+    var: String,
+    opening: String,
+    call: String,
+    answer: String,
+    unavailable: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct LargeFilesText {
+    template: String,
+    #[serde(flatten)]
+    tools: HashMap<String, LargeFilesTool>,
+}
+
+static LARGE_FILES: OnceLock<LargeFilesText> = OnceLock::new();
+
+fn large_files() -> &'static LargeFilesText {
+    LARGE_FILES.get_or_init(|| {
+        serde_yaml::from_str(LARGE_FILES_YAML)
+            .unwrap_or_else(|e| panic!("text/tools/large_files.yaml malformed: {e}"))
+    })
+}
+
+/// The section a tool's description opens with on a turn that has a large file: the shared
+/// template filled with that tool's few differences. Panics if the tool has no entry.
+pub fn large_file_section(tool: &str) -> String {
+    let all = large_files();
+    let t = all
+        .tools
+        .get(tool)
+        .unwrap_or_else(|| panic!("text/tools/large_files.yaml has no entry for '{tool}'"));
+    let mut out = all.template.trim_end().to_string();
+    for (key, value) in [
+        ("opening", &t.opening),
+        ("call", &t.call),
+        ("answer", &t.answer),
+        ("unavailable", &t.unavailable),
+        ("var", &t.var),
+    ] {
+        out = out.replace(&format!("{{{{{key}}}}}"), value.trim());
+    }
+    assert!(
+        !out.contains("{{"),
+        "an unfilled placeholder in the large-file section"
+    );
+    out
+}
+
 static TOOL_TEXTS: OnceLock<HashMap<String, ToolText>> = OnceLock::new();
 
 /// Populate the registry from every embedded YAML. Panics if any YAML is

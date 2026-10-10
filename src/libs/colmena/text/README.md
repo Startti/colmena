@@ -12,6 +12,10 @@ to change what the model sees — you do not need to touch source code.
   key is a tool's registered `name` constant. Two sub-keys: `summary` (≤
   200 chars one-line) and `description` (multi-line).
 
+`tools/large_files.yaml` is the exception: not a tool registry but the template of the
+large-file section that `text::large_file_section(tool)` renders in front of
+`attachment_run_python` / `data_run_python` on a turn that has a large file.
+
 ## How to add a new tool's text
 
 1. Open `tools/<package>.yaml`.

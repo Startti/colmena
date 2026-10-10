@@ -1582,12 +1582,9 @@ is unchanged; a switch that is on shows it with the tool text (a later slice).
 token port). The node hands it to the tool executor only while the large tabular switch is on; with the switch off, or
 without a runtime, nothing is wired, no call is routed and the tool is exactly what it always was.
 
-While a runtime is wired and the switch is on, `attachment_run_python` is offered with two additions
-(`build_attachment_run_python_tool_definition_for_large_files`): the large-file text appended to its description (`df` is not
-loaded; `tables.names`, `tables.schema(name)`, `t.read(columns=[...], filters=[...])`, `t.parts(columns=[...])`, `t.head()`;
-a whole table cannot be loaded; runs may take up to 5 minutes; no charts) and the optional `tables` argument. The text is a
-Rust constant beside the tool (as the refusal sentences are), not an entry of `text/tools/`: the registry's orphan check
-wants one builder per entry and this text is only ever an appendix of one tool.
+While a runtime is wired and the switch is on, and the turn has a host-owned large file, `attachment_run_python` is offered
+with the large-file section FIRST in its description and the optional `tables` argument (see "The text the model reads about
+a large file" below).
 
 The node-level proofs run the real `llm_call` node against a scripted model (`nodes/llm/large_run_turn.rs`): a call over a
 host-owned file reaches the runtime and the model sees the tables and the result, with no key and no byte of the original
@@ -2128,3 +2125,32 @@ label (`row_is_not_this_source`, `row_format_version_differs`, `row_has_no_manif
 `no_derived_root`, `row_manifest_key_is_not_under_the_derived_root`,
 `row_does_not_track_its_manifest`, `row_has_no_prepared_bytes`, `manifest_unparsable`,
 `table_list_differs`, `part_not_tracked`). Never a key, a name or a value.
+
+## The text the model reads about a large file
+
+Where it lives: `src/libs/colmena/text/tools/large_files.yaml`, one shared `template` plus the few places each tool
+differs (`opening`, `call`, `answer`, `var`, `unavailable`), rendered by `text::large_file_section(tool)`. It is not an entry
+of the tool registry (`tool_description`): the registry's orphan check wants one builder per entry, and this section is only
+ever shown in front of one tool's description.
+
+Where it goes: on a turn that has a host-owned large file and a tool that serves it, the description is
+`<section>` + `\n\n---\n\n` + `<the usual description, byte for byte>`. The section opens with one sentence saying the turn has
+a large file and that for that file this mode REPLACES the DataFrame-per-binding mode (or the pre-loaded `df`) described
+below. Without a large file, or with the switch off, the description is the v0.31.0 one (a golden test pins it). With lazy
+tool loading the definition is hidden until `describe_tool` is called and then arrives whole, section first; `describe_tool`
+itself answers from the node's `tool_configurations`, which carry no schema for these synthetic tools.
+
+What it says is checked, not trusted: a test reads `prelude.py` and fails if the section names a helper the prelude does not
+define; another runs the two examples verbatim against the real prelude over real Parquet, for both tools.
+
+The facts behind the `read` / `parts` rule (all in `prelude.py` and its inputs):
+- `read(columns=[...])` loads every row of the named columns into one DataFrame, and refuses when the estimate for them
+  (decoded size, times 2 for Arrow plus pandas at once) is over `READ_MAX_BYTES`, 1.5 GiB. It does NOT refuse a table
+  as such: a 1.1 M-row table read for two columns is fine. `columns` is required.
+- `parts(columns=[...])` yields one part at a time, each of up to `PART_MAX_ROWS` = 500,000 rows (and about 64 MiB
+  encoded); it refuses only when ONE part of the chosen columns would be over the same limit (a very wide table).
+- Table names match exactly, then case-insensitively when that is unambiguous; column names are exact.
+- `emit_table`: 8 files, 64 MiB each, 128 MiB in all; csv takes a DataFrame or an iterable of them, parquet one DataFrame.
+
+The earlier text said "a whole table cannot be loaded at once", which contradicted `read`; it is gone. Size of the section in bytes: `data_run_python` 1,258 -> 3,269; `attachment_run_python` 799 -> 2,928 (roughly 315 -> 820 and
+200 -> 730 tokens at 4 bytes each). It is shown only on a large-file turn.
