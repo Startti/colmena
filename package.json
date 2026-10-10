@@ -1,5 +1,6 @@
 {
   "name": "colmena-ai",
+  "private": true,
   "version": "0.3.0",
   "description": "TypeScript bindings for Colmena LLM and DAG Engine",
   "main": "lib/index.js",
@@ -13,8 +14,7 @@
   "scripts": {
     "build": "napi build --platform --release --features node --cargo-cwd src/libs/colmena --cargo-name colmena --cargo-flags=\"--lib\" && tsc -p ts/tsconfig.json",
     "build:debug": "napi build --platform --features node --cargo-cwd src/libs/colmena --cargo-name colmena --cargo-flags=\"--lib\" && tsc -p ts/tsconfig.json",
-    "test": "COLMENA_LOCAL_STORAGE_PORT=0 node --test lib/test/*.js",
-    "prepublishOnly": "npm run build"
+    "test": "COLMENA_LOCAL_STORAGE_PORT=0 node --test lib/test/*.js"
   },
   "napi": {
     "name": "colmena",

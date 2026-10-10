@@ -14,6 +14,8 @@ authors = [
 ]
 keywords = ["ai", "llm", "openai", "gemini", "anthropic", "rust", "python", "streaming", "async"]
 classifiers = [
+    # PyPI rechaza cualquier subida con este clasificador: Colmena es privado.
+    "Private :: Do Not Upload",
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
     "License :: OSI Approved :: MIT License",

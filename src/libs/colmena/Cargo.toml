@@ -4,6 +4,11 @@ version = "0.4.0"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/Startti/colmena"
+description = "Colmena DAG engine (privado; se publica en GitHub Packages, ver docs/RELEASING.md)"
+# Nunca a crates.io: se publica como artefacto OCI en ghcr.io (publish-crate.yml).
+publish = false
+# `version` lo reescribe el CI al empaquetar (scripts/crate_version.sh).
+exclude = ["cargo_test.out", "output.log"]
 
 [lib]
 name = "colmena"
