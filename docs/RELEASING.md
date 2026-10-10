@@ -48,6 +48,15 @@ un registro: `apps/service/ia/platform/fetch_colmena.sh` baja el artefacto con
 exacta (`version = "=0.32.0-beta.3"`). Cargo valida que la versión del crate
 bajado coincida.
 
+Después de publicar, el workflow le avisa a ADP (`repository_dispatch`
+`colmena-published`) y ADP abre o actualiza una PR hacia su `develop` que sube
+el pin, baja el crate y regenera lo que depende de él
+(`.github/workflows/colmena-bump.yml` en ADP). Todas van a `develop`, también
+los rc y las estables: el pin llega a staging y prod con la promoción normal de
+ADP, y su CI frena una beta hacia staging o un pre-release hacia main. El bot
+solo propone versiones MAYORES que el pin, así una beta no pisa un rc. Necesita
+el secreto `ADP_DISPATCH_TOKEN` en este repo; sin él, el bump es a mano.
+
 Para que el CI de ADP pueda bajarlo, el paquete tiene que darle acceso al repo
 `Startti/adp`: *Package settings → Manage Actions access → Add repository*
 (rol Read). Se hace una vez.
