@@ -41,8 +41,17 @@ fn postlude() -> String {
 const EMITTED_TAIL: &str =
     "if _ct_emitted:\n    output = {'__colmena_emitted': _ct_emitted, 'result': output}\n";
 
+/// The `data_run_python` flavour of [`EMITTED_TAIL`]: it also reports the write sinks
+/// the code set (`output_tables`, `output_sheets`, `output_attachments`), which the large
+/// path cannot write, so the answer can say they were set and NOT written.
+const EMITTED_TAIL_WITH_SINKS: &str = "_ct_unwritten = [n for n, v in (('output_tables', output_tables), ('output_sheets', output_sheets), ('output_attachments', output_attachments)) if v is not None]\nif _ct_emitted or _ct_unwritten:\n    output = {'__colmena_emitted': _ct_emitted, '__colmena_unwritten': _ct_unwritten, 'result': output}\n";
+
 /// The key the report travels under.
 pub const EMITTED_KEY: &str = "__colmena_emitted";
+/// The key the names of the write sinks the code set travel under.
+pub const UNWRITTEN_KEY: &str = "__colmena_unwritten";
+/// The sinks of `data_run_python` that do not exist over a large file.
+pub const SINK_VARIABLES: [&str; 3] = ["output_tables", "output_sheets", "output_attachments"];
 
 /// The model's code wrapped for the large path: the same imports and the same
 /// `result` convention as the small path, with `tables` and the `df` guard in
@@ -51,18 +60,20 @@ pub fn wrap_large_code(code: &str) -> String {
     wrap_large_code_for(code, false)
 }
 
-/// [`wrap_large_code`], and with `accept_output` the code may also leave its answer in
-/// `output` (what `data_run_python` code does): `result` wins when both are set.
+/// [`wrap_large_code`], and with `accept_output` the wrapper is `data_run_python`'s: the
+/// answer is `output` (that tool's documented answer; `result` is often an intermediate
+/// DataFrame there), and `result` is used only when `output` was not set.
 pub fn wrap_large_code_for(code: &str, accept_output: bool) -> String {
-    let (before, after) = match accept_output {
+    let (before, after, tail) = match accept_output {
         true => (
-            "output = None\n",
-            "if result is None and output is not None:\n    result = output\n",
+            "output = None\noutput_tables = output_sheets = output_attachments = None\n",
+            "if output is not None:\n    result = output\n",
+            EMITTED_TAIL_WITH_SINKS,
         ),
-        false => ("", ""),
+        false => ("", "", EMITTED_TAIL),
     };
     format!(
-        "\nimport pandas as pd\nimport numpy as np\nimport scipy.stats as stats\n\n{PRELUDE}\nresult = None\n{before}\n{code}\n\n{after}{}\n{EMITTED_TAIL}",
+        "\nimport pandas as pd\nimport numpy as np\nimport scipy.stats as stats\n\n{PRELUDE}\nresult = None\n{before}\n{code}\n\n{after}{}\n{tail}",
         postlude()
     )
 }
@@ -81,15 +92,56 @@ pub struct EmitReport {
 const MAX_REPORT_COLUMNS: usize = 200;
 const MAX_REPORT_TEXT: usize = 64;
 
+/// What a wrapped run answered: the code's result, the reports of the files it wrote and
+/// the write sinks it set that the large path did not write.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Unwrapped {
+    pub result: Value,
+    pub reports: Vec<EmitReport>,
+    pub unwritten: Vec<&'static str>,
+}
+
 /// Splits the answer of a wrapped run into the code's result and the reports of
 /// the files it wrote. An answer without the marker is the result as it is.
 pub fn unwrap_emitted(output: Value) -> (Value, Vec<EmitReport>) {
-    let Value::Object(mut map) = output else {
-        return (output, vec![]);
+    let u = unwrap_answer(output, false);
+    (u.result, u.reports)
+}
+
+/// [`unwrap_emitted`], and the names of the write sinks the code set. The names come
+/// from the sandbox, so only the three sink names are ever accepted.
+pub fn unwrap_answer(output: Value, with_sinks: bool) -> Unwrapped {
+    let plain = |v| Unwrapped {
+        result: v,
+        reports: vec![],
+        unwritten: vec![],
     };
-    if map.len() != 2 || !map.contains_key(EMITTED_KEY) || !map.contains_key("result") {
-        return (Value::Object(map), vec![]);
+    let Value::Object(mut map) = output else {
+        return plain(output);
+    };
+    let marked = map.contains_key(EMITTED_KEY)
+        && map.contains_key("result")
+        && match map.len() {
+            2 => true,
+            // The three-key form exists only on the `data_run_python` flavour: elsewhere
+            // the same dict is the code's own result and is returned as it is.
+            3 => with_sinks && map.contains_key(UNWRITTEN_KEY),
+            _ => false,
+        };
+    if !marked {
+        return plain(Value::Object(map));
     }
+    // At most the three sink names, each once and in a fixed order, however many entries
+    // (or what) the sandbox sent: one sentence per sink, never one per entry.
+    let sent = map.remove(UNWRITTEN_KEY).unwrap_or(Value::Null);
+    let unwritten: Vec<&'static str> = SINK_VARIABLES
+        .iter()
+        .filter(|sink| {
+            sent.as_array()
+                .is_some_and(|items| items.iter().any(|n| n.as_str() == Some(**sink)))
+        })
+        .copied()
+        .collect();
     let result = map.remove("result").unwrap_or(Value::Null);
     let clean = |text: &str| crate::llm::domain::large_tabular::inert_text(text, MAX_REPORT_TEXT);
     let reports = map
@@ -119,7 +171,11 @@ pub fn unwrap_emitted(output: Value) -> (Value, Vec<EmitReport>) {
             })
         })
         .collect();
-    (result, reports)
+    Unwrapped {
+        result,
+        reports,
+        unwritten,
+    }
 }
 
 /// The inputs the prelude reads: the chosen tables (name, position in the
@@ -406,8 +462,8 @@ mod tests {
         assert_eq!(est("['id', 'paid']"), 2 * (8000 + 125 * 16));
     }
 
-    /// The `data_run_python` convention: the code may leave its answer in `output`; `result`
-    /// wins when both are set; the plain wrapper is untouched.
+    /// The `data_run_python` convention: the answer is `output`; `result` is used only when
+    /// `output` is not set; the plain wrapper is untouched.
     #[test]
     fn the_wrapper_can_take_the_answer_from_output() {
         assert!(!wrap_large_code("result = 1").contains("result = output"));
@@ -416,6 +472,43 @@ mod tests {
         assert_eq!(wrap_large_code("x"), wrap_large_code_for("x", false));
     }
 
+    /// The wrapper reports the write sinks the code set, and only for the
+    /// `data_run_python` flavour; `unwrap_answer` accepts only the three sink names.
+    #[test]
+    fn the_sinks_a_code_sets_travel_with_the_answer() {
+        let wrapped = wrap_large_code_for("output = 1\noutput_sheets = {'a': 1}", true);
+        assert!(wrapped.contains(UNWRITTEN_KEY));
+        assert!(!wrap_large_code("result = 1").contains(UNWRITTEN_KEY));
+        let answer =
+            json!({EMITTED_KEY: [], UNWRITTEN_KEY: ["output_tables", "evil"], "result": 3});
+        let u = unwrap_answer(answer.clone(), true);
+        assert_eq!((u.result, u.unwritten), (json!(3), vec!["output_tables"]));
+        // A look-alike with extra keys is just a result.
+        let odd = json!({EMITTED_KEY: [], UNWRITTEN_KEY: [], "result": 1, "extra": 2});
+        assert_eq!(unwrap_answer(odd.clone(), true).result, odd);
+        // On the other flavour the three-key dict is the code's own result, as it always was.
+        assert_eq!(unwrap_answer(answer.clone(), false).result, answer);
+    }
+
+    /// However many entries the sandbox sends, at most the three sink names come out, each
+    /// once, in a fixed order.
+    #[test]
+    fn a_flood_of_sink_names_is_capped_to_the_three_sinks() {
+        let many: Vec<Value> = (0..10_000)
+            .map(|i| match i % 4 {
+                0 => json!("output_sheets"),
+                1 => json!("output_tables"),
+                2 => json!("output_attachments"),
+                _ => json!(format!("noise-{i}")),
+            })
+            .collect();
+        let answer = json!({EMITTED_KEY: [], UNWRITTEN_KEY: many, "result": 0});
+        let u = unwrap_answer(answer, true);
+        assert_eq!(
+            u.unwritten,
+            vec!["output_tables", "output_sheets", "output_attachments"]
+        );
+    }
     /// Skipped sheets are told with their cleaned name and a reason in words, and a
     /// workbook with none says nothing.
     #[test]
@@ -994,7 +1087,7 @@ mod reads {
         assert_eq!(out, "raised");
     }
 
-    /// Real Python: `output` is taken as the answer, and `result` wins over it.
+    /// Real Python: `output` is the answer and wins over `result`; `result` is the fallback.
     #[test]
     fn output_is_taken_as_the_answer_for_data_run_python_code() {
         let dir = tempfile::tempdir().unwrap();
@@ -1011,8 +1104,34 @@ mod reads {
             run("output = int(tables['t'].read(columns=['a'])['a'].sum())"),
             45
         );
-        assert_eq!(run("output = 1\nresult = 2"), 2);
+        // `output` is that tool's answer; `result` is often an intermediate DataFrame there.
+        assert_eq!(run("output = 1\nresult = 2"), 1);
         assert_eq!(run("result = 3"), 3);
+    }
+
+    /// Real Python: a code that sets a sink variable (a DataFrame included, whose
+    /// truthiness would raise) is reported, and one that does not is not.
+    #[test]
+    fn real_code_that_sets_a_sink_is_reported() {
+        let dir = tempfile::tempdir().unwrap();
+        let Some(inputs) = staged(dir.path()) else {
+            return;
+        };
+        if python("import scipy", "none", &Map::new()).is_err() {
+            skip_or_fail("scipy is needed by the wrapper's imports");
+            return;
+        }
+        let run = |code: &str| {
+            unwrap_answer(
+                python(&wrap_large_code_for(code, true), "restricted", &inputs).unwrap(),
+                true,
+            )
+        };
+        let u = run("output = 1\noutput_sheets = {'Top': tables['t'].head(2)}\noutput_tables = {}");
+        assert_eq!(u.result, json!(1));
+        assert_eq!(u.unwritten, vec!["output_tables", "output_sheets"]);
+        let u = run("output = 2");
+        assert_eq!((u.result, u.unwritten.len()), (json!(2), 0));
     }
 
     /// `head(n)` returns n rows when they exist even if the first batch is shorter

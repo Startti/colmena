@@ -1014,18 +1014,21 @@ impl DagToolExecutor {
         self.agent_session_id.clone()
     }
 
-    /// How many files, and how many bytes, the session already holds that this
-    /// tool generated. `None` when the registry cannot say.
-    pub(crate) async fn generated_usage(&self, tool_name: &str) -> Option<(usize, u64)> {
+    /// How many files, and how many bytes, the session already holds whose origin is
+    /// `generated_by:<one of origins>`. `None` when the registry cannot say.
+    pub(crate) async fn generated_usage(&self, origins: &[&str]) -> Option<(usize, u64)> {
         let (reg, sid) = (
             self.attachment_registry.as_ref()?,
             self.agent_session_id.as_ref()?,
         );
-        let mine = Some(crate::llm::domain::attachments::origin::generated_by(
-            tool_name,
-        ));
+        let mine: Vec<String> = origins
+            .iter()
+            .map(|o| crate::llm::domain::attachments::origin::generated_by(o))
+            .collect();
         let rows = reg.list_for_session(sid).await.ok()?;
-        let rows = rows.iter().filter(|r| r.origin == mine);
+        let rows = rows
+            .iter()
+            .filter(|r| r.origin.as_ref().is_some_and(|o| mine.contains(o)));
         Some(rows.fold((0, 0), |(n, b), r| (n + 1, b + r.size_bytes.unwrap_or(0))))
     }
 

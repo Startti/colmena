@@ -10,7 +10,7 @@ use super::collect::RejectReason;
 use super::mounted::{MountedCall, MountedError, MountedExecutor, OutputSink, OUT_MIB};
 use super::outputs::{OutputGuard, StoreSink};
 use super::prelude::{
-    prelude_inputs, skipped_summary, tables_summary, unwrap_emitted, wrap_large_code_for,
+    prelude_inputs, skipped_summary, tables_summary, unwrap_answer, wrap_large_code_for,
 };
 use super::refusal::{FailureReason, RunRefusal, Unavailable};
 use super::stage::StageLimits;
@@ -318,7 +318,9 @@ impl LargeTabularRuntime {
                 {
                     return Err(refused(RunRefusal::CopyChanged));
                 }
-                let (result, reports) = unwrap_emitted(done.result.output.unwrap_or(Value::Null));
+                let unwrapped =
+                    unwrap_answer(done.result.output.unwrap_or(Value::Null), req.accept_output);
+                let (result, reports) = (unwrapped.result, unwrapped.reports);
                 let (stored, guard) = sink.take_guarded();
                 let emitted = stored
                     .into_iter()
@@ -342,6 +344,12 @@ impl LargeTabularRuntime {
                         None => format!("a file with an invalid name: {}", reason_text(r.reason)),
                     })
                     .collect();
+                for sink in unwrapped.unwritten {
+                    not_kept.push(format!(
+                        "`{sink}` was set, but nothing was written: it is not available over a large file; \
+                         return files with `emit_table`"
+                    ));
+                }
                 if !req.keep_files {
                     // Said whether or not the code returned a file: it was known before
                     // the run, and the files of this call were not stored.

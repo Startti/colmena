@@ -13,17 +13,26 @@ use bytes::Bytes;
 use chrono::{Duration as ChronoDuration, Utc};
 use colmena::dag_engine::application::ports::NodeRegistryPort;
 use colmena::dag_engine::domain::node::ExecutableNode;
+use colmena::dag_engine::domain::state::DagTaskMemoryRepository;
 use colmena::dag_engine::infrastructure::dag_tool_executor::DagToolExecutor;
 use colmena::dag_engine::infrastructure::nodes::llm_synthetic_tools::attachment_run_python::dispatch_attachment_run_python_via_executor;
+use colmena::dag_engine::infrastructure::persistence::PostgresDagStateRepository;
+use colmena::dag_engine::infrastructure::pool_registry::{PgPoolRegistry, PoolConfig};
 use colmena::dag_engine::infrastructure::python_exec::config::SubprocessConfig;
 use colmena::dag_engine::infrastructure::python_exec::subprocess::SubprocessExecutor;
+use colmena::dag_engine::infrastructure::registry::HashMapNodeRegistry;
+use colmena::dag_engine::infrastructure::sql_port_factory::SqlPortFactory;
 use colmena::llm::domain::attachments::{
     origin, AttachmentError, AttachmentSource, UpsertAttachmentInput,
 };
 use colmena::llm::domain::{
     AttachmentRegistry, ConversationAttachment, FunctionCall, ProviderKind, ToolCall,
 };
+use colmena::llm::domain::{LlmError, LlmRepository, LlmRequest, LlmResponse, LlmStream};
 use colmena::llm::infrastructure::persistence::SqliteAttachmentRegistry;
+use colmena::llm::infrastructure::{
+    ConversationRepositoryFactory, OverrideGuard, ScriptedAdapter, ScriptedResponse,
+};
 use colmena::storage::domain::{
     OutputStorageRepository, StorageError, StoreRequest, StoreStreamRequest, StoredBytes,
     StoredOutput, StoredStream,
@@ -454,16 +463,33 @@ async fn scenario(kind: Kind) {
         }),
         _ => attachments.clone(),
     };
+    let runtime = Arc::new(runtime);
+    if kind == Kind::DataRun {
+        // The node builds its catalog from the registry: the file is a host reference there.
+        attachments
+            .upsert(UpsertAttachmentInput {
+                agent_session_id: "agent_1".into(),
+                document_id: "doc-1".into(),
+                provider: ProviderKind::OpenAi,
+                provider_file_id: String::new(),
+                mime_type: "text/csv".into(),
+                filename: "sales.csv".into(),
+                size_bytes: Some(60 * 1024 * 1024),
+                label: None,
+                description: None,
+                source: AttachmentSource::Path(SOURCE.into()),
+                storage_key: Some(SOURCE.into()),
+                origin: Some(origin::HOST_STORAGE_REF.into()),
+            })
+            .await
+            .unwrap();
+    }
     let mut executor = DagToolExecutor::new(Arc::new(NoNodes), Default::default())
         .with_attachments(vec![row])
         .with_attachment_storage(storage.clone())
         .with_attachment_registry(registry_for_tool)
         .with_agent_session_id(Some("agent_1".into()))
-        .with_large_tabular(Arc::new(runtime))
-        // The node serves both Python tools here; each is served on its own offering.
-        .with_large_served(colmena::llm::domain::large_tabular::LargeServed::decide(
-            true, true, true, true,
-        ));
+        .with_large_tabular(runtime.clone());
     if kind == Kind::Budget {
         executor = executor.with_large_call_budget(Duration::from_secs(2));
     }
@@ -495,23 +521,10 @@ async fn scenario(kind: Kind) {
         scope_index: None,
     };
     let answer: Value = if kind == Kind::DataRun {
-        let drp = ToolCall {
-            function: FunctionCall::new(
-                "data_run_python".into(),
-                serde_json::json!({
-                    "bindings": [{"var": "big", "attachment_id": "doc-1"}],
-                    "code": code,
-                })
-                .to_string(),
-            ),
-            ..call
-        };
-        colmena::dag_engine::infrastructure::nodes::llm_synthetic_tools::data_run_python::dispatch_data_run_python_via_executor(
-            &executor,
-            &drp,
-            &Default::default(),
-        )
-        .await
+        // Through the real node: its offering rule, its routing, its agent loop.
+        let (answer, _seen) =
+            through_the_node(runtime.clone(), storage.clone(), &attachments_url, code).await;
+        answer
     } else {
         let result = dispatch_attachment_run_python_via_executor(&executor, &call)
             .await
@@ -560,7 +573,10 @@ async fn scenario(kind: Kind) {
                 .await
                 .unwrap()
                 .expect("registered");
-            assert_eq!(row.origin.as_deref(), Some("generated_by:data_run_python"));
+            assert_eq!(
+                row.origin.as_deref(),
+                Some("generated_by:data_run_python_large")
+            );
         }
         Kind::Budget => {
             // Cut by the call's clock, not the code's: the answer names the clock and
@@ -625,4 +641,134 @@ async fn storage_is_empty_after(storage: &Storage) -> bool {
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
     false
+}
+
+/// A model that plays a script and keeps every message it was sent.
+struct Recording {
+    inner: ScriptedAdapter,
+    seen: Mutex<Vec<String>>,
+}
+
+impl Recording {
+    fn note(&self, request: &LlmRequest) {
+        let mut seen = self.seen.lock().unwrap();
+        seen.extend(request.messages().iter().map(|m| m.content().to_string()));
+    }
+}
+
+#[async_trait]
+impl LlmRepository for Recording {
+    async fn call(&self, request: LlmRequest) -> Result<LlmResponse, LlmError> {
+        self.note(&request);
+        self.inner.call(request).await
+    }
+    async fn stream(&self, request: LlmRequest) -> Result<LlmStream, LlmError> {
+        self.note(&request);
+        self.inner.stream(request).await
+    }
+    async fn health_check(&self) -> Result<(), LlmError> {
+        Ok(())
+    }
+    fn provider_name(&self) -> &'static str {
+        "recording"
+    }
+}
+
+/// `data_run_python` over the large file THROUGH THE REAL `llm_call` NODE: the node's own
+/// offering rule decides the tools and the routing, the scripted model calls the tool by
+/// name, and the call reaches the real runtime and jail. Returns the tool's answer as the
+/// model received it, and the tools the node offered.
+async fn through_the_node(
+    runtime: Arc<LargeTabularRuntime>,
+    storage: Arc<dyn OutputStorageRepository>,
+    attachments_url: &str,
+    code: &str,
+) -> (Value, Vec<String>) {
+    // With DATABASE_URL set the node would keep its attachments in that Postgres, not in
+    // the SQLite database of this scenario. Every test of this file is serial.
+    std::env::remove_var("DATABASE_URL");
+    let pools = Arc::new(PgPoolRegistry::new(PoolConfig::defaults()));
+    let repos = Arc::new(ConversationRepositoryFactory::new(pools.clone()));
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .connect_lazy("postgres://unused:unused@127.0.0.1:1/unused")
+        .unwrap();
+    let task_memory: Arc<dyn DagTaskMemoryRepository> =
+        Arc::new(PostgresDagStateRepository::new(pool));
+    let reg = HashMapNodeRegistry::new_with_secure_values(
+        repos,
+        Arc::new(SqlPortFactory::new(pools)),
+        Some(task_memory),
+        None,
+        Some(storage),
+        None,
+        None,
+    );
+    reg.set_large_tabular(true);
+    reg.set_large_tabular_runtime(runtime);
+    let node = reg.get_node("llm_call").expect("llm_call is registered");
+    let config = serde_json::json!({
+        "provider": "openai", "model": "m", "api_key": "k", "stream": false,
+        "prompt": "go", "connection_url": attachments_url,
+        "tool_configurations": {"data_run_python": {"node_type": "data_run_python"}},
+    });
+    let inputs = |files: Value| -> HashMap<String, Value> {
+        HashMap::from([
+            ("__colmena_session_id".to_string(), "s1".into()),
+            ("__colmena_agent_session_id".to_string(), "agent_1".into()),
+            ("files".to_string(), files),
+        ])
+    };
+    let script = |responses| {
+        Arc::new(Recording {
+            inner: ScriptedAdapter::new(responses),
+            seen: Mutex::default(),
+        })
+    };
+    // Turn 1 only registers the file the way a host does; the row is already there from
+    // the catalog row of the scenario, so the model just answers.
+    let first = script(vec![ScriptedResponse::Text("ok".into())]);
+    {
+        let _guard = OverrideGuard::install(first.clone());
+        node.execute(
+            &inputs(Value::Array(vec![])),
+            &config,
+            &mut Value::Null,
+            None,
+        )
+        .await
+        .unwrap();
+    }
+    let second = script(vec![
+        ScriptedResponse::ToolCall {
+            id: "call-1".into(),
+            tool_name: "data_run_python".into(),
+            arguments: serde_json::json!({
+                "bindings": [{"var": "big", "attachment_id": "doc-1"}],
+                "code": code,
+            }),
+        },
+        ScriptedResponse::Text("ok".into()),
+    ]);
+    {
+        let _guard = OverrideGuard::install(second.clone());
+        node.execute(
+            &inputs(Value::Array(vec![])),
+            &config,
+            &mut Value::Null,
+            None,
+        )
+        .await
+        .unwrap();
+    }
+    let seen = second.seen.lock().unwrap().clone();
+    let answer = seen
+        .iter()
+        .rev()
+        .find_map(|m| {
+            serde_json::from_str::<Value>(m)
+                .ok()
+                .filter(|v| v.get("tables").is_some())
+        })
+        .unwrap_or_else(|| panic!("the tool's answer reached the model: {seen:?}"));
+    (answer, seen)
 }
