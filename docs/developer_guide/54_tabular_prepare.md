@@ -2113,3 +2113,18 @@ budget, not two, and the small sink can neither eat the large allowance nor race
 
 `attachment_run_python` keeps working for old graphs on the same terms; it is not the tool
 that is named when the node has both.
+
+## Verifying a prepared copy: the derived root and the rejection log
+
+`verify_prepared` derives the root of a copy from the storage adapter the way the
+preparation (`StoragePartSink`) and the cleanup (`attachment_gc`) do: a trailing `/` is not
+part of it and an empty root is no root. An adapter that reports the root with a trailing
+slash (the ADP worker's does) therefore verifies the copy it prepared, instead of looking for
+`.../prepared/<id>//manifest.json` and refusing every copy as `large_tabular_invalid`.
+
+Every `Invalid` refusal reads to the model as the same fixed sentence. The operator gets the
+reason: a WARN on target `colmena::tabular_run`, event `verify.rejected`, with a fixed `check`
+label (`row_is_not_this_source`, `row_format_version_differs`, `row_has_no_manifest_key`,
+`no_derived_root`, `row_manifest_key_is_not_under_the_derived_root`,
+`row_does_not_track_its_manifest`, `row_has_no_prepared_bytes`, `manifest_unparsable`,
+`table_list_differs`, `part_not_tracked`). Never a key, a name or a value.
