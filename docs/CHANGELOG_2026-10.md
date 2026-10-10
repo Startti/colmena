@@ -591,3 +591,22 @@ respuesta con 2 pedidos, en `call` y en `stream` (sin ese `finish_reason` en nin
 intentos en el uso); repetido hasta agotar `immediate(2)`, 3 pedidos y el marcador en los dos caminos, y con
 `immediate(0)` un solo pedido; después de texto o de un pensamiento ya emitidos en `stream`, o con texto o tokens de
 salida en `call`, un solo pedido. **ADP.** Subir el pin; nada más. **Estado.** done.
+
+## 36. Gemini: las respuestas de tools van con `role: "user"`
+
+**Qué cambia.** Medido en dev el 2026-10-10 a las 17:32Z: todo agente con tools sobre `gemini-3.5-flash` fallaba con
+`Gemini API error 400 INVALID_ARGUMENT: Role 'function' is not supported. Please use a valid role: SYSTEM, SYSTEM_1,
+USER, ASSISTANT, DEVELOPER, CONTEXT, USER_CONTEXT, MODEL, USER.` El adaptador mandaba cada resultado de tool como
+`Content { role: "function", parts: [functionResponse] }` (igual en v0.30.0; cambió la API para los modelos 3.x). La
+referencia de `Content` dice que `role` «Must be either 'user' or 'model'»
+([generate-content#content](https://ai.google.dev/api/generate-content#content)) y la guía de function calling arma
+el resultado como un turno `user` con partes `functionResponse`
+([function-calling](https://ai.google.dev/gemini-api/docs/generate-content/function-calling)). Ahora los resultados
+salen con `role: "user"`, en `call` y en `stream` (los dos usan `convert_messages`). Los resultados seguidos de una
+misma ronda de llamadas en paralelo van juntos en un solo turno `user`, una parte `functionResponse` por llamada, en
+el orden de las llamadas (`LlmRequest::new` ya los ordena). Un mensaje `user` de texto que sigue a un resultado no se
+fusiona: queda en su propio turno.
+**Tests.** En `gemini_adapter`: ningún `content` sale con un rol fuera de `user`/`model` ni aparece
+`"role":"function"` en el cuerpo; dos resultados en paralelo comparten un turno `user` con dos partes en el orden de
+las llamadas, y el texto de usuario siguiente queda aparte; los tests de envoltura de escalares y de orden de dos
+llamadas a un mismo tool buscan ahora el turno `user`. **ADP.** Subir el pin; nada más. **Estado.** done.

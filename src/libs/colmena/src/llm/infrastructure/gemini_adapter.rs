@@ -211,22 +211,40 @@ impl GeminiAdapter {
                             Err(_) => serde_json::json!({ "result": message.content() }),
                         };
 
-                    contents.push(GeminiContent {
-                        role: "function".to_string(),
-                        parts: Some(vec![GeminiPart {
-                            text: None,
-                            function_call: None,
-                            function_response: Some(serde_json::json!({
-                                "name": tool_name,
-                                "response": parsed_content
-                            })),
-                            inline_data: None,
-                            file_data: None,
-                            thought: None,
-                            thought_signature: None,
-                        }]),
+                    let part = GeminiPart {
                         text: None,
-                    });
+                        function_call: None,
+                        function_response: Some(serde_json::json!({
+                            "name": tool_name,
+                            "response": parsed_content
+                        })),
+                        inline_data: None,
+                        file_data: None,
+                        thought: None,
+                        thought_signature: None,
+                    };
+
+                    // Tool results go back as a `user` turn holding
+                    // `functionResponse` parts: `Content.role` must be "user"
+                    // or "model", and Gemini 3.x rejects "function" with 400
+                    // INVALID_ARGUMENT. Consecutive tool results (parallel
+                    // calls) share ONE user turn, one part per call, in
+                    // history order. A neighbouring user *text* message is
+                    // never merged in: it stays its own turn.
+                    // https://ai.google.dev/api/generate-content#content
+                    // https://ai.google.dev/gemini-api/docs/generate-content/function-calling
+                    let previous_was_tool =
+                        i > 0 && matches!(messages[i - 1].role(), MessageRole::Tool);
+                    match contents.last_mut() {
+                        Some(GeminiContent {
+                            parts: Some(parts), ..
+                        }) if previous_was_tool => parts.push(part),
+                        _ => contents.push(GeminiContent {
+                            role: "user".to_string(),
+                            parts: Some(vec![part]),
+                            text: None,
+                        }),
+                    }
                 }
             }
         }
@@ -1288,9 +1306,12 @@ mod tests {
     }
 
     fn extract_function_response(contents: &[GeminiContent]) -> serde_json::Value {
-        let function_msg = contents.iter().find(|c| c.role == "function").unwrap();
-        let part = function_msg.parts.as_ref().unwrap().first().unwrap();
-        part.function_response.clone().unwrap()
+        contents
+            .iter()
+            .filter(|c| c.role == "user")
+            .flat_map(|c| c.parts.as_deref().unwrap_or_default())
+            .find_map(|p| p.function_response.clone())
+            .unwrap()
     }
 
     #[test]
@@ -1478,7 +1499,7 @@ mod tests {
         let (_, contents) = GeminiAdapter::new().convert_messages(&req).unwrap();
         let responses: Vec<serde_json::Value> = contents
             .iter()
-            .filter(|c| c.role == "function")
+            .filter(|c| c.role == "user")
             .flat_map(|c| c.parts.as_deref().unwrap_or_default())
             .filter_map(|p| p.function_response.clone())
             .collect();
@@ -1496,6 +1517,103 @@ mod tests {
                 }),
             ]
         );
+    }
+
+    // Gemini 3.x rejects `role: "function"` with 400 INVALID_ARGUMENT
+    // ("Role 'function' is not supported", measured in dev on 2026-10-10 with
+    // gemini-3.5-flash). `Content.role` must be "user" or "model"; tool results
+    // travel as a `user` turn of `functionResponse` parts, all the results of
+    // one round of parallel calls in ONE turn, one part per call, in order.
+    // https://ai.google.dev/api/generate-content#content
+    fn parallel_tool_round_then_user_text() -> crate::llm::domain::LlmRequest {
+        use crate::llm::domain::{
+            FunctionCall, LlmConfig, LlmMessage, LlmProvider, LlmRequest, ProviderKind, ToolCall,
+        };
+        let provider =
+            LlmProvider::new(ProviderKind::Google, "test_key".to_string(), None).unwrap();
+        let call = |id: &str, name: &str| {
+            ToolCall::new(
+                id.to_string(),
+                FunctionCall::new(name.to_string(), "{}".to_string()),
+            )
+        };
+        let messages = vec![
+            LlmMessage::system("be brief".to_string()).unwrap(),
+            LlmMessage::user("weather and time?".to_string()).unwrap(),
+            LlmMessage::assistant_with_tool_calls(
+                "".to_string(),
+                vec![call("call_a", "getWeather"), call("call_b", "getTime")],
+            )
+            .unwrap(),
+            LlmMessage::tool("call_a".to_string(), r#"{"temp":21}"#.to_string()).unwrap(),
+            LlmMessage::tool("call_b".to_string(), r#"{"time":"17:32"}"#.to_string()).unwrap(),
+            LlmMessage::assistant("21 °C, 17:32".to_string()).unwrap(),
+            LlmMessage::user("thanks".to_string()).unwrap(),
+            LlmMessage::assistant_with_tool_calls("".to_string(), vec![call("call_c", "getTime")])
+                .unwrap(),
+            LlmMessage::tool("call_c".to_string(), "17:33".to_string()).unwrap(),
+            LlmMessage::user("and now?".to_string()).unwrap(),
+        ];
+        LlmRequest::new(messages, LlmConfig::new(provider), false).unwrap()
+    }
+
+    #[test]
+    fn no_content_is_sent_with_a_role_other_than_user_or_model() {
+        let req = parallel_tool_round_then_user_text();
+        let body = GeminiAdapter::new().build_request_body(&req).unwrap();
+        let roles: Vec<&str> = body["contents"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| c["role"].as_str().unwrap())
+            .collect();
+        assert!(
+            roles.iter().all(|r| *r == "user" || *r == "model"),
+            "Gemini only accepts user/model in contents, got {roles:?}"
+        );
+        assert!(!body.to_string().contains(r#""role":"function""#));
+    }
+
+    #[test]
+    fn parallel_tool_results_share_one_user_turn_in_call_order() {
+        let req = parallel_tool_round_then_user_text();
+        let (_, contents) = GeminiAdapter::new().convert_messages(&req).unwrap();
+        let roles: Vec<&str> = contents.iter().map(|c| c.role.as_str()).collect();
+        assert_eq!(
+            roles,
+            ["user", "model", "user", "model", "user", "model", "user", "user"]
+        );
+
+        let names = |c: &GeminiContent| -> Vec<String> {
+            c.parts
+                .as_deref()
+                .unwrap_or_default()
+                .iter()
+                .map(|p| {
+                    assert!(p.text.is_none(), "a tool turn carries no text part");
+                    p.function_response.as_ref().unwrap()["name"]
+                        .as_str()
+                        .unwrap()
+                        .to_string()
+                })
+                .collect()
+        };
+        assert_eq!(names(&contents[2]), ["getWeather", "getTime"]);
+        assert_eq!(names(&contents[6]), ["getTime"]);
+        assert_eq!(
+            contents[6].parts.as_deref().unwrap()[0]
+                .function_response
+                .as_ref()
+                .unwrap()["response"],
+            serde_json::json!({ "result": "17:33" })
+        );
+
+        // The user text that follows a tool result is its own turn, never
+        // folded into the functionResponse turn.
+        let last = contents.last().unwrap().parts.as_deref().unwrap();
+        assert_eq!(last.len(), 1);
+        assert_eq!(last[0].text.as_deref(), Some("and now?"));
+        assert!(last[0].function_response.is_none());
     }
 
     // ---------------------------------------------------------------------
