@@ -1,0 +1,162 @@
+name: Publish crate (GitHub Packages)
+
+# Cada push a una rama de ambiente empaqueta `colmena_dag_engine` y lo publica,
+# privado, en GitHub Packages (ghcr.io) como artefacto OCI. ADP lo baja de ahí
+# (apps/service/ia/platform/fetch_colmena.sh) en vez de clonar este repo.
+#
+#   develop → X.Y.Z-beta.N   (tag OCI móvil: beta)
+#   staging → X.Y.Z-rc.N     (tag OCI móvil: rc)
+#   main    → X.Y.Z          (tag OCI móvil: latest) + GitHub Release
+#
+# La versión la calcula scripts/crate_version.sh desde los tags git
+# `colmena_dag_engine-v*`: los crea ESTE workflow, no se crean a mano.
+# GitHub Packages no tiene registro de Cargo; por eso OCI (ver docs/RELEASING.md).
+
+on:
+  push:
+    branches: [develop, staging, main]
+  workflow_dispatch:
+
+# Dos pushes seguidos a la misma rama calcularían el mismo N.
+concurrency:
+  group: publish-crate-${{ github.ref_name }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write # el tag git y el GitHub Release
+  packages: write # ghcr.io
+
+env:
+  PACKAGE: ghcr.io/startti/colmena_dag_engine
+  CRATE_DIR: src/libs/colmena
+
+jobs:
+  publish:
+    name: Test, package & publish
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Channel and version
+        id: version
+        run: |
+          case "$GITHUB_REF_NAME" in
+            develop) channel=beta; moving=beta ;;
+            staging) channel=rc; moving=rc ;;
+            main) channel=stable; moving=latest ;;
+            *) echo "::error::rama sin canal: $GITHUB_REF_NAME"; exit 1 ;;
+          esac
+          version=$(bash scripts/crate_version.sh "$channel")
+          echo "channel=$channel" >> "$GITHUB_OUTPUT"
+          echo "moving=$moving" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          if [[ -z "$version" ]]; then
+            echo "Nada nuevo desde el último release estable: no se publica."
+          else
+            echo "Publicando $version ($channel)"
+          fi
+
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        if: steps.version.outputs.version != ''
+
+      - name: Rust checks
+        if: steps.version.outputs.version != ''
+        run: |
+          cargo fmt -- --check
+          cargo clippy -- -D warnings
+          cargo test
+
+      - name: Package crate
+        if: steps.version.outputs.version != ''
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          # Solo la primera línea `version =` es la del [package].
+          sed -i "0,/^version = \".*\"/s//version = \"$VERSION\"/" "$CRATE_DIR/Cargo.toml"
+          grep -m1 '^version' "$CRATE_DIR/Cargo.toml"
+          cargo package -p colmena_dag_engine --no-verify --allow-dirty
+          mkdir -p out
+          cp "target/package/colmena_dag_engine-$VERSION.crate" out/
+          # ADP genera allowlists desde este schema, que vive fuera del crate.
+          cp docs/node_configurations.json out/
+
+      - uses: oras-project/setup-oras@v1
+        if: steps.version.outputs.version != ''
+        with:
+          version: 1.2.0
+
+      - name: Push to GitHub Packages
+        if: steps.version.outputs.version != ''
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          MOVING: ${{ steps.version.outputs.moving }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        working-directory: out
+        run: |
+          echo "$GH_TOKEN" | oras login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          # `image.source` liga el paquete a este repo: hereda su visibilidad
+          # (privado) y sus permisos.
+          oras push "$PACKAGE:$VERSION" \
+            --artifact-type application/vnd.startti.colmena.crate.v1 \
+            --annotation "org.opencontainers.image.source=https://github.com/${GITHUB_REPOSITORY}" \
+            --annotation "org.opencontainers.image.version=$VERSION" \
+            --annotation "org.opencontainers.image.revision=$GITHUB_SHA" \
+            "colmena_dag_engine-$VERSION.crate:application/vnd.rust.crate" \
+            "node_configurations.json:application/json"
+          oras tag "$PACKAGE:$VERSION" "$MOVING"
+
+      - name: Tag
+        if: steps.version.outputs.version != ''
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git config user.name "github-actions[bot]"
+          git tag -a "colmena_dag_engine-v$VERSION" -m "colmena_dag_engine $VERSION" "$GITHUB_SHA"
+          git push origin "colmena_dag_engine-v$VERSION"
+
+      - name: GitHub Release
+        if: steps.version.outputs.version != '' && steps.version.outputs.channel == 'stable'
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "colmena_dag_engine-v$VERSION" \
+            --title "colmena_dag_engine $VERSION" \
+            --generate-notes \
+            "out/colmena_dag_engine-$VERSION.crate"
+
+      # Le avisa a ADP, que abre (o actualiza) la PR que sube el pin en su
+      # develop: .github/workflows/colmena-bump.yml de Startti/adp. Secreto
+      # ADP_DISPATCH_TOKEN: token con contents:write sobre Startti/adp (lo pide
+      # el endpoint de dispatches). Sin el secreto, no avisa y el bump es a mano.
+      - name: Notify ADP
+        if: steps.version.outputs.version != ''
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          CHANNEL: ${{ steps.version.outputs.channel }}
+          GH_TOKEN: ${{ secrets.ADP_DISPATCH_TOKEN }}
+        run: |
+          if [[ -z "$GH_TOKEN" ]]; then
+            echo "::warning::sin ADP_DISPATCH_TOKEN: ADP no se entera de $VERSION; bump a mano (colmena-bump.yml)"
+            exit 0
+          fi
+          gh api repos/Startti/adp/dispatches \
+            -f event_type=colmena-published \
+            -F "client_payload[version]=$VERSION" \
+            -F "client_payload[channel]=$CHANNEL"
+
+      - name: Summary
+        if: steps.version.outputs.version != ''
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          {
+            echo "### colmena_dag_engine $VERSION"
+            echo
+            echo "- Paquete: \`$PACKAGE:$VERSION\`"
+            echo "- En ADP (\`apps/service/ia/platform/{api,worker}/Cargo.toml\`):"
+            echo "  \`version = \"=$VERSION\"\`"
+          } >> "$GITHUB_STEP_SUMMARY"
