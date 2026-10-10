@@ -460,7 +460,10 @@ El nodo LLM siempre retorna un JSON con la siguiente estructura:
 - `block_reason` — Gemini `promptFeedback.blockReason`: el proveedor rechazó el prompt mismo.
 - **Respuesta vacía de Gemini.** Sin texto y sin llamadas a tools, `result` es
   `[Empty response - finish_reason: <X>]` (o `[Empty response - block_reason: <X>]`; con `MAX_TOKENS`, el aviso de
-  subir `max_tokens`), igual en `call` y en `stream`.
+  subir `max_tokens`), igual en `call` y en `stream`. Un `MALFORMED_FUNCTION_CALL` vacío (sin texto, sin llamada,
+  0 tokens de salida y, en `stream`, sin ningún pensamiento ya emitido) primero se reenvía, con la misma política
+  que un estado transitorio ([18_troubleshooting.md](18_troubleshooting.md)); el marcador queda solo si se agotan
+  los reenvíos.
 
 #### `extra_info.all_tasks`
 - **Tipo:** `array<object>`

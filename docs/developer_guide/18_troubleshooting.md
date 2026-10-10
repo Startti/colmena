@@ -451,6 +451,19 @@ menos, o si no un backoff exponencial con jitter (base 1 s, tope 8 s); con un
 haber llegado). La decisión lee solo el status y los headers, antes del cuerpo:
 un `stream` que ya empezó a emitir nunca se vuelve a pedir.
 
+Gemini, además, reenvía una respuesta 200 con `finish_reason:
+MALFORMED_FUNCTION_CALL` que no trae nada: sin texto, sin llamada a tool y con 0
+tokens de salida. Pasa sobre todo cuando el modelo tiene que llamar a una tool
+con un argumento largo (un HTML entero, un contrato) y suele salir bien al
+segundo intento. Usa el mismo tope (`COLMENA_LLM_TRANSIENT_RETRIES`) y el mismo
+backoff, aparte de los reenvíos por estado (cada reenvío vuelve a pasar por
+ellos), y deja un `warn` de `colmena::llm` por reenvío. En `stream` se reenvía
+solo si al cliente no le llegó nada visible: ni texto, ni una llamada, ni un
+pensamiento; el `Usage` sí sale, y el de los intentos descartados se suma al del
+siguiente, así que la última parte `Usage` sigue siendo el total cobrado. Si se
+agotan los reenvíos, `result` es `[Empty response - finish_reason:
+MALFORMED_FUNCTION_CALL]`, como antes.
+
 ### Error: "Invalid API key"
 
 **Síntomas:**
